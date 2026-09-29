@@ -72,19 +72,27 @@ static bool hasAudioExtension(const String &name) {
            lower.endsWith(".aac");
 }
 
-// Recursively searches for the first playable audio file on the card, so
-// bring-up doesn't depend on a particular library layout being present yet.
-static bool findFirstAudioFile(File dir, String &outPath) {
+// Recursively searches for the first playable, actually-openable audio file
+// on the card, so bring-up doesn't depend on a particular library layout
+// being present yet. entry.name() only ever returns the bare filename (not
+// the path from root), so the caller-supplied dirPath has to be threaded
+// through the recursion to build a real absolute path for nested files --
+// almost everything on a real library is Artist/Album/track.flac, not
+// sitting at the root. Candidates are also verified with SD.exists() before
+// being accepted: a file can be listed but still fail to open by that exact
+// path (e.g. non-ASCII punctuation in the name that doesn't round-trip
+// through the filesystem the same way twice) -- better to skip to the next
+// track than hand the audio library a path we already know won't resolve.
+static bool findFirstAudioFile(File dir, const String &dirPath, String &outPath) {
     while (File entry = dir.openNextFile()) {
-        String path = String(entry.name());
-        if (!path.startsWith("/")) path = "/" + path;
+        String path = dirPath + "/" + entry.name();
 
         if (entry.isDirectory()) {
-            bool found = findFirstAudioFile(entry, outPath);
+            bool found = findFirstAudioFile(entry, path, outPath);
             entry.close();
             if (found) return true;
         } else {
-            if (hasAudioExtension(path)) {
+            if (hasAudioExtension(path) && SD.exists(path)) {
                 outPath = path;
                 entry.close();
                 return true;
@@ -115,7 +123,7 @@ void setup() {
     if (sdOk) {
         String trackPath;
         File root = SD.open("/");
-        bool found = findFirstAudioFile(root, trackPath);
+        bool found = findFirstAudioFile(root, "", trackPath);
         root.close();
 
         if (found) {
