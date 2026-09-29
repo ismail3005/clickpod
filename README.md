@@ -25,9 +25,17 @@ Following the bring-up order from spec section 4:
       pinned to `3.0.12` (default branch needs C++20 `std::span`, not
       available on this platform's GCC 8.4 toolchain). Volume deliberately
       left at 10/21 for now during testing.
-- [ ] 4. ILI9341 display alongside SD on shared SPI bus
+- [x] 4. ILI9341 display alongside SD on shared SPI bus — hardware-confirmed,
+      shares the SPI bus with the SD card cleanly. `TFT_eSPI` config is set
+      via `platformio.ini` build flags rather than editing the library's
+      `User_Setup.h`.
 - [ ] 5. ESP32-A2DP Bluetooth output as a separate playback path
-- [ ] 6. ANO encoder + buttons
+- [ ] 6. ANO encoder + buttons — code written (interrupt-driven quadrature
+      decode, tap/double-tap/long-press state machine for CENTER per spec
+      5.3), awaiting hardware test. Done ahead of step 5 since the wiring
+      was already in hand; no dependency between the two. Board has no
+      onboard pull-ups, so all 7 signal lines (encoder A/B + 5 buttons)
+      need external 10k pull-ups to 3.3V.
 - [ ] 7. MAX17048 battery monitoring
 
 Open technical risk to validate early (spec section 10): how deep
@@ -49,11 +57,12 @@ Board: ESP32-WROVER-B (N4), 4MB flash / 4MB PSRAM.
 ## Layout
 
 ```
-platformio.ini      PlatformIO project + dependency config
-src/main.cpp         entry point; currently implements bring-up steps 1-3
-src/config/Pins.h    pin assignments (placeholders — confirm against wiring)
-src/state/AppState.h UI mode enum (MENU, NOW_PLAYING, BT_PAIRING, ...)
-docs/SPEC.md         full project specification
+platformio.ini       PlatformIO project + dependency config
+src/main.cpp          entry point; currently implements bring-up steps 1-4, 6
+src/config/Pins.h     pin assignments, cross-checked against the WROVER-B datasheet
+src/state/AppState.h  UI mode enum (MENU, NOW_PLAYING, BT_PAIRING, ...)
+src/input/AnoInput.*  ANO encoder + button input logic (step 6)
+docs/SPEC.md          full project specification
 ```
 
 Subsystem modules (audio/, ui/, input/, bt/, power/, storage/) get added as

@@ -5,6 +5,7 @@
 #include <TFT_eSPI.h>
 
 #include "config/Pins.h"
+#include "input/AnoInput.h"
 #include "state/AppState.h"
 
 // Bring-up sequence (docs/SPEC.md section 4):
@@ -13,11 +14,14 @@
 //   3. ESP32 + PCM5102 playback via ESP32-audioI2S [this file]
 //   4. ILI9341 display alongside SD on shared SPI bus [this file]
 //   5. ESP32-A2DP Bluetooth output as a separate playback path
-//   6. ANO encoder + buttons
+//   6. ANO encoder + buttons                 [this file, done ahead of step 5]
 //   7. MAX17048 battery monitoring
 //
-// This file currently implements steps 1-4 only. Later steps get their own
-// modules under src/ (ui/, input/, bt/, power/) as they're brought up.
+// This step (6) only wires up and reports raw input events (tap, long
+// press, double tap, encoder rotation) to prove the encoder + 5 buttons
+// are correctly wired and debounced -- deciding what each event means in
+// a given UI mode is menu/screen code that doesn't exist yet (spec
+// section 6). See src/input/AnoInput.h/.cpp for the actual input logic.
 //
 // TFT_eSPI's pin/driver config lives in platformio.ini's build_flags (not
 // the library's User_Setup.h, which would get clobbered on reinstall).
@@ -74,6 +78,42 @@ static void initDisplay() {
     Serial.println(F("[bringup] Display initialized."));
 }
 
+static const char *buttonName(AnoButton button) {
+    switch (button) {
+        case AnoButton::UP: return "UP";
+        case AnoButton::DOWN: return "DOWN";
+        case AnoButton::LEFT: return "LEFT";
+        case AnoButton::RIGHT: return "RIGHT";
+        case AnoButton::CENTER: return "CENTER";
+        default: return "?";
+    }
+}
+
+// Bring-up step 6 validation: report every raw input event to serial. Not
+// wired to any actual UI action yet -- see AnoInput.h for why.
+static void reportAnoInput() {
+    AnoInput::update();
+
+    int16_t delta = AnoInput::takeEncoderDelta();
+    if (delta != 0) {
+        Serial.printf("[ano] rotate %s (delta %d)\n", delta > 0 ? "CW" : "CCW", delta);
+    }
+
+    for (uint8_t i = 0; i < static_cast<uint8_t>(AnoButton::COUNT); i++) {
+        AnoButton b = static_cast<AnoButton>(i);
+        if (AnoInput::wasTapped(b)) {
+            Serial.printf("[ano] %s tap\n", buttonName(b));
+        }
+        if (AnoInput::wasLongPressed(b)) {
+            Serial.printf("[ano] %s long-press\n", buttonName(b));
+        }
+    }
+
+    if (AnoInput::centerWasDoubleTapped()) {
+        Serial.println(F("[ano] CENTER double-tap"));
+    }
+}
+
 static bool hasAudioExtension(const String &name) {
     String lower = name;
     lower.toLowerCase();
@@ -120,6 +160,7 @@ void setup() {
 
     verifyPsram();
     initDisplay();
+    AnoInput::begin();
 
     bool sdOk = initSd();
 
@@ -149,6 +190,7 @@ void setup() {
 
 void loop() {
     audio.loop();
+    reportAnoInput();
 }
 
 // ESP32-audioI2S optional callbacks -- useful during bring-up to see what
