@@ -2,6 +2,7 @@
 #include <Audio.h>
 #include <SD.h>
 #include <SPI.h>
+#include <TFT_eSPI.h>
 
 #include "config/Pins.h"
 #include "state/AppState.h"
@@ -10,16 +11,20 @@
 //   1. ESP32 + PSRAM verification            [this file]
 //   2. ESP32 + SD card file listing over serial [this file]
 //   3. ESP32 + PCM5102 playback via ESP32-audioI2S [this file]
-//   4. ILI9341 display alongside SD on shared SPI bus
+//   4. ILI9341 display alongside SD on shared SPI bus [this file]
 //   5. ESP32-A2DP Bluetooth output as a separate playback path
 //   6. ANO encoder + buttons
 //   7. MAX17048 battery monitoring
 //
-// This file currently implements steps 1-3 only. Later steps get their own
+// This file currently implements steps 1-4 only. Later steps get their own
 // modules under src/ (ui/, input/, bt/, power/) as they're brought up.
+//
+// TFT_eSPI's pin/driver config lives in platformio.ini's build_flags (not
+// the library's User_Setup.h, which would get clobbered on reinstall).
 
 static AppMode appMode = AppMode::BOOT;
 static Audio audio;
+static TFT_eSPI tft = TFT_eSPI();
 
 static void verifyPsram() {
     Serial.println(F("[bringup] Checking PSRAM..."));
@@ -49,6 +54,24 @@ static bool initSd() {
     uint64_t cardSizeMB = SD.cardSize() / (1024 * 1024);
     Serial.printf("[bringup] SD OK: %llu MB\n", cardSizeMB);
     return true;
+}
+
+// TFT_eSPI opens its own SPI transaction per call, so it coexists fine with
+// SD sharing the same physical bus as long as each uses its own CS pin --
+// nothing else to coordinate here, no shared SPI.begin() bookkeeping needed.
+static void initDisplay() {
+    Serial.println(F("[bringup] Initializing display..."));
+    tft.init();
+    tft.setRotation(1); // landscape; revisit once the enclosure/UI layout is set
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(10, 10);
+    tft.println("clickpod");
+    tft.setTextSize(1);
+    tft.setCursor(10, 40);
+    tft.println("bring-up step 4: display OK");
+    Serial.println(F("[bringup] Display initialized."));
 }
 
 static void listDir(File dir, uint8_t depth) {
@@ -109,6 +132,7 @@ void setup() {
     Serial.println(F("\n=== DIY iPod-Classic MP3 Player - bring-up build ==="));
 
     verifyPsram();
+    initDisplay();
 
     bool sdOk = initSd();
     if (sdOk) {
@@ -132,6 +156,9 @@ void setup() {
             audio.setVolume(10); // 0-21; start low, raise once confirmed working
             audio.connecttoFS(SD, trackPath.c_str());
             appMode = AppMode::NOW_PLAYING;
+
+            tft.setCursor(10, 60);
+            tft.println(trackPath);
         } else {
             Serial.println(F("[bringup] No .flac/.mp3/.wav/.m4a/.aac file found on the "
                               "card -- copy a test track over to exercise I2S playback."));
