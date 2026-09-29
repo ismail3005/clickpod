@@ -164,6 +164,14 @@ void setup() {
 
     bool sdOk = initSd();
 
+    // TEMP diagnostic: the old directory listing (removed a few commits back)
+    // used to add several seconds of SPI/serial activity before playback
+    // started. Testing whether that delay was accidentally masking a
+    // settling-time issue -- if audio comes back with this here, it's a
+    // timing bug, not the ANO wiring.
+    Serial.println(F("[diag] delaying 3s before playback..."));
+    delay(3000);
+
     appMode = AppMode::MENU;
 
     if (sdOk) {
