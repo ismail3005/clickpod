@@ -160,7 +160,7 @@ void setup() {
 
     verifyPsram();
     initDisplay();
-    AnoInput::begin();
+    // AnoInput::begin(); // TEMP disabled to isolate an audio-silence bug -- see if audio comes back without it
 
     bool sdOk = initSd();
 
@@ -190,7 +190,7 @@ void setup() {
 
 void loop() {
     audio.loop();
-    reportAnoInput();
+    // reportAnoInput(); // TEMP disabled alongside AnoInput::begin() above
 }
 
 // ESP32-audioI2S optional callbacks -- useful during bring-up to see what
