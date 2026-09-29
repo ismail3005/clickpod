@@ -160,17 +160,9 @@ void setup() {
 
     verifyPsram();
     initDisplay();
-    // AnoInput::begin(); // TEMP disabled to isolate an audio-silence bug -- see if audio comes back without it
+    AnoInput::begin();
 
     bool sdOk = initSd();
-
-    // TEMP diagnostic: the old directory listing (removed a few commits back)
-    // used to add several seconds of SPI/serial activity before playback
-    // started. Testing whether that delay was accidentally masking a
-    // settling-time issue -- if audio comes back with this here, it's a
-    // timing bug, not the ANO wiring.
-    Serial.println(F("[diag] delaying 3s before playback..."));
-    delay(3000);
 
     appMode = AppMode::MENU;
 
@@ -198,18 +190,7 @@ void setup() {
 
 void loop() {
     audio.loop();
-    // reportAnoInput(); // TEMP disabled alongside AnoInput::begin() above
-
-    // TEMP diagnostic: prove loop() (and therefore audio.loop()) is still
-    // actually running, vs. hung somewhere inside the decoder/library --
-    // audio_info() alone can't tell us that, since it only fires on real
-    // events (start/error/EOF), not continuously during normal playback.
-    static uint32_t lastHeartbeat = 0;
-    if (millis() - lastHeartbeat >= 2000) {
-        lastHeartbeat = millis();
-        Serial.printf("[diag] heartbeat, uptime %lus, isRunning=%d\n",
-                      millis() / 1000, audio.isRunning());
-    }
+    reportAnoInput();
 }
 
 // ESP32-audioI2S optional callbacks -- useful during bring-up to see what
