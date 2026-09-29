@@ -47,12 +47,16 @@
 #define PIN_I2C_SCL   27
 
 // Adafruit ANO rotary navigation encoder
+// UP/RIGHT/CENTER/LEFT below were reassigned to match the actual physical
+// wiring order (confirmed by testing each button and observing which GPIO
+// fired) -- doesn't matter which SWn pad on the board maps to which
+// direction, only that the constant here matches what's physically wired.
 #define PIN_ANO_ENC_A      32
 #define PIN_ANO_ENC_B      33
-#define PIN_ANO_BTN_UP     13
+#define PIN_ANO_BTN_UP     39   // input-only, no internal pull — needs external/onboard pull resistor
 #define PIN_ANO_BTN_DOWN   35   // input-only pin, fine for a button; moved off GPIO12 (boot-voltage strap risk)
-#define PIN_ANO_BTN_LEFT   14
-#define PIN_ANO_BTN_RIGHT  39   // input-only, no internal pull — needs external/onboard pull resistor
-#define PIN_ANO_BTN_CENTER 34   // input-only; must be a valid ext0 deep-sleep wake source (RTC GPIO)
+#define PIN_ANO_BTN_LEFT   34   // input-only; also RTC-capable (fine if ever needed for wake)
+#define PIN_ANO_BTN_RIGHT  14
+#define PIN_ANO_BTN_CENTER 13   // must be a valid ext0 deep-sleep wake source -- GPIO13 is RTC-capable, OK
 
 // Spare, unused for now: GPIO36 (input-only; candidate for a MAX17048 ALERT line later)
