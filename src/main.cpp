@@ -43,7 +43,11 @@ static void verifyPsram() {
 static bool initSd() {
     Serial.println(F("[bringup] Initializing SD card..."));
     SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SD_CS);
-    if (!SD.begin(PIN_SD_CS)) {
+    // TEMP diagnostic: dropped from the 4MHz default to 400kHz (classic
+    // "safe" SD init speed) to test whether the fresh wiring has signal
+    // integrity issues at higher SPI speed -- restore to plain
+    // SD.begin(PIN_SD_CS) if this doesn't change anything.
+    if (!SD.begin(PIN_SD_CS, SPI, 400000)) {
         Serial.println(F("[bringup] FAIL: SD.begin() failed. Check wiring/CS pin and "
                           "that the card is FAT32-formatted."));
         return false;
