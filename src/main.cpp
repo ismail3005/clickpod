@@ -9,7 +9,7 @@
 
 // Bring-up sequence (docs/SPEC.md section 4):
 //   1. ESP32 + PSRAM verification            [this file]
-//   2. ESP32 + SD card file listing over serial [this file]
+//   2. ESP32 + SD card init                  [this file]
 //   3. ESP32 + PCM5102 playback via ESP32-audioI2S [this file]
 //   4. ILI9341 display alongside SD on shared SPI bus [this file]
 //   5. ESP32-A2DP Bluetooth output as a separate playback path
@@ -74,19 +74,6 @@ static void initDisplay() {
     Serial.println(F("[bringup] Display initialized."));
 }
 
-static void listDir(File dir, uint8_t depth) {
-    while (File entry = dir.openNextFile()) {
-        for (uint8_t i = 0; i < depth; i++) Serial.print("  ");
-        if (entry.isDirectory()) {
-            Serial.printf("[DIR]  %s\n", entry.name());
-            listDir(entry, depth + 1);
-        } else {
-            Serial.printf("       %s (%u bytes)\n", entry.name(), entry.size());
-        }
-        entry.close();
-    }
-}
-
 static bool hasAudioExtension(const String &name) {
     String lower = name;
     lower.toLowerCase();
@@ -135,12 +122,6 @@ void setup() {
     initDisplay();
 
     bool sdOk = initSd();
-    if (sdOk) {
-        Serial.println(F("[bringup] SD contents:"));
-        File root = SD.open("/");
-        listDir(root, 0);
-        root.close();
-    }
 
     appMode = AppMode::MENU;
 
