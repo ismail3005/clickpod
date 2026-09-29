@@ -54,7 +54,13 @@ static bool initSd() {
     Serial.println(F("[bringup] Initializing SD card..."));
     Serial.println(F("[diag] using alternate pins: SCK=32 MISO=33 MOSI=14 CS=13"));
     SPI.begin(kDiagSdSck, kDiagSdMiso, kDiagSdMosi, kDiagSdCs);
-    if (!SD.begin(kDiagSdCs, SPI, 400000)) {
+    // Back to the 4MHz default -- the 400kHz used earlier was only to test
+    // signal integrity on the old (bad) pins. Mount now succeeds reliably
+    // on these pins even at higher speed; leaving it at 400kHz was almost
+    // certainly what caused the "audioHeader reading timeout" during
+    // playback -- a large sustained read takes ~10x longer at 400kHz,
+    // likely exceeding the audio library's internal read timeout.
+    if (!SD.begin(kDiagSdCs, SPI, 4000000)) {
         Serial.println(F("[bringup] FAIL: SD.begin() failed. Check wiring/CS pin and "
                           "that the card is FAT32-formatted."));
         return false;
