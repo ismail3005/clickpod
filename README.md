@@ -14,22 +14,20 @@ mapping, and UI behavior; this README just tracks build status.
 Following the bring-up order from spec section 4:
 
 - [x] 1. ESP32 + PSRAM verification — hardware-confirmed (4194304 bytes)
-- [x] 2. ESP32 + SD card init — hardware-confirmed on the current full
-      rebuild (see note below). Card **must be formatted FAT32**, not
-      exFAT/NTFS — large SanDisk cards ship exFAT by default, which the
+- [x] 2. ESP32 + SD card init — hardware-confirmed on the rebuilt board,
+      real pin assignment (18/19/23/15). Card **must be formatted FAT32**,
+      not exFAT/NTFS — large SanDisk cards ship exFAT by default, which the
       Arduino `SD` library can't mount. Windows' built-in formatter caps
       FAT32 at 32GB; use Rufus (or similar) to force FAT32 on larger cards.
-      **Hardware note:** the SD breakout module in use appears to be low
-      quality and intermittently unreliable (CRC errors, failed mount
-      handshakes) independent of wiring/pins -- worth replacing with a
-      better module. Not a wiring or firmware issue.
-- [ ] 3. ESP32 + PCM5102A playback via `ESP32-audioI2S` (highest-risk step)
-      — previously hardware-confirmed, but the whole board was torn down
-      and rebuilt from scratch after extended debugging (see git history
-      on this file's era for the full saga); DAC isn't wired back in yet,
-      needs hardware retest once it is. `ESP32-audioI2S` is pinned to
-      `3.0.12` (default branch needs C++20 `std::span`, not available on
-      this platform's GCC 8.4 toolchain).
+      **Hardware note:** the SD breakout module in use had appeared low
+      quality/intermittently unreliable during earlier debugging (CRC
+      errors, failed mount handshakes) independent of wiring/pins -- turned
+      out fine on the rebuild. Keep an eye on it; swap the module if
+      flakiness reappears.
+- [x] 3. ESP32 + PCM5102A playback via `ESP32-audioI2S` (highest-risk step)
+      — hardware-confirmed on the rebuilt board, real audio out of the DAC.
+      `ESP32-audioI2S` is pinned to `3.0.12` (default branch needs C++20
+      `std::span`, not available on this platform's GCC 8.4 toolchain).
 - [ ] 4. ILI9341 display alongside SD on shared SPI bus — previously
       hardware-confirmed, not yet wired back in after the full rebuild.
       `TFT_eSPI` config is set via `platformio.ini` build flags rather than
