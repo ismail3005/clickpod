@@ -159,8 +159,13 @@ void setup() {
     Serial.println(F("\n=== DIY iPod-Classic MP3 Player - bring-up build ==="));
 
     verifyPsram();
-    initDisplay();
-    AnoInput::begin();
+    // TEMP: display + ANO physically disconnected to test whether the
+    // devkit's onboard 3.3V regulator is running out of headroom with
+    // everything attached at once -- see if DAC silence / SD flakiness
+    // clear up with just SD+DAC on the 3.3V rail, like when this last
+    // definitively worked. Re-enable both once this test is done.
+    // initDisplay();
+    // AnoInput::begin();
 
     bool sdOk = initSd();
 
@@ -179,8 +184,8 @@ void setup() {
             audio.connecttoFS(SD, trackPath.c_str());
             appMode = AppMode::NOW_PLAYING;
 
-            tft.setCursor(10, 60);
-            tft.println(trackPath);
+            // tft.setCursor(10, 60); // TEMP: display disconnected, skip touching it
+            // tft.println(trackPath);
         } else {
             Serial.println(F("[bringup] No .flac/.mp3/.wav/.m4a/.aac file found on the "
                               "card -- copy a test track over to exercise I2S playback."));
@@ -190,7 +195,7 @@ void setup() {
 
 void loop() {
     audio.loop();
-    reportAnoInput();
+    // reportAnoInput(); // TEMP disabled alongside AnoInput::begin() above
 }
 
 // ESP32-audioI2S optional callbacks -- useful during bring-up to see what
