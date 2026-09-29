@@ -199,6 +199,17 @@ void setup() {
 void loop() {
     audio.loop();
     // reportAnoInput(); // TEMP disabled alongside AnoInput::begin() above
+
+    // TEMP diagnostic: prove loop() (and therefore audio.loop()) is still
+    // actually running, vs. hung somewhere inside the decoder/library --
+    // audio_info() alone can't tell us that, since it only fires on real
+    // events (start/error/EOF), not continuously during normal playback.
+    static uint32_t lastHeartbeat = 0;
+    if (millis() - lastHeartbeat >= 2000) {
+        lastHeartbeat = millis();
+        Serial.printf("[diag] heartbeat, uptime %lus, isRunning=%d\n",
+                      millis() / 1000, audio.isRunning());
+    }
 }
 
 // ESP32-audioI2S optional callbacks -- useful during bring-up to see what
