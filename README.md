@@ -20,11 +20,11 @@ Following the bring-up order from spec section 4:
       default, which the Arduino `SD` library can't mount. Windows' built-in
       formatter caps FAT32 at 32GB; use Rufus (or similar) to force FAT32 on
       larger cards.
-- [ ] 3. ESP32 + PCM5102A playback via `ESP32-audioI2S` (highest-risk step —
-      isolate before adding anything else) — code written, awaiting
-      hardware test. Recursively finds the first playable audio file on the
-      card and streams it over I2S; needs an actual track copied onto the
-      card first (it currently only has Windows format junk on it).
+- [x] 3. ESP32 + PCM5102A playback via `ESP32-audioI2S` (highest-risk step)
+      — hardware-confirmed, real audio out of the DAC. `ESP32-audioI2S` is
+      pinned to `3.0.12` (default branch needs C++20 `std::span`, not
+      available on this platform's GCC 8.4 toolchain). Volume deliberately
+      left at 10/21 for now during testing.
 - [ ] 4. ILI9341 display alongside SD on shared SPI bus
 - [ ] 5. ESP32-A2DP Bluetooth output as a separate playback path
 - [ ] 6. ANO encoder + buttons
@@ -50,7 +50,7 @@ Board: ESP32-WROVER-B (N4), 4MB flash / 4MB PSRAM.
 
 ```
 platformio.ini      PlatformIO project + dependency config
-src/main.cpp         entry point; currently implements bring-up steps 1-2
+src/main.cpp         entry point; currently implements bring-up steps 1-3
 src/config/Pins.h    pin assignments (placeholders — confirm against wiring)
 src/state/AppState.h UI mode enum (MENU, NOW_PLAYING, BT_PAIRING, ...)
 docs/SPEC.md         full project specification
