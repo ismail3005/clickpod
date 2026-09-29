@@ -13,8 +13,13 @@ mapping, and UI behavior; this README just tracks build status.
 
 Following the bring-up order from spec section 4:
 
-- [x] 1. ESP32 + PSRAM verification
-- [x] 2. ESP32 + SD card file listing over serial
+- [x] 1. ESP32 + PSRAM verification — hardware-confirmed (4194304 bytes)
+- [x] 2. ESP32 + SD card file listing over serial — hardware-confirmed
+      (122GB card mounted, file listing works). Note: the card **must be
+      formatted FAT32**, not exFAT/NTFS — large SanDisk cards ship exFAT by
+      default, which the Arduino `SD` library can't mount. Windows' built-in
+      formatter caps FAT32 at 32GB; use Rufus (or similar) to force FAT32 on
+      larger cards.
 - [ ] 3. ESP32 + PCM5102A playback via `ESP32-audioI2S` (highest-risk step —
       isolate before adding anything else)
 - [ ] 4. ILI9341 display alongside SD on shared SPI bus
