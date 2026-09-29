@@ -21,7 +21,10 @@ Following the bring-up order from spec section 4:
       formatter caps FAT32 at 32GB; use Rufus (or similar) to force FAT32 on
       larger cards.
 - [ ] 3. ESP32 + PCM5102A playback via `ESP32-audioI2S` (highest-risk step —
-      isolate before adding anything else)
+      isolate before adding anything else) — code written, awaiting
+      hardware test. Recursively finds the first playable audio file on the
+      card and streams it over I2S; needs an actual track copied onto the
+      card first (it currently only has Windows format junk on it).
 - [ ] 4. ILI9341 display alongside SD on shared SPI bus
 - [ ] 5. ESP32-A2DP Bluetooth output as a separate playback path
 - [ ] 6. ANO encoder + buttons

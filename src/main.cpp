@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Audio.h>
 #include <SD.h>
 #include <SPI.h>
 
@@ -8,16 +9,17 @@
 // Bring-up sequence (docs/SPEC.md section 4):
 //   1. ESP32 + PSRAM verification            [this file]
 //   2. ESP32 + SD card file listing over serial [this file]
-//   3. ESP32 + PCM5102 playback via ESP32-audioI2S
+//   3. ESP32 + PCM5102 playback via ESP32-audioI2S [this file]
 //   4. ILI9341 display alongside SD on shared SPI bus
 //   5. ESP32-A2DP Bluetooth output as a separate playback path
 //   6. ANO encoder + buttons
 //   7. MAX17048 battery monitoring
 //
-// This file currently implements steps 1-2 only. Later steps get their own
-// modules under src/ (audio/, ui/, input/, bt/, power/) as they're brought up.
+// This file currently implements steps 1-3 only. Later steps get their own
+// modules under src/ (ui/, input/, bt/, power/) as they're brought up.
 
 static AppMode appMode = AppMode::BOOT;
+static Audio audio;
 
 static void verifyPsram() {
     Serial.println(F("[bringup] Checking PSRAM..."));
@@ -62,6 +64,37 @@ static void listDir(File dir, uint8_t depth) {
     }
 }
 
+static bool hasAudioExtension(const String &name) {
+    String lower = name;
+    lower.toLowerCase();
+    return lower.endsWith(".flac") || lower.endsWith(".mp3") ||
+           lower.endsWith(".wav") || lower.endsWith(".m4a") ||
+           lower.endsWith(".aac");
+}
+
+// Recursively searches for the first playable audio file on the card, so
+// bring-up doesn't depend on a particular library layout being present yet.
+static bool findFirstAudioFile(File dir, String &outPath) {
+    while (File entry = dir.openNextFile()) {
+        String path = String(entry.name());
+        if (!path.startsWith("/")) path = "/" + path;
+
+        if (entry.isDirectory()) {
+            bool found = findFirstAudioFile(entry, outPath);
+            entry.close();
+            if (found) return true;
+        } else {
+            if (hasAudioExtension(path)) {
+                outPath = path;
+                entry.close();
+                return true;
+            }
+            entry.close();
+        }
+    }
+    return false;
+}
+
 void setup() {
     Serial.begin(115200);
     delay(500);
@@ -69,7 +102,8 @@ void setup() {
 
     verifyPsram();
 
-    if (initSd()) {
+    bool sdOk = initSd();
+    if (sdOk) {
         Serial.println(F("[bringup] SD contents:"));
         File root = SD.open("/");
         listDir(root, 0);
@@ -77,11 +111,40 @@ void setup() {
     }
 
     appMode = AppMode::MENU;
-    Serial.println(F("[bringup] Steps 1-2 complete. Next: wire PCM5102A and bring up "
-                      "ESP32-audioI2S playback (step 3)."));
+
+    if (sdOk) {
+        String trackPath;
+        File root = SD.open("/");
+        bool found = findFirstAudioFile(root, trackPath);
+        root.close();
+
+        if (found) {
+            Serial.printf("[bringup] Playing first audio file found: %s\n", trackPath.c_str());
+            audio.setPinout(PIN_I2S_BCLK, PIN_I2S_LRC, PIN_I2S_DOUT);
+            audio.setVolume(10); // 0-21; start low, raise once confirmed working
+            audio.connecttoFS(SD, trackPath.c_str());
+            appMode = AppMode::NOW_PLAYING;
+        } else {
+            Serial.println(F("[bringup] No .flac/.mp3/.wav/.m4a/.aac file found on the "
+                              "card -- copy a test track over to exercise I2S playback."));
+        }
+    }
 }
 
 void loop() {
-    // Nothing yet — playback, display, input, BT, and battery monitoring
-    // are added in subsequent bring-up steps.
+    audio.loop();
+}
+
+// ESP32-audioI2S optional callbacks -- useful during bring-up to see what
+// the library actually parsed out of the file.
+void audio_info(const char *info) {
+    Serial.printf("[audio] info: %s\n", info);
+}
+
+void audio_id3data(const char *info) {
+    Serial.printf("[audio] id3/metadata: %s\n", info);
+}
+
+void audio_eof_mp3(const char *info) {
+    Serial.printf("[audio] end of file: %s\n", info);
 }
