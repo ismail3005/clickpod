@@ -40,14 +40,21 @@ static void verifyPsram() {
     }
 }
 
+// TEMP diagnostic pins: display/ANO are unplugged right now, so their
+// GPIOs are free to borrow. Testing SD on a completely different set of 4
+// pins than PIN_SPI_*/PIN_SD_CS -- if it works here, pins 18/19/23/15
+// specifically have gone bad; if it fails identically, the SD module
+// itself is the problem, independent of any pin/wiring question.
+constexpr uint8_t kDiagSdSck = 32;
+constexpr uint8_t kDiagSdMiso = 33;
+constexpr uint8_t kDiagSdMosi = 14;
+constexpr uint8_t kDiagSdCs = 13;
+
 static bool initSd() {
     Serial.println(F("[bringup] Initializing SD card..."));
-    SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SD_CS);
-    // TEMP diagnostic: dropped from the 4MHz default to 400kHz (classic
-    // "safe" SD init speed) to test whether the fresh wiring has signal
-    // integrity issues at higher SPI speed -- restore to plain
-    // SD.begin(PIN_SD_CS) if this doesn't change anything.
-    if (!SD.begin(PIN_SD_CS, SPI, 400000)) {
+    Serial.println(F("[diag] using alternate pins: SCK=32 MISO=33 MOSI=14 CS=13"));
+    SPI.begin(kDiagSdSck, kDiagSdMiso, kDiagSdMosi, kDiagSdCs);
+    if (!SD.begin(kDiagSdCs, SPI, 400000)) {
         Serial.println(F("[bringup] FAIL: SD.begin() failed. Check wiring/CS pin and "
                           "that the card is FAT32-formatted."));
         return false;
