@@ -288,6 +288,42 @@ indistinguishable from a crash to whoever's holding the board -- always
 pair a slow first-boot operation with on-screen or serial progress
 output, don't wait until it's reported as "broken" to add it.
 
+**Fourth real hardware bug (found, fixed): `abort()` crash-reboot loop
+opening a real playlist -- an O(n^2) memory bug, not the redraw-speed
+issue it first looked like.** User reported "click a menu item, nothing
+happens, sometimes reboots" -- got the actual serial panic output
+(`abort() was called`, not a hang) before guessing further, which is
+what actually found this. Root cause in `MenuEngine.cpp`'s
+`buildPlaylistList()`: building the per-track row menu for an opened
+playlist did
+```cpp
+std::vector<Track> list = copy.tracks;              // full copy...
+row.action = [list, idx]() { playQueueFrom(list, idx); }; // ...captured PER ROW
+```
+inside the loop that builds one row per track -- for the user's real
+425-track "funky times" playlist, that's a fresh copy of the entire
+425-track vector, once per row, ~180,000 Track copies just to open the
+menu. Guaranteed heap exhaustion -> `abort()`. The exact same pattern
+existed in `buildTrackList()` (album track listing: `LibraryAlbum copy =
+album;` per row) -- much smaller blast radius for a normal album's track
+count, but the same bug, fixed the same way. **Fix**: build the shared
+data ONCE outside the loop as a `std::shared_ptr` (`make_shared<
+std::vector<Track>>` / `make_shared<LibraryAlbum>`), capture the cheap
+pointer per row instead of a fresh copy. `playQueueFrom`/`playAlbumFrom`
+still take their list/album by value, but that copy only happens once,
+at actual play time, not once per menu row at menu-*build* time.
+**Lesson for any future menu-building code with a capturing per-row
+lambda**: capturing a container "just in case the row needs it" is an
+easy way to accidentally put an O(n) copy inside an O(n) loop -- check
+whether anything being captured scales with the number of rows being
+built, and share it via pointer/reference instead of copying it fresh
+per row if so. Also confirmed separately: the user's card scan reported
+"0 albums, 1 playlists" -- the standalone Artist/Album folders they
+expected to also be at SD root (alongside `funky times/`) aren't being
+found by the scan; worth checking the card's actual root layout matches
+what `Library::scanFromSd()` expects (top-level folder ->
+Artist/Album/track.flac) once the crash itself is confirmed fixed.
+
 ## Working style this project has used (carry forward)
 
 - User is terse and direct; they'll correct behavior that doesn't match

@@ -1,5 +1,6 @@
 #include "MenuEngine.h"
 
+#include <memory>
 #include <set>
 #include <utility>
 
@@ -95,6 +96,14 @@ void buildAlbumList(const String &artist) {
 }
 
 void buildTrackList(const LibraryAlbum &album) {
+    // Shared ONCE for the whole album, not copied per row -- capturing a
+    // full LibraryAlbum copy inside this loop (one copy per track) made
+    // opening an N-track album do O(N^2) copying. Harmless for a handful
+    // of tracks, but the same bug in buildPlaylistList() below crashed the
+    // device outright on a real 425-track playlist (425 copies of a
+    // 425-track vector, once per row == ~180k Track copies just to open
+    // the menu). Fixed the same way in both places.
+    auto albumPtr = std::make_shared<LibraryAlbum>(album);
     std::vector<MenuItem> items;
     items.reserve(album.tracks.size());
     for (size_t i = 0; i < album.tracks.size(); i++) {
@@ -104,9 +113,8 @@ void buildTrackList(const LibraryAlbum &album) {
         it.sub = fmtTime(t.durSec);
         it.isTrack = true;
         it.trackData = Track{album.artist, album.album, t.title, t.durSec, album.art, t.path};
-        LibraryAlbum copy = album;
         size_t idx = i;
-        it.action = [copy, idx]() { playAlbumFrom(copy, idx); };
+        it.action = [albumPtr, idx]() { playAlbumFrom(*albumPtr, idx); };
         items.push_back(std::move(it));
     }
     pushMenu(album.album, std::move(items));
@@ -118,22 +126,24 @@ void buildPlaylistList() {
         MenuItem it;
         it.label = p.name;
         it.sub = String((int)p.tracks.size()) + " tracks";
-        Playlist copy = p; // playlist can grow (Add to Playlist); snapshot at menu-open time, like the sim
-        it.action = [copy]() {
+        // Shared ONCE per playlist-open (see buildTrackList's comment for
+        // why this matters -- this was the actual crash).
+        auto tracksPtr = std::make_shared<std::vector<Track>>(p.tracks);
+        String plName = p.name;
+        it.action = [tracksPtr, plName]() {
             std::vector<MenuItem> trackItems;
-            for (size_t i = 0; i < copy.tracks.size(); i++) {
-                const Track &t = copy.tracks[i];
+            for (size_t i = 0; i < tracksPtr->size(); i++) {
+                const Track &t = (*tracksPtr)[i];
                 MenuItem row;
                 row.label = t.title;
                 row.sub = t.artist;
                 row.isTrack = true;
                 row.trackData = t;
-                std::vector<Track> list = copy.tracks;
                 size_t idx = i;
-                row.action = [list, idx]() { playQueueFrom(list, idx); };
+                row.action = [tracksPtr, idx]() { playQueueFrom(*tracksPtr, idx); };
                 trackItems.push_back(std::move(row));
             }
-            pushMenu(copy.name, std::move(trackItems));
+            pushMenu(plName, std::move(trackItems));
         };
         items.push_back(std::move(it));
     }
