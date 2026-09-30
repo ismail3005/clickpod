@@ -99,7 +99,9 @@ src/net/TimeSync.*       WiFi NTP clock, no RTC hardware — background task, se
                          its dedicated section below
 src/net/RadioLock.h      mutex between TimeSync (WiFi) and BluetoothSource (BT) --
                          ESP32's one shared radio, see the crash writeup below
-src/state/Persist.*      NVS-backed settings + Bluetooth-on persistence across reboots
+src/state/Persist.*      NVS-backed settings + Bluetooth-on persistence across reboots,
+                         plus the boot-crash guard that stops a BT-auto-resume crash
+                         from becoming an infinite reboot loop (see seventh bug below)
 src/audio/AudioBridge.*  bridges UI "play this track" intent to real ESP32-audioI2S
                          output — plays the given track's real path, or falls back
                          to the first playable file found for tracks with none
@@ -516,7 +518,7 @@ Brightness row's percentage steps) so the Time zone row can step by
 whole hours instead -- `InputRouter.cpp`'s two `adjustSlider()` call
 sites use `item.sliderStep` instead of a hardcoded `5`.
 
-## Sixth real hardware bug (found, best-effort fixed): WiFi+BT coexistence crash
+## Sixth real hardware bug (found, INCOMPLETE fix -- see seventh bug below): WiFi+BT coexistence crash
 
 User turned Bluetooth on (via the UI) and got a real crash + reboot loop,
 twice in a row: `[bt] Starting Bluetooth A2DP source...` followed
@@ -525,23 +527,17 @@ NULL)` inside Bluedroid. This appeared right after TimeSync's WiFi usage
 was added in the previous round of work -- ESP32's WiFi+BT coexistence
 (one shared radio) is a real, documented source of crashes when both
 subsystems touch the radio around the same time, and the timing
-correlation is the leading explanation here. **Not confirmed via
-reproduction** (no hardware access in this environment) -- if turning
-Bluetooth on still crashes after this fix, this diagnosis was wrong and
-it's worth looking elsewhere (the other log line in the same report,
-`FLAC maxFrameSize too large!`, is a separate, likely-unrelated issue --
-see below).
+correlation was the leading explanation at the time.
 
-Fix: `src/net/RadioLock.h`, a simple mutual-exclusion flag between
-`TimeSync` (WiFi) and `BluetoothSource` (classic BT) -- whichever is
-using the radio holds it for its whole active duration (BT from
-`begin()` to `end()`, not just start/stop; a TimeSync sync attempt for
-one scan+connect+NTP cycle), the other simply skips/defers its own radio
-use rather than risk an overlap. `BluetoothSource::begin()` silently
-declines (logs + returns) if TimeSync currently holds the lock; a
-`TimeSync` sync attempt does the same in reverse. Both sides are
-designed to fail safe (skip, don't crash, retry later) rather than block
-waiting for the lock.
+Fix attempted: `src/net/RadioLock.h`, a simple mutual-exclusion flag
+between `TimeSync` (WiFi) and `BluetoothSource` (classic BT) -- whichever
+is using the radio holds it for its whole active duration, the other
+skips/defers its own radio use rather than risk an overlap.
+
+**This diagnosis was WRONG, or at least incomplete** -- see the seventh
+bug below. Kept in the codebase anyway since a WiFi/BT timing overlap is
+still a real possible crash source in principle and the lock costs
+nothing, but it demonstrably did NOT fix the actual crash the user hit.
 
 **Separately, also logged**: a real FLAC decode failure --
 `read_FLAC_Header(): FLAC maxFrameSize too large!` for a specific file
@@ -552,6 +548,81 @@ exceed whatever fixed buffer it allocates) -- not something fixable from
 application code without patching the library itself, and not attempted
 here. If more files hit this, it's a real constraint of this pinned
 library version to flag back to the user, not a bug in this codebase.
+
+## Seventh real hardware bug (found, best-effort fixed): BT crash was heap exhaustion, not WiFi/BT timing -- AND it bricked the whole device on every boot
+
+After RadioLock shipped, user hit the SAME class of crash again, proving
+RadioLock's diagnosis wrong: the new log showed TimeSync's WiFi cycle
+fully complete and release the lock (`[time] no networks found`) BEFORE
+Bluetooth even started -- they never overlapped, so a timing race can't
+explain it. The assert was also different this time:
+`assert failed: semphr_create_wrapper bt.c:579 (queue_buffer)`, not
+`hash_map_set`. Both are heap-allocation failures deep inside Bluedroid's
+own init path -- and the log right before it showed WiFi ALSO failing to
+allocate its own rx buffers (`Expected to init 4 rx buffer, actual is 2`,
+then `actual is 0`, then `Failed to deinit Wi-Fi driver (0x3001)`) before
+BT ever got a turn. That's the real signature: the device is critically
+low on free internal (non-PSRAM) heap by the time WiFi/BT try to init --
+not a coexistence-timing race.
+
+**Worse, this created a silent full-device bricking loop**: `state.btOn`
+had been persisted `true` from before (the new Persist feature), so
+`main.cpp`'s `setup()` auto-resumes Bluetooth on every boot -- which
+crashed immediately, rebooting the device before it ever reached
+`loop()`. The user's "playback stopped working for any song" report was
+this: the device was never reaching a stable, interactive state at all,
+not a playback regression.
+
+Two independent fixes, both in this round:
+
+1. **Boot-crash guard (the critical one)** -- `src/state/Persist.{h,cpp}`
+   gained `markBtAttemptStarting()`/`markBtAttemptDone()`, writing a
+   `btPending` NVS flag immediately before/after the auto-resume
+   `BluetoothSource::begin()` call in `main.cpp`. If the device crashes
+   between those two calls (i.e. BT auto-resume itself crashed),
+   `btPending` survives into the next boot uncleared. `Persist::load()`
+   checks this: if `btPending` is still true next boot, it means the
+   previous attempt never confirmed success, so it forces
+   `state.btOn = false` for this boot (and persists that immediately)
+   instead of repeating the same crash forever. This is the generic
+   fix regardless of whether the heap theory below is right -- it's what
+   actually stops the device from bricking itself, and the same pattern
+   would protect against any future BT-auto-resume crash cause too. The
+   manual "Bluetooth On" UI action (`MenuEngine.cpp`'s `enterBluetooth()`
+   row) was already safe from this specific loop by ordering --
+   `Persist::save()` for `btOn=true` only runs AFTER `begin()` returns,
+   so a crash there never persists the bad state in the first place;
+   only the boot-time auto-resume path needed the explicit guard.
+
+2. **Actual crash mitigation (best-effort, still not confirmed)** --
+   `main.cpp`'s `setup()` now calls
+   `esp_bt_controller_mem_release(ESP_BT_MODE_BLE)` as the very first
+   thing, before anything touches WiFi or BT. This app only ever uses
+   classic BT (A2DP source) and never BLE, but the framework's default
+   config reserves BLE's controller memory pool (~50KB of internal DRAM)
+   regardless -- releasing it is the standard, widely-used fix for
+   exactly this "WiFi/BT heap allocation failures" symptom on classic-
+   BT-only ESP32 apps. `esp_bt.h`/`esp_bt_controller_mem_release()` are
+   stable core ESP-IDF API bundled with the Arduino-ESP32 framework (not
+   a new dependency) -- not independently verified against the real
+   header in this sandboxed environment (no IDF headers available here
+   to check against, unlike the WebFetch-verified `ESP32-audioI2S` API
+   below), but this is a long-standing, extremely common pattern for
+   this exact class of app, not a guess at an obscure/unstable surface.
+   Also added: `Serial.printf` free-heap logging (`ESP.getFreeHeap()`,
+   the same `EspClass` member `getPsramSize()` already used and working
+   elsewhere in this file) right before the BLE release, right before
+   the BT auto-resume attempt, and right before `a2dpSource.start()`
+   inside `BluetoothSource::begin()` -- so if this still crashes, the
+   next report has real numbers instead of needing another guess.
+
+**If BT still crashes after this**: the boot-crash guard (fix #1) means
+the device will at least stay usable and playback will work -- Bluetooth
+will just stay off and need to be turned on again manually from the UI,
+where a crash there is a one-off reboot, not a permanent loop. But the
+underlying crash itself (fix #2) is still not confirmed fixed -- check
+the new heap logs in the serial output for what the real numbers were at
+each point, that's the next diagnostic step if it recurs.
 
 ## Real seek + real position sync (verified API, not guessed)
 

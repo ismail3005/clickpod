@@ -46,7 +46,7 @@ void BluetoothSource::begin(const char *targetDeviceName) {
         return;
     }
 
-    Serial.println(F("[bt] Starting Bluetooth A2DP source..."));
+    Serial.printf("[bt] Starting Bluetooth A2DP source... (free heap: %u bytes)\n", ESP.getFreeHeap());
     a2dpSource.set_data_callback(provideTestTone);
     a2dpSource.start(targetDeviceName);
     running = true;

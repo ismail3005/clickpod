@@ -135,11 +135,16 @@ across reboots via the ESP32's NVS flash (`src/state/Persist.*`).
 
 This has been flashed and run on real hardware through several rounds of
 fixes -- see `CLAUDE.md`'s gotcha list for what's been found/fixed so
-far, including a real WiFi+Bluetooth coexistence crash (best-effort
-fixed with a mutex between the two radio users, not confirmed via
-reproduction) and a separate, unrelated FLAC decode failure on at least
-one file that's an internal limitation of the pinned `ESP32-audioI2S`
-version, not something fixable from this codebase.
+far. Most recently: a real Bluetooth-start crash turned out to be heap
+exhaustion (not the WiFi/BT radio-timing race first suspected), and
+because Bluetooth-on state persists across reboots, it was silently
+bricking the device into an infinite reboot loop before it could ever
+reach a playable, interactive state -- fixed with a boot-crash guard
+(`src/state/Persist.*`) that refuses to repeat an auto-resume that never
+confirmed it finished, plus a best-effort (not fully confirmed) mitigation
+for the crash itself. Separately, unrelated: a FLAC decode failure on at
+least one file that's an internal limitation of the pinned
+`ESP32-audioI2S` version, not something fixable from this codebase.
 
 ## Build
 

@@ -3,6 +3,7 @@
 #include <SD.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
+#include <esp_bt.h>
 
 #include "audio/AudioBridge.h"
 #include "bt/BluetoothSource.h"
@@ -111,6 +112,29 @@ void setup() {
     delay(500);
     Serial.println(F("\n=== clickpod firmware ==="));
 
+    // This app only ever uses classic BT (A2DP source, via ESP32-A2DP) --
+    // never BLE. The Arduino-ESP32 framework's default sdkconfig enables
+    // both classic BT and BLE controller memory pools, so the unused BLE
+    // pool (~50KB of internal DRAM) sits reserved the whole time for
+    // nothing. Releasing it here, before ANYTHING touches the BT
+    // controller or WiFi, is the standard fix for exactly the symptom
+    // hit in the field: WiFi failing its own rx-buffer allocation
+    // ("Expected to init 4 rx buffer, actual is 0") immediately followed
+    // by a Bluedroid assert crash on BT startup (`semphr_create_wrapper`/
+    // `hash_map_set`, both heap-allocation failures inside the BT stack,
+    // not the WiFi+BT-timing-race RadioLock.h was built to prevent --
+    // that fix didn't actually stop this, see CLAUDE.md). Must run before
+    // the controller is initialized -- first thing in setup(), not lazily
+    // inside BluetoothSource::begin(). esp_bt.h/esp_bt_controller_mem_
+    // release() are stable core ESP-IDF API (bundled with the Arduino-
+    // ESP32 framework, not a new dependency) -- not independently
+    // verified against the real header in this sandbox (no IDF headers
+    // available here), but this is a long-standing, widely-used pattern
+    // for classic-BT-only apps, not a guess at an obscure API surface.
+    esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
+
+    Serial.printf("[bringup] free heap after BLE mem release: %u bytes\n", ESP.getFreeHeap());
+
     // Before anything else draws/reads state -- brightness/dark mode/sort/
     // time zone/whether BT was left on all come from here if previously
     // saved (src/state/Persist.*), so the very first screen already
@@ -152,10 +176,20 @@ void setup() {
     if (sdOk) AudioBridge::begin(audio); // wired output; Bluetooth is a separate on/off toggle driven from the UI
 
     // Resume Bluetooth if it was on when the device last powered off
-    // (state.btOn came from Persist::load() above). syncBluetoothToUi()
-    // below keeps the UI's status honest either way if this declines to
-    // start (e.g. RadioLock busy -- see BluetoothSource.cpp).
-    if (state.btOn) BluetoothSource::begin(BluetoothSource::kTargetDeviceName);
+    // (state.btOn came from Persist::load() above -- which also already
+    // refused to set it true again if the last attempt to do exactly this
+    // never confirmed it finished, i.e. crashed -- see Persist::load()'s
+    // comment and CLAUDE.md). syncBluetoothToUi() below keeps the UI's
+    // status honest either way if this declines to start (e.g. RadioLock
+    // busy -- see BluetoothSource.cpp). markBtAttemptStarting()/Done()
+    // bracket this specific call so a crash INSIDE begin() leaves the
+    // pending flag set in NVS for the next boot to detect.
+    if (state.btOn) {
+        Serial.printf("[bringup] free heap before BT auto-resume: %u bytes\n", ESP.getFreeHeap());
+        Persist::markBtAttemptStarting();
+        BluetoothSource::begin(BluetoothSource::kTargetDeviceName);
+        Persist::markBtAttemptDone();
+    }
 
     // Runs entirely on its own background task -- doesn't block the rest
     // of setup() or touch anything else here. See TimeSync.h.
