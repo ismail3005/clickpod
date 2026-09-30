@@ -73,6 +73,13 @@ void scanArtistFolder(File artistDir, const String &artistPath, const String &ar
             album.album = albumName;
             scanAlbumFolder(entry, artistPath + "/" + albumName, album.tracks);
             if (!album.tracks.empty()) outAlbums.push_back(std::move(album));
+            // Yields to the scheduler between albums so a large library
+            // scan can't starve the task watchdog into a reboot loop, and
+            // gives visible progress on serial instead of a long silence.
+            yield();
+            if (outAlbums.size() % 10 == 0) {
+                Serial.printf("[library] scanning... %u albums so far\n", (unsigned)outAlbums.size());
+            }
         }
         entry.close();
     }
@@ -106,6 +113,14 @@ void scanPlaylistFolder(File plDir, const String &plPath, const String &plName,
                     }
                 }
                 albumEntry.close();
+                // Same watchdog/progress reasoning as scanArtistFolder --
+                // this is the deepest-nested loop (root->playlist->artist
+                // ->album->file), the one most likely to run long.
+                yield();
+                if (pl.tracks.size() % 25 == 0 && !pl.tracks.empty()) {
+                    Serial.printf("[library] scanning playlist \"%s\"... %u tracks so far\n",
+                                  plName.c_str(), (unsigned)pl.tracks.size());
+                }
             }
         }
         artistEntry.close();
@@ -151,6 +166,7 @@ std::map<String, std::vector<LyricLine>> LYRICS = {
 };
 
 bool scanFromSd() {
+    uint32_t startMs = millis();
     File root = SD.open("/");
     if (!root) return false;
 
@@ -181,8 +197,8 @@ bool scanFromSd() {
     // No real lyrics source yet -- scanned tracks just show "No lyrics for
     // this track" (renderLyrics/drawLyrics already handle a missing key).
     LYRICS.clear();
-    Serial.printf("[library] scanned SD: %u albums, %u playlists\n",
-                   (unsigned)ALBUMS.size(), (unsigned)PLAYLISTS.size());
+    Serial.printf("[library] scanned SD: %u albums, %u playlists (%lums)\n",
+                   (unsigned)ALBUMS.size(), (unsigned)PLAYLISTS.size(), (unsigned long)(millis() - startMs));
     return true;
 }
 

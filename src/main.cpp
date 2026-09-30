@@ -68,7 +68,16 @@ static void verifyPsram() {
 static bool initSd() {
     Serial.println(F("[bringup] Initializing SD card..."));
     SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SD_CS);
-    if (!SD.begin(PIN_SD_CS)) {
+    // SD.begin()'s defaults are conservative for a real library scan: a
+    // plain SD.begin(cs) uses 4MHz SPI and a 5-file handle limit, both
+    // fine for the original bring-up test (play one file) but painfully
+    // slow and tight once Library::scanFromSd() is walking hundreds of
+    // files with up to ~5 directories open at once (a playlist-folder
+    // scan nests SD root -> playlist -> artist -> album -> file). 20MHz
+    // is a safe step up from 4MHz for typical breadboard/jumper SD
+    // wiring (this board's TFT already runs its SPI bus at 40MHz, but
+    // that's a much shorter/cleaner trace); raise further if reliable.
+    if (!SD.begin(PIN_SD_CS, SPI, 20000000, "/sd", 10)) {
         Serial.println(F("[bringup] FAIL: SD.begin() failed. Check wiring/CS pin and "
                           "that the card is FAT32-formatted."));
         return false;
@@ -106,7 +115,26 @@ void setup() {
     AnoInput::begin();
 
     bool sdOk = initSd();
-    if (sdOk) Library::scanFromSd(); // replaces the placeholder library if it finds any real tracks
+
+    // UI::begin() draws the boot splash immediately -- do this BEFORE the
+    // (potentially slow, on a large card) SD library scan below, so there's
+    // visual proof-of-life on screen right away instead of a black screen
+    // for however long the scan takes.
+    UI::begin(tft);
+
+    if (sdOk) {
+        // Visual proof that this is a slow scan in progress, not a hang --
+        // easy to mistake for one otherwise on a large library (this is
+        // literally what happened during bring-up). Plain direct tft
+        // prints, same as the original step-1-6 bring-up status lines --
+        // no need to route this through the UI state machine for a
+        // one-off message drawn once before real UI::update() calls start.
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.setTextSize(1);
+        tft.setCursor(10, 220);
+        tft.print("Scanning library...");
+        Library::scanFromSd(); // replaces the placeholder library if it finds any real tracks
+    }
 
     // Non-fatal if the gauge doesn't ACK (e.g. bench-testing with the
     // battery disconnected) -- the UI just keeps showing its placeholder
@@ -114,7 +142,6 @@ void setup() {
     // a single subsystem" approach as SD/BT above.
     Battery::begin();
 
-    UI::begin(tft);
     if (kTestWiredPlayback) {
         if (sdOk) AudioBridge::begin(audio);
     } else {

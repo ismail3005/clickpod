@@ -259,6 +259,35 @@ in `Library.cpp` hardcodes "funky times" to exclude it from Music
 (it becomes its own Playlist instead). Add more names there if more
 playlist folders show up.
 
+**Third real hardware bug (found, fixed): black screen on boot, looked
+identical to a crash/watchdog-reboot loop (RST didn't help) -- turned
+out to just be a very slow `scanFromSd()`, not actually broken.** Three
+compounding causes, all fixed together:
+1. `Library::scanFromSd()` ran in `setup()` *before* `UI::begin(tft)`,
+   so the boot splash never drew until the (slow) scan finished --
+   looked exactly like a hang/crash with zero on-screen feedback. Fixed
+   by moving `UI::begin(tft)` first.
+2. `SD.begin(PIN_SD_CS)` used the library's default 4MHz SPI clock and
+   5-file handle limit -- fine for the original one-file bring-up test,
+   painfully slow for scanning hundreds of real files, and tight given
+   the playlist-folder scan nests up to 5 directories open at once
+   (root->playlist->artist->album->file). Bumped to
+   `SD.begin(PIN_SD_CS, SPI, 20000000, "/sd", 10)` in `main.cpp`'s
+   `initSd()`.
+3. No `yield()` calls anywhere in the scan's nested SD loops, real risk
+   of an ESP32 task-watchdog panic/reboot on a large-enough library
+   (would have looked identical to this same bug, on a loop, since the
+   same slow scan re-runs every reset). Added `yield()` + periodic
+   Serial progress logging in `scanArtistFolder`/`scanPlaylistFolder`
+   (`Library.cpp`), and a one-off "Scanning library..." message drawn
+   directly to the TFT in `main.cpp` before the scan starts, so this
+   doesn't get mistaken for a hang again.
+
+**Lesson**: a blocking operation with zero visual/serial feedback is
+indistinguishable from a crash to whoever's holding the board -- always
+pair a slow first-boot operation with on-screen or serial progress
+output, don't wait until it's reported as "broken" to add it.
+
 ## Working style this project has used (carry forward)
 
 - User is terse and direct; they'll correct behavior that doesn't match
