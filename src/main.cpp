@@ -29,7 +29,7 @@
 // at once, same rule applies here. kTestWiredPlayback below picks which
 // one this bring-up pass exercises; SD/display/ANO stay active either way
 // since none of those conflict with the choice of audio output.
-constexpr bool kTestWiredPlayback = false;
+constexpr bool kTestWiredPlayback = true;
 // In A2DP SOURCE mode this is the name of the target SINK device to scan
 // for and auto-connect to (e.g. your headphones/speaker) -- NOT the
 // ESP32's own advertised name. Source actively seeks out a known sink by
