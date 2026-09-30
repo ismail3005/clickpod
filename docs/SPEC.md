@@ -168,6 +168,7 @@ sort views, settings, BT device list, etc.)
 | Center (single tap) | Select / confirm current item |
 | Center (long press) | Power on/off (see section 5.4) |
 | Right (long press) | Enter Bluetooth pairing/discoverable mode (see 5.4 — RESOLVED: dedicated to Right specifically, chosen because it has no other long-press assignment anywhere in the app, unlike Up/Down which are used for Queue/Lyrics in NOW_PLAYING mode). Available globally, not just from a BT settings screen. |
+| Left (long press) | **ADDED.** On a track row specifically (file browser, playlist contents) — open the track context menu (see 5.5). No-op on non-track rows (Artist/Album/Settings/etc). |
 
 ### 5.2 In NOW_PLAYING mode (a track is loaded/active, whether playing or paused)
 
@@ -175,12 +176,13 @@ sort views, settings, BT device list, etc.)
 |---|---|
 | Rotate (CW/CCW) | Scrub through current track position |
 | Up / Down | Volume up/down |
-| Left / Right (single tap) | Skip to next/previous track. **AMENDED** (was originally fast-forward/rewind on tap) -- rotate already covers scrubbing position, so tap L/R is free for track skip instead, matching classic iPod physical-button behavior (tap to skip, as opposed to touch-wheel seek). Left/Right long press is currently unbound in this mode -- Right long press stays reserved globally for BT pairing (5.4), never reassigned here. |
+| Left / Right (single tap) | Skip to next/previous track. **AMENDED** (was originally fast-forward/rewind on tap) -- rotate already covers scrubbing position, so tap L/R is free for track skip instead, matching classic iPod physical-button behavior (tap to skip, as opposed to touch-wheel seek). Right long press stays reserved globally for BT pairing (5.4), never reassigned here. |
 | Center (single tap) | Play/Pause toggle |
 | Center (double tap, within ~300-400ms window) | Return to menu — music CONTINUES PLAYING in background, does not pause |
 | Center (long press) | Power on/off (see section 5.4) |
 | Down (long press) | Show lyrics screen (see section 6.5) |
 | Up (long press) | Show queue screen (see section 6.6) |
+| Left (long press) | **ADDED.** Open the track context menu (see 5.5) for the currently playing track. |
 
 ### 5.3 Center button state machine (most complex single input)
 
@@ -220,6 +222,32 @@ fire a spurious single/double tap on release).
   Up/Down since those are taken by Queue/Lyrics in NOW_PLAYING mode). This
   is a single, unambiguous, globally-available gesture with no conflicts
   anywhere in the app.
+
+### 5.5 Track context menu ("..." menu) — ADDED
+
+Not in the original spec; worked out and validated in the UI simulator once
+"add to playlist / play next / add to queue, like most phone music players"
+came up as a real want.
+
+**Trigger:** long-press Left. Scoped to wherever a specific track is
+contextually meaningful:
+- A track row in a file/library browser or playlist contents list (not on
+  non-track rows like Artist/Album/Settings entries)
+- The currently playing track, from NOW_PLAYING
+- The highlighted entry in the Queue screen (see 6.7 below)
+
+**Menu contents:**
+1. **Play Next** — insert at the front of the queue
+2. **Add to Queue** — append to the end of the queue
+3. **Add to Playlist** — pushes a submenu listing existing playlists; selecting
+   one appends the track to it
+4. **Cancel** — dismiss, no action
+
+**Navigation within the menu:** identical to normal MENU mode (rotate/Up/Down
+to move, Center to select, Left to go back a level or dismiss entirely if
+already at the top of the context menu). Dismissing (by any path) returns
+to exactly where the menu was opened from — the underlying screen/selection
+state isn't disturbed.
 
 ---
 
@@ -327,8 +355,16 @@ MP3/ID3v2), so flagging explicitly:
   since it affects implementation approach/time estimate.
 7. **Queue screen** — accessed via long-press Up from Now Playing. Shows
    upcoming tracks in the current playback queue. **AMENDED (return
-   gesture):** same as Lyrics above -- CENTER tap, LEFT tap, or holding Up
-   again all return to Now Playing.
+   gesture):** CENTER no longer exits this screen -- see selection behavior
+   below. LEFT tap, or holding Up again, return to Now Playing.
+   **AMENDED (selection):** the queue is a selectable list like everywhere
+   else -- rotate/Up/Down move a cursor, and Center jumps playback straight
+   to the highlighted track (same as tapping a track in the queue view of
+   most phone music players). Tracks skipped over land in playback history
+   (so "previous" from Now Playing can still walk back through them);
+   everything after the selected track stays queued behind it. Long-press
+   Left on a queue entry opens the track context menu (5.5) for it, same as
+   everywhere else a track appears.
 8. **Bluetooth menu** — list of paired/available devices, connect/disconnect,
    pairing mode trigger
 9. **Settings menu** — general device settings (exact contents TBD/flexible,
