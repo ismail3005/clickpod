@@ -166,6 +166,20 @@ like `audio.pauseResume()` against the real `ESP32-audioI2S` 3.0.12 API on
 first build — those were written from general knowledge of the library,
 not verified against its actual header).
 
+**First real `pio run` gotcha (found, fixed):** the framework's default
+C++ standard on this toolchain rejected aggregate-initializing any
+struct with a default member initializer (e.g. `bool paired = false;`
+on `BtDevice`, `char art = '\x01';` on `Track`/`LibraryAlbum`) — that's
+relaxed aggregate init, a C++14 feature, not available in whatever
+pre-C++14 mode the framework defaults to. The stub-header sandbox check
+didn't catch this because it compiled with plain `g++ -std=c++17`,
+which silently has the feature the real build didn't. Fixed by adding
+`build_unflags = -std=gnu++11` + `build_flags: -std=gnu++17` to
+`platformio.ini` (GCC 8.4 here fully supports C++17 — distinct from the
+real C++20 `std::span` gap noted below for `ESP32-audioI2S`). If new
+build errors show structs failing to aggregate-initialize again, check
+this didn't get reverted before chasing anything else.
+
 ## Working style this project has used (carry forward)
 
 - User is terse and direct; they'll correct behavior that doesn't match
