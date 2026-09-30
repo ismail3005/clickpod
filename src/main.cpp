@@ -4,6 +4,7 @@
 #include <SPI.h>
 #include <TFT_eSPI.h>
 #include <esp_bt.h>
+#include <esp_heap_caps.h>
 
 #include "audio/AudioBridge.h"
 #include "bt/BluetoothSource.h"
@@ -133,7 +134,8 @@ void setup() {
     // for classic-BT-only apps, not a guess at an obscure API surface.
     esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
 
-    Serial.printf("[bringup] free heap after BLE mem release: %u bytes\n", ESP.getFreeHeap());
+    Serial.printf("[bringup] free heap after BLE mem release: %u bytes total, %u internal\n",
+                  ESP.getFreeHeap(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
     // Before anything else draws/reads state -- brightness/dark mode/sort/
     // time zone/whether BT was left on all come from here if previously
@@ -165,6 +167,8 @@ void setup() {
         tft.setCursor(10, 220);
         tft.print("Scanning library...");
         Library::scanFromSd(); // replaces the placeholder library if it finds any real tracks
+        Serial.printf("[bringup] free heap after library scan: %u bytes total, %u internal\n",
+                      ESP.getFreeHeap(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     }
 
     // Non-fatal if the gauge doesn't ACK (e.g. bench-testing with the
@@ -184,8 +188,12 @@ void setup() {
     // busy -- see BluetoothSource.cpp). markBtAttemptStarting()/Done()
     // bracket this specific call so a crash INSIDE begin() leaves the
     // pending flag set in NVS for the next boot to detect.
+    // BluetoothSource::begin() itself checks radioHeapOk() before touching
+    // the controller (see BluetoothSource.cpp) -- markBtAttemptStarting()/
+    // Done() still bracket the call for the boot-crash guard regardless,
+    // since a crash from some OTHER cause inside begin() should still be
+    // caught by it, not just the heap case this round's fix targets.
     if (state.btOn) {
-        Serial.printf("[bringup] free heap before BT auto-resume: %u bytes\n", ESP.getFreeHeap());
         Persist::markBtAttemptStarting();
         BluetoothSource::begin(BluetoothSource::kTargetDeviceName);
         Persist::markBtAttemptDone();

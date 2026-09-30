@@ -624,6 +624,65 @@ underlying crash itself (fix #2) is still not confirmed fixed -- check
 the new heap logs in the serial output for what the real numbers were at
 each point, that's the next diagnostic step if it recurs.
 
+## Eighth real hardware bug (found, fixed): heap exhaustion crashed TimeSync too, not just BT -- added a real pre-flight heap guard
+
+The very next flash after the seventh-bug fix crashed again, differently:
+no `[bt]`/`[time]` lines at all before `ESP_ERROR_CHECK failed: esp_err_t
+0x101 (ESP_ERR_NO_MEM)` inside `ets_timer_setfn` (`esp_timer_create`),
+right after the library scan finished and `Battery::begin()` logged its
+(expected, non-fatal) "didn't ACK" message -- i.e. this died inside
+`TimeSync::begin()`'s background task, before it even got to log "no
+networks found", while trying to bring WiFi up for the first time. This
+confirms the seventh bug's diagnosis was on the right track (heap
+exhaustion right after the ~425-track scan) but incomplete -- it's not
+BT-specific, WiFi hits the exact same wall, and neither subsystem can be
+trusted to fail gracefully on its own: both abort the WHOLE device
+instead of just failing to start, because IDF's `ESP_ERROR_CHECK` calls
+inside WiFi/BT init are unconditional aborts, not something app code can
+catch or recover from after the fact.
+
+Since both subsystems fail the same way for the same underlying reason,
+the real fix has to happen BEFORE either one is touched, not per-
+subsystem after the fact: `src/net/RadioLock.h` gained
+`radioHeapOk(who)`, checking `heap_caps_get_free_size(MALLOC_CAP_
+INTERNAL)` -- specifically INTERNAL (non-PSRAM) heap, since that's the
+pool WiFi/BT's DMA-capable buffers actually come from, and the earlier
+`ESP.getFreeHeap()` logging (158848 bytes reported right after the BLE
+mem-release call, near the very start of boot) was likely misleading
+precisely because it can include PSRAM headroom that WiFi/BT can't
+actually use -- against a conservative placeholder threshold
+(`kMinInternalHeapForRadio`, 60KB, NOT backed by documented IDF minimums,
+just a starting guess to tune from real logged numbers). Both
+`TimeSync::tryOnce()` and `BluetoothSource::begin()` now call this FIRST,
+before anything else, and skip (log + return) rather than proceed into
+what's demonstrated twice now to be an unrecoverable abort(). `TimeSync`
+also gained a fast retry (`kSkippedRetryDelayMs`, 2 minutes) specifically
+for attempts skipped this way -- distinct from the normal 6h resync
+interval, which still applies when an attempt actually ran and failed
+for an ordinary reason (no open network in range, couldn't join, NTP
+didn't answer) -- so a transient low-heap moment at boot doesn't mean
+waiting 6 hours for the clock to ever sync.
+
+Also added: `heap_caps_get_free_size(MALLOC_CAP_INTERNAL)` logging
+alongside every existing `ESP.getFreeHeap()` log point in `main.cpp`,
+plus a new one right after the library scan finishes (the scan is the
+obvious concurrent consumer of internal heap right before both crashes
+hit) -- so if this recurs, the real internal-vs-total split is visible
+instead of needing another blind guess.
+
+**Still not fully closed out**: the `kMinInternalHeapForRadio` threshold
+is a placeholder, not a verified minimum -- next real boot's serial log
+(now with internal-heap numbers at every stage) is what tells us whether
+60KB is comfortably enough, uncomfortably tight, or needs raising. If
+WiFi/BT still abort even above this threshold, the number needs to go up,
+not the approach rethought. If they're consistently skipped for lack of
+headroom, the real structural fix (not attempted yet, flagged as a
+bigger change) would be moving the library's per-track String data
+(title/artist/album/path -- `Library::scanFromSd()`'s Track structs) into
+PSRAM-backed storage instead of the default internal-RAM allocator, since
+425 tracks x 4 String fields each is a plausible real chunk of the
+internal heap that's sitting unused in PSRAM instead.
+
 ## Real seek + real position sync (verified API, not guessed)
 
 Unlike `TJpg_Decoder` (guessed from general knowledge, flagged as the

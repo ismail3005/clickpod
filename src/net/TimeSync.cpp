@@ -17,17 +17,36 @@ std::atomic<time_t> syncedEpochUtc{0}; // written by the background task, read f
 std::atomic<uint32_t> syncMillisAt{0};
 
 constexpr uint32_t kResyncIntervalMs = 6UL * 60 * 60 * 1000; // 6 hours -- corrects millis() drift
+// If a sync attempt is SKIPPED before it even touches the radio (not
+// enough internal heap headroom, or Bluetooth currently owns it -- see
+// RadioLock.h), retry much sooner than the normal 6h cadence, since both
+// are likely transient (heap recovers once boot-time temporaries are
+// freed; BT gets turned off). A sync that was actually ATTEMPTED and
+// failed for a real reason (no open network in range, couldn't join,
+// NTP didn't answer) does NOT get this fast retry -- that's an ordinary,
+// possibly-permanent condition (no open network anywhere nearby, ever),
+// and hammering WiFi scans every 2 minutes forever over it would just
+// waste battery for no benefit.
+constexpr uint32_t kSkippedRetryDelayMs = 2UL * 60 * 1000; // 2 minutes
 constexpr uint32_t kConnectTimeoutMs = 8000;
 constexpr uint32_t kNtpTimeoutMs = 5000;
 
-bool tryOnce() {
+enum class SyncResult { kOk, kSkipped, kFailed };
+
+SyncResult tryOnce() {
+    // Internal-heap guard FIRST -- a real WiFi init failure here aborted
+    // the whole device in the field (esp_timer_create -> ESP_ERR_NO_MEM,
+    // right after the boot-time library scan), so this has to be checked
+    // before anything else, including acquiring the radio lock below.
+    if (!radioHeapOk("TimeSync")) return SyncResult::kSkipped;
+
     // See RadioLock.h -- skip this cycle entirely if Bluetooth currently
     // owns the radio, rather than risk the WiFi+BT coexistence crash that
-    // prompted adding this lock. Just retries next interval.
+    // prompted adding this lock. Just retries sooner (kSkippedRetryDelayMs).
     RadioLock::ScopedLock lock;
     if (!lock.acquired) {
         Serial.println(F("[time] skipping sync -- Bluetooth is active"));
-        return false;
+        return SyncResult::kSkipped;
     }
 
     WiFi.mode(WIFI_STA);
@@ -38,7 +57,7 @@ bool tryOnce() {
     if (n <= 0) {
         WiFi.scanDelete();
         Serial.println(F("[time] no networks found"));
-        return false;
+        return SyncResult::kFailed;
     }
 
     String openSsid;
@@ -52,7 +71,7 @@ bool tryOnce() {
 
     if (openSsid.length() == 0) {
         Serial.println(F("[time] no open network nearby to grab time from"));
-        return false;
+        return SyncResult::kFailed;
     }
 
     Serial.printf("[time] joining open network \"%s\" for NTP...\n", openSsid.c_str());
@@ -66,7 +85,7 @@ bool tryOnce() {
         Serial.println(F("[time] couldn't join in time, will retry later"));
         WiFi.disconnect(true);
         WiFi.mode(WIFI_OFF);
-        return false;
+        return SyncResult::kFailed;
     }
 
     configTime(0, 0, "pool.ntp.org", "time.nist.gov"); // fetched as UTC; offset applied at display time
@@ -78,21 +97,31 @@ bool tryOnce() {
 
     if (!ok) {
         Serial.println(F("[time] NTP fetch failed"));
-        return false;
+        return SyncResult::kFailed;
     }
 
     syncedEpochUtc = time(nullptr);
     syncMillisAt = millis();
     synced = true;
     Serial.println(F("[time] synced"));
-    return true;
+    return SyncResult::kOk;
+}
+
+// Retries fast (kSkippedRetryDelayMs) only while attempts are being
+// skipped pre-radio; stops retrying fast the moment an attempt actually
+// runs, whether it then succeeded or failed for a real reason -- that
+// case waits for the next full kResyncIntervalMs cycle instead.
+void tryUntilAttempted() {
+    while (tryOnce() == SyncResult::kSkipped) {
+        vTaskDelay(pdMS_TO_TICKS(kSkippedRetryDelayMs));
+    }
 }
 
 void taskFn(void *) {
-    tryOnce();
+    tryUntilAttempted();
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(kResyncIntervalMs));
-        tryOnce();
+        tryUntilAttempted();
     }
 }
 

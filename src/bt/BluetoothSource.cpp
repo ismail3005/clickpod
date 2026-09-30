@@ -37,6 +37,14 @@ int32_t provideTestTone(uint8_t *data, int32_t byteCount) {
 
 void BluetoothSource::begin(const char *targetDeviceName) {
     if (running) return;
+
+    // Internal-heap guard FIRST -- a real crash in the field
+    // (semphr_create_wrapper assert, then separately a WiFi esp_timer_create
+    // abort) traced back to low internal DRAM headroom right after the
+    // boot-time library scan, not the WiFi/BT timing race RadioLock alone
+    // was built to prevent. See RadioLock.h/CLAUDE.md.
+    if (!radioHeapOk("BluetoothSource")) return;
+
     // Holds the radio lock for as long as BT stays on (released in end()),
     // not just for this call -- see RadioLock.h. If TimeSync's WiFi is
     // mid-cycle right now, this just doesn't start; try again in a
