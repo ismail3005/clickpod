@@ -111,8 +111,10 @@ src/audio/FlacMeta.*     hand-written FLAC metadata-block parser (duration, tags
 src/ui/UiTypes.h         shared shapes: Track, Menu, MenuItem (mirrors the simulator's
                          JS object shapes 1:1 — cross-check against simulator source
                          if unsure what a field means)
-src/ui/Library.*         real SD-scanned Artist/Album/Track/Playlist data
-                         (Library::scanFromSd()), mock data kept as a fallback
+src/ui/Library.*         on-SD compact index (Library::ensureIndex(), /clickpod.idx) --
+                         built once, read lazily/bounded per screen after that, not
+                         held fully in RAM; mock data kept as a fallback -- see the
+                         dedicated "on-SD compact index" section below
 src/ui/MenuEngine.*      menu-stack build/navigate (buildMainMenu, enterBluetooth,
                          openTrackMenu, playQueueFrom, ...) — ported function-for-
                          function from the simulator's JS of the same names
@@ -717,6 +719,102 @@ data exists to use), but the highlight now visibly advances over the
 course of the song, which is what "lyrics should move with the song"
 actually needs even without being frame-accurate. Real sync would need
 an LRC-style timestamped format, which FLAC Vorbis comments don't carry.
+
+## On-SD compact index, replacing the old "hold the whole library in RAM forever" model
+
+The old `Library::scanFromSd()` did TWO expensive things every single
+boot: (1) a slow FAT walk of the whole SD card (~22s for the user's real
+425-track playlist), and (2) permanently held every track's artist/
+album/title/path as separate heap-allocated `String`s in RAM for the
+entire session (~95KB of internal RAM for that one playlist -- see the
+eighth hardware bug above, this is what made BT/WiFi unable to get enough
+internal heap headroom to start at all). Neither scales: the user's
+planning on loading hundreds more tracks onto a much bigger SD card, and
+"hold everything, always, in RAM" gets worse linearly with library size
+regardless of whether BT is involved.
+
+Replaced with a compact on-SD index file, closer to how real portable
+players (e.g. the iPod's iTunesDB) actually do this -- `Library::
+ensureIndex()`/`Library.cpp`:
+
+- **The slow FAT walk only ever happens once.** `ensureIndex()` checks
+  whether `/clickpod.idx` already exists on the card; if so, it's trusted
+  as-is and used directly -- no re-walking SD, no auto-detection of card
+  content changes (that would mean doing the expensive walk anyway,
+  defeating the point). Only the FIRST ever boot (or a manual "Rescan
+  library" row added to Settings, which calls `ensureIndex(true)`) does
+  the real directory walk; every boot after that just checks the file
+  exists and moves on. This is also the fix for the ~22s boot-time
+  complaint from earlier in the session, as a side effect -- most boots
+  now skip that entirely.
+- **Nothing holds the whole library in RAM anymore.** The index build
+  itself writes records directly to the SD file as it walks (never
+  accumulates a big in-RAM vector, even during the one-time build).
+  Reading it back is lazy and bounded: `indexArtists()`/
+  `indexAlbumsForArtist()`/`indexPlaylists()` do a fast SEQUENTIAL read of
+  the compact index file collecting just names+counts (cheap, safe to
+  call on every menu open), and `indexTracksForAlbum()`/
+  `indexTracksForPlaylist()` materialize a `vector<Track>` for ONLY the
+  one album or playlist actually being opened -- not the whole library.
+  `MenuEngine.cpp`'s `buildTrackListFromIndex()`/
+  `buildPlaylistTrackListFromIndex()` hold that vector in a `shared_ptr`
+  scoped to the menu screen it's for (same pattern as the fourth hardware
+  bug's fix), so it's freed again once the user navigates away, and
+  re-read from the index (fast sequential file read, not a FAT walk) next
+  time. RAM usage is now bounded by "the biggest single album/playlist
+  currently open," not "everything on the card."
+
+**Index file format** (`/clickpod.idx`, SD root): 4-byte magic `"CPX1"`
+(doubles as a version tag) + 4-byte LE track count (informational only --
+readers rely on EOF to know when to stop, not this value, so a
+wrong/stale count can't cause a bad read) + that many variable-length
+records: 1-byte kind (0=Music track, 1=Playlist track), then
+length-prefixed string fields (artist/album/title/path, plus a playlist
+name for kind 1). Lengths are `uint16` (not `uint8`) specifically because
+a full nested SD path (playlist/artist/album/filename) can plausibly
+exceed 255 bytes with real long filenames even though no single name
+component usually would -- cheap insurance (1 extra byte per field)
+against silent truncation.
+
+**"Add to Playlist" under the new model**: playlist edits from the UI
+(`openTrackMenu`'s "Add to Playlist" row) are appended to a small in-RAM,
+session-only overlay (`Library::addToPlaylist()`/`extraPlaylistTracks`),
+never written back to the index file on SD. This matches the OLD
+behavior exactly -- direct mutation of the in-RAM `PLAYLISTS` vector also
+never persisted across a reboot -- so it's not a regression, just the
+same ephemeral behavior under the new storage model. `indexPlaylists()`/
+`indexTracksForPlaylist()` merge these overlay entries in when reporting
+counts/tracks for a playlist.
+
+**Mock/placeholder fallback is untouched**: `Library::ALBUMS`/
+`PLAYLISTS` (the old hand-written mock data) still exist exactly as
+before, for bench-testing with no SD card or a card `ensureIndex()` finds
+nothing playable on. `Library::usingIndex()` is the flag `MenuEngine.cpp`
+checks everywhere to pick between the new `index*()` functions and the
+old direct-`ALBUMS`/`PLAYLISTS`-iteration path (`buildArtistList`/
+`buildAlbumList`/`buildPlaylistList`/the "Add to Playlist" submenu all
+branch on this) -- zero behavior change on the mock path, only the real-
+SD path changed.
+
+**Not done, flagged as the natural next step if a library gets into the
+thousands of tracks**: this is bounded-per-open, not fully paginated --
+opening a single playlist/album with, say, 5,000 tracks in it would still
+materialize all 5,000 as `MenuItem` rows at once (just not held forever
+afterward). True virtual-scrolling (only ever materializing the rows
+currently on screen, re-querying the index as you scroll) would need
+real restructuring of `MenuEngine`'s `build*()` functions and `Screens`'
+menu-rendering/scroll logic, and wasn't attempted here -- the current
+design was sized to "hundreds more tracks," which this comfortably
+covers, not an open-ended multi-thousand-track collection.
+
+**Verification**: `Library.cpp`'s full new implementation and
+`MenuEngine.cpp`'s changed functions were both compiled clean (zero
+errors) against hand-written stub headers in this sandbox, same
+discipline as the rest of this project -- no real `pio run` available
+here. `Screens.cpp`'s one addition (`showBusyMessage()`) was not
+separately compiled (its own stub dependency chain is large) but uses
+only `tftPtr`-based calls already proven working elsewhere in that exact
+file, so this is lower-risk than an unverified change would be.
 
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 

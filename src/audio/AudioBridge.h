@@ -4,9 +4,10 @@
 #include <SD.h>
 
 // Bridges the UI layer's playback intent (play this Track, pause, change
-// volume) to the real ESP32-audioI2S output. When a track came from
-// Library::scanFromSd() it carries a real SD path and that exact file
-// plays; for placeholder/mock tracks with no path (Track::path empty),
+// volume) to the real ESP32-audioI2S output. When a track came from the
+// on-SD index (Library::indexTracksForAlbum/Playlist) it carries a real
+// SD path and that exact file plays; for placeholder/mock tracks with no
+// path (Track::path empty),
 // falls back to playing the first playable file found on the card, so
 // DAC output is still real even without a per-track mapping.
 namespace AudioBridge {

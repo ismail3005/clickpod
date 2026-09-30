@@ -11,6 +11,7 @@
 #include "../state/Persist.h"
 #include "AlbumArt.h"
 #include "Library.h"
+#include "Screens.h"
 #include "Util.h"
 
 namespace MenuEngine {
@@ -139,20 +140,45 @@ void buildMainMenu() {
 }
 
 void buildArtistList() {
-    std::vector<String> artists;
-    std::set<String> seen;
-    for (auto &al : Library::ALBUMS) {
-        if (seen.insert(al.artist).second) artists.push_back(al.artist);
-    }
     std::vector<MenuItem> items;
-    items.reserve(artists.size());
-    for (auto &name : artists) {
-        MenuItem it;
-        it.label = name;
-        it.action = [name]() { buildAlbumList(name); };
-        items.push_back(std::move(it));
+    if (Library::usingIndex()) {
+        // Cheap: a sequential read of the compact index file collecting
+        // just distinct artist names, not the whole library's Track data
+        // -- see Library.h for the full "why" writeup.
+        for (auto &name : Library::indexArtists()) {
+            MenuItem it;
+            it.label = name;
+            it.action = [name]() { buildAlbumListFromIndex(name); };
+            items.push_back(std::move(it));
+        }
+    } else {
+        std::vector<String> artists;
+        std::set<String> seen;
+        for (auto &al : Library::ALBUMS) {
+            if (seen.insert(al.artist).second) artists.push_back(al.artist);
+        }
+        for (auto &name : artists) {
+            MenuItem it;
+            it.label = name;
+            it.action = [name]() { buildAlbumList(name); };
+            items.push_back(std::move(it));
+        }
     }
     pushMenu("Music", std::move(items));
+}
+
+void buildAlbumListFromIndex(const String &artist) {
+    std::vector<MenuItem> items;
+    for (auto &kv : Library::indexAlbumsForArtist(artist)) {
+        MenuItem it;
+        it.label = kv.first;
+        it.sub = String(kv.second) + " tracks";
+        String artistCopy = artist;
+        String albumCopy = kv.first;
+        it.action = [artistCopy, albumCopy]() { buildTrackListFromIndex(artistCopy, albumCopy); };
+        items.push_back(std::move(it));
+    }
+    pushMenu(artist, std::move(items));
 }
 
 void buildAlbumList(const String &artist) {
@@ -194,38 +220,94 @@ void buildTrackList(const LibraryAlbum &album) {
     pushMenu(album.album, std::move(items));
 }
 
+// Loads ONLY this one (artist, album) pair's tracks from the on-SD index
+// -- not the whole library. The shared_ptr's last reference goes away
+// with the row lambdas that captured it once this menu is replaced by
+// whatever's opened next, so the data doesn't outlive the screen it's for.
+void buildTrackListFromIndex(const String &artist, const String &album) {
+    auto tracks = std::make_shared<std::vector<Track>>(Library::indexTracksForAlbum(artist, album));
+    std::vector<MenuItem> items;
+    items.reserve(tracks->size());
+    for (size_t i = 0; i < tracks->size(); i++) {
+        const Track &t = (*tracks)[i];
+        MenuItem it;
+        it.label = t.title;
+        it.sub = fmtTime(t.durSec);
+        it.isTrack = true;
+        it.trackData = t;
+        size_t idx = i;
+        it.action = [tracks, idx]() { playQueueFrom(*tracks, idx); };
+        items.push_back(std::move(it));
+    }
+    pushMenu(album, std::move(items));
+}
+
+// Loads ONLY this one playlist's tracks from the on-SD index -- the
+// actual fix for "funky times" (425 tracks) sitting in RAM for the whole
+// session: now it's only materialized while this menu is open, freed
+// again once the user navigates elsewhere, and re-read from the index
+// (a fast sequential file read, not a FAT walk) next time it's opened.
+void buildPlaylistTrackListFromIndex(const String &name) {
+    auto tracks = std::make_shared<std::vector<Track>>(Library::indexTracksForPlaylist(name));
+    std::vector<MenuItem> items;
+    items.reserve(tracks->size());
+    for (size_t i = 0; i < tracks->size(); i++) {
+        const Track &t = (*tracks)[i];
+        MenuItem row;
+        row.label = t.title;
+        row.sub = t.artist;
+        row.isTrack = true;
+        row.trackData = t;
+        size_t idx = i;
+        row.action = [tracks, idx]() { playQueueFrom(*tracks, idx); };
+        items.push_back(std::move(row));
+    }
+    pushMenu(name, std::move(items));
+}
+
 void buildPlaylistList() {
     std::vector<MenuItem> items;
-    for (auto &p : Library::PLAYLISTS) {
-        MenuItem it;
-        it.label = p.name;
-        it.sub = String((int)p.tracks.size()) + " tracks";
-        // Shared ONCE per playlist-open (see buildTrackList's comment for
-        // why this matters -- this was the actual crash).
-        auto tracksPtr = std::make_shared<std::vector<Track>>(p.tracks);
-        String plName = p.name;
-        it.action = [tracksPtr, plName]() {
-            std::vector<MenuItem> trackItems;
-            for (size_t i = 0; i < tracksPtr->size(); i++) {
-                const Track &t = (*tracksPtr)[i];
-                MenuItem row;
-                row.label = t.title;
-                row.sub = t.artist;
-                row.isTrack = true;
-                row.trackData = t;
-                size_t idx = i;
-                row.action = [tracksPtr, idx]() { playQueueFrom(*tracksPtr, idx); };
-                trackItems.push_back(std::move(row));
-            }
-            pushMenu(plName, std::move(trackItems));
-        };
-        items.push_back(std::move(it));
+    if (Library::usingIndex()) {
+        for (auto &kv : Library::indexPlaylists()) {
+            MenuItem it;
+            it.label = kv.first;
+            it.sub = String(kv.second) + " tracks";
+            String plName = kv.first;
+            it.action = [plName]() { buildPlaylistTrackListFromIndex(plName); };
+            items.push_back(std::move(it));
+        }
+    } else {
+        for (auto &p : Library::PLAYLISTS) {
+            MenuItem it;
+            it.label = p.name;
+            it.sub = String((int)p.tracks.size()) + " tracks";
+            // Shared ONCE per playlist-open (see buildTrackList's comment for
+            // why this matters -- this was the actual crash).
+            auto tracksPtr = std::make_shared<std::vector<Track>>(p.tracks);
+            String plName = p.name;
+            it.action = [tracksPtr, plName]() {
+                std::vector<MenuItem> trackItems;
+                for (size_t i = 0; i < tracksPtr->size(); i++) {
+                    const Track &t = (*tracksPtr)[i];
+                    MenuItem row;
+                    row.label = t.title;
+                    row.sub = t.artist;
+                    row.isTrack = true;
+                    row.trackData = t;
+                    size_t idx = i;
+                    row.action = [tracksPtr, idx]() { playQueueFrom(*tracksPtr, idx); };
+                    trackItems.push_back(std::move(row));
+                }
+                pushMenu(plName, std::move(trackItems));
+            };
+            items.push_back(std::move(it));
+        }
     }
     pushMenu("Playlists", std::move(items));
 }
 
 void buildSettings() {
-    std::vector<MenuItem> items(5);
+    std::vector<MenuItem> items(6);
     items[0].label = "Bluetooth";
     items[0].subFn = btStatusLabel;
     items[0].action = []() { enterBluetooth(); };
@@ -262,6 +344,27 @@ void buildSettings() {
         char buf[8];
         snprintf(buf, sizeof(buf), "UTC%+d", state.utcOffsetHours);
         return String(buf);
+    };
+
+    // Manual rescan: the on-SD index (see Library.h) is only ever built
+    // once and trusted after that -- no auto-detection of SD content
+    // changes, since re-walking the whole card to check would defeat the
+    // point of caching it. This is how you tell it the card changed (new
+    // music added/moved) and force a fresh index. Blocking (same ~20s-ish
+    // FAT walk as the old boot-time scan), so it shows a direct busy
+    // message first -- same reasoning as the boot splash fix, a silent
+    // multi-second freeze looks exactly like a hang/crash otherwise.
+    items[5].label = "Rescan library";
+    items[5].sub = "";
+    items[5].action = []() {
+        Serial.println(F("[ui] manual library rescan requested"));
+        Screens::showBusyMessage("Rescanning library...");
+        Library::ensureIndex(/*force=*/true);
+        // The menu stack may hold rows built from the pre-rescan index
+        // (stale artist/album/playlist names, or now-dangling actions) --
+        // safest to bounce back to the main menu rather than risk a
+        // dangling selection into data that no longer matches the index.
+        buildMainMenu();
     };
 
     pushMenu("Settings", std::move(items));
@@ -412,23 +515,43 @@ void openTrackMenu(const Track &track) {
     items[2].label = "Add to Playlist";
     items[2].action = [t]() {
         std::vector<MenuItem> plItems;
-        for (auto &p : Library::PLAYLISTS) {
-            MenuItem row;
-            row.label = p.name;
-            row.sub = String((int)p.tracks.size()) + " tracks";
-            String plName = p.name;
-            Track track2 = t;
-            row.action = [plName, track2]() {
-                for (auto &p2 : Library::PLAYLISTS) {
-                    if (p2.name == plName) {
-                        p2.tracks.push_back(track2);
-                        break;
+        if (Library::usingIndex()) {
+            for (auto &kv : Library::indexPlaylists()) {
+                MenuItem row;
+                row.label = kv.first;
+                row.sub = String(kv.second) + " tracks";
+                String plName = kv.first;
+                Track track2 = t;
+                row.action = [plName, track2]() {
+                    // Session-only overlay, never written to the on-SD
+                    // index -- same as the old direct-vector-mutation
+                    // behavior below, which also never persisted playlist
+                    // edits across reboots. See Library.h.
+                    Library::addToPlaylist(plName, track2);
+                    Serial.printf("[ui] added to \"%s\"\n", plName.c_str());
+                    closeTrackMenu();
+                };
+                plItems.push_back(std::move(row));
+            }
+        } else {
+            for (auto &p : Library::PLAYLISTS) {
+                MenuItem row;
+                row.label = p.name;
+                row.sub = String((int)p.tracks.size()) + " tracks";
+                String plName = p.name;
+                Track track2 = t;
+                row.action = [plName, track2]() {
+                    for (auto &p2 : Library::PLAYLISTS) {
+                        if (p2.name == plName) {
+                            p2.tracks.push_back(track2);
+                            break;
+                        }
                     }
-                }
-                Serial.printf("[ui] added to \"%s\"\n", plName.c_str());
-                closeTrackMenu();
-            };
-            plItems.push_back(std::move(row));
+                    Serial.printf("[ui] added to \"%s\"\n", plName.c_str());
+                    closeTrackMenu();
+                };
+                plItems.push_back(std::move(row));
+            }
         }
         pushMenu("Add to Playlist", std::move(plItems));
     };

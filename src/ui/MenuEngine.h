@@ -15,8 +15,11 @@ Menu *currentMenu();
 
 void buildMainMenu();
 void buildArtistList();
-void buildAlbumList(const String &artist);
-void buildTrackList(const LibraryAlbum &album);
+void buildAlbumList(const String &artist);           // mock/fallback path -- see Library::usingIndex()
+void buildTrackList(const LibraryAlbum &album);       // mock/fallback path
+void buildAlbumListFromIndex(const String &artist);   // real on-SD-index path
+void buildTrackListFromIndex(const String &artist, const String &album);
+void buildPlaylistTrackListFromIndex(const String &name);
 void buildPlaylistList();
 void buildSettings();
 

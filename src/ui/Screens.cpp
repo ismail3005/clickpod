@@ -390,6 +390,22 @@ void drawQueue() {
 
 void begin(TFT_eSPI &tft) { tftPtr = &tft; }
 
+// One-off direct draw for a blocking operation with no other visual
+// feedback (e.g. a manual library rescan) -- same reasoning as the boot
+// splash fix (CLAUDE.md's third hardware bug): a blocking call with
+// nothing on screen looks exactly like a hang/crash to whoever's holding
+// the board. Bypasses the normal dirty-flag render() path on purpose --
+// this is for a message that needs to appear immediately, synchronously,
+// right before a long blocking call, not on the next render() pass.
+void showBusyMessage(const String &msg) {
+    if (!tftPtr) return;
+    tftPtr->fillScreen(TFT_BLACK);
+    tftPtr->setTextColor(TFT_WHITE, TFT_BLACK);
+    tftPtr->setTextSize(1);
+    tftPtr->setCursor(10, 110);
+    tftPtr->print(msg);
+}
+
 void render() {
     if (!tftPtr) return;
 

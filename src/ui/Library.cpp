@@ -5,9 +5,8 @@
 namespace Library {
 namespace {
 
-// Kept as a fallback for bench-testing without an SD card inserted --
-// scanFromSd() overwrites ALBUMS/PLAYLISTS with real data whenever it
-// finds any, so this is never what a card with real music actually shows.
+// Kept as a fallback for bench-testing without an SD card inserted, or a
+// card ensureIndex() finds nothing playable on.
 std::vector<LibraryAlbum> MOCK_ALBUMS = {
     {"Coral Static", "Nightbus Radio", '\x01', {
         {"", "", "Nightbus Radio", 214},
@@ -47,48 +46,101 @@ String stripExtension(const String &filename) {
     return dot > 0 ? filename.substring(0, dot) : filename;
 }
 
-void scanAlbumFolder(File albumDir, const String &albumPath, std::vector<Track> &outTracks) {
+// ---- On-SD compact index (/clickpod.idx) --------------------------------
+//
+// Format: 4-byte magic "CPX1" (also a version tag -- a future format
+// change bumps this so a stale index from an old build is never
+// misread), 4-byte LE track count (informational only, see forEachRecord
+// below -- readers don't trust it for the loop bound, EOF does that),
+// then that many variable-length records:
+//   kind: 1 byte (0 = Music track, 1 = Playlist track)
+//   [playlistName]   -- only present if kind == 1
+//   artist, album, title, path -- each a 2-byte LE length + that many
+//   raw bytes (not null-terminated on disk)
+// uint16 lengths (not uint8) specifically because a full nested SD path
+// (playlist/artist/album/filename) can plausibly exceed 255 bytes with
+// real long filenames, even though no single field name usually would --
+// cheap insurance (1 extra byte/field) against silent truncation.
+
+constexpr const char *kIndexPath = "/clickpod.idx";
+constexpr size_t kMaxFieldLen = 300; // defensive cap, see writeStr()
+
+bool indexReady = false;
+
+// name -> tracks added this session via addToPlaylist() -- never written
+// to the index file, see the header comment on addToPlaylist().
+std::map<String, std::vector<Track>> extraPlaylistTracks;
+
+void writeStr(File &f, const String &s) {
+    uint16_t len = (uint16_t)min((int)s.length(), (int)kMaxFieldLen);
+    f.write((const uint8_t *)&len, 2);
+    if (len > 0) f.write((const uint8_t *)s.c_str(), len);
+}
+
+bool readStr(File &f, String &out) {
+    uint16_t len;
+    if (f.read((uint8_t *)&len, 2) != 2) return false;
+    char buf[kMaxFieldLen + 1];
+    if (len > 0) {
+        if (f.read((uint8_t *)buf, len) != len) return false;
+    }
+    buf[len] = '\0';
+    out = String(buf);
+    return true;
+}
+
+void writeMusicRecord(File &idx, const String &artist, const String &album,
+                       const String &title, const String &path) {
+    uint8_t kind = 0;
+    idx.write(&kind, 1);
+    writeStr(idx, artist);
+    writeStr(idx, album);
+    writeStr(idx, title);
+    writeStr(idx, path);
+}
+
+void writePlaylistRecord(File &idx, const String &playlistName, const String &artist,
+                          const String &album, const String &title, const String &path) {
+    uint8_t kind = 1;
+    idx.write(&kind, 1);
+    writeStr(idx, playlistName);
+    writeStr(idx, artist);
+    writeStr(idx, album);
+    writeStr(idx, title);
+    writeStr(idx, path);
+}
+
+void indexAlbumFolder(File albumDir, const String &albumPath, const String &artistName,
+                       const String &albumName, File &idx, uint32_t &count) {
     while (File entry = albumDir.openNextFile()) {
         if (!entry.isDirectory()) {
             String fname = entry.name();
             if (hasAudioExtension(fname)) {
-                Track t;
-                t.title = stripExtension(fname);
-                t.durSec = 0; // TODO(spec section 10): real duration needs opening/decoding each file
-                t.path = albumPath + "/" + fname;
-                outTracks.push_back(std::move(t));
+                writeMusicRecord(idx, artistName, albumName, stripExtension(fname), albumPath + "/" + fname);
+                count++;
             }
         }
         entry.close();
     }
 }
 
-void scanArtistFolder(File artistDir, const String &artistPath, const String &artistName,
-                       std::vector<LibraryAlbum> &outAlbums) {
+void indexArtistFolder(File artistDir, const String &artistPath, const String &artistName,
+                        File &idx, uint32_t &count) {
     while (File entry = artistDir.openNextFile()) {
         if (entry.isDirectory()) {
             String albumName = entry.name();
-            LibraryAlbum album;
-            album.artist = artistName;
-            album.album = albumName;
-            scanAlbumFolder(entry, artistPath + "/" + albumName, album.tracks);
-            if (!album.tracks.empty()) outAlbums.push_back(std::move(album));
-            // Yields to the scheduler between albums so a large library
-            // scan can't starve the task watchdog into a reboot loop, and
-            // gives visible progress on serial instead of a long silence.
+            indexAlbumFolder(entry, artistPath + "/" + albumName, artistName, albumName, idx, count);
+            // Same watchdog/progress reasoning as the old scanArtistFolder --
+            // a big library shouldn't starve the task watchdog into a reboot.
             yield();
-            if (outAlbums.size() % 10 == 0) {
-                Serial.printf("[library] scanning... %u albums so far\n", (unsigned)outAlbums.size());
-            }
+            if (count % 50 == 0) Serial.printf("[library] indexing... %u tracks so far\n", (unsigned)count);
         }
         entry.close();
     }
 }
 
-void scanPlaylistFolder(File plDir, const String &plPath, const String &plName,
-                         std::vector<Playlist> &outPlaylists) {
-    Playlist pl;
-    pl.name = plName;
+void indexPlaylistFolder(File plDir, const String &plPath, const String &plName,
+                          File &idx, uint32_t &count) {
     while (File artistEntry = plDir.openNextFile()) {
         if (artistEntry.isDirectory()) {
             String artistName = artistEntry.name();
@@ -101,31 +153,109 @@ void scanPlaylistFolder(File plDir, const String &plPath, const String &plName,
                         if (!fileEntry.isDirectory()) {
                             String fname = fileEntry.name();
                             if (hasAudioExtension(fname)) {
-                                Track t;
-                                t.artist = artistName;
-                                t.album = albumName;
-                                t.title = stripExtension(fname);
-                                t.path = albumPath + "/" + fname;
-                                pl.tracks.push_back(std::move(t));
+                                writePlaylistRecord(idx, plName, artistName, albumName,
+                                                     stripExtension(fname), albumPath + "/" + fname);
+                                count++;
                             }
                         }
                         fileEntry.close();
                     }
                 }
                 albumEntry.close();
-                // Same watchdog/progress reasoning as scanArtistFolder --
-                // this is the deepest-nested loop (root->playlist->artist
-                // ->album->file), the one most likely to run long.
+                // Deepest-nested loop (root->playlist->artist->album->file),
+                // same reasoning as indexArtistFolder above.
                 yield();
-                if (pl.tracks.size() % 25 == 0 && !pl.tracks.empty()) {
-                    Serial.printf("[library] scanning playlist \"%s\"... %u tracks so far\n",
-                                  plName.c_str(), (unsigned)pl.tracks.size());
+                if (count % 25 == 0 && count > 0) {
+                    Serial.printf("[library] indexing playlist \"%s\"... %u tracks so far\n",
+                                  plName.c_str(), (unsigned)count);
                 }
             }
         }
         artistEntry.close();
     }
-    if (!pl.tracks.empty()) outPlaylists.push_back(std::move(pl));
+}
+
+bool buildIndexFile() {
+    File root = SD.open("/");
+    if (!root) return false;
+
+    if (SD.exists(kIndexPath)) SD.remove(kIndexPath);
+    File idx = SD.open(kIndexPath, FILE_WRITE);
+    if (!idx) {
+        root.close();
+        return false;
+    }
+
+    const uint8_t magic[4] = {'C', 'P', 'X', '1'};
+    idx.write(magic, 4);
+    uint32_t countPlaceholder = 0;
+    idx.write((const uint8_t *)&countPlaceholder, 4);
+
+    uint32_t count = 0;
+    while (File entry = root.openNextFile()) {
+        if (entry.isDirectory()) {
+            String name = entry.name();
+            String path = String("/") + name;
+            if (isPlaylistFolderName(name)) {
+                indexPlaylistFolder(entry, path, name, idx, count);
+            } else {
+                indexArtistFolder(entry, path, name, idx, count);
+            }
+        }
+        entry.close();
+    }
+    root.close();
+
+    // Real count written back over the placeholder now that it's known --
+    // informational for the log line below; readers rely on EOF, not this
+    // value, to know when to stop (see forEachRecord()).
+    idx.seek(4);
+    idx.write((const uint8_t *)&count, 4);
+    idx.close();
+
+    Serial.printf("[library] built index: %u tracks\n", (unsigned)count);
+    return count > 0;
+}
+
+struct IndexRecord {
+    bool isPlaylist = false;
+    String playlistName;
+    String artist, album, title, path;
+};
+
+bool readRecord(File &f, IndexRecord &r) {
+    uint8_t kind;
+    if (f.read(&kind, 1) != 1) return false;
+    r.isPlaylist = (kind == 1);
+    if (r.isPlaylist && !readStr(f, r.playlistName)) return false;
+    if (!readStr(f, r.artist)) return false;
+    if (!readStr(f, r.album)) return false;
+    if (!readStr(f, r.title)) return false;
+    if (!readStr(f, r.path)) return false;
+    return true;
+}
+
+// Streams every record in the index file to fn(), one at a time -- never
+// materializes the whole index in RAM, just whatever fn() itself chooses
+// to keep. This is the one place that actually touches the index file;
+// every indexArtists()/indexAlbumsForArtist()/etc. below is a thin filter
+// on top of it. EOF (readRecord() returning false) ends the loop, not the
+// header's track count -- robust even if that count is ever wrong/stale.
+template <typename Fn>
+void forEachRecord(Fn fn) {
+    File f = SD.open(kIndexPath, FILE_READ);
+    if (!f) return;
+    uint8_t header[8];
+    if (f.read(header, 8) != 8) {
+        f.close();
+        return;
+    }
+    IndexRecord r;
+    while (readRecord(f, r)) {
+        fn(r);
+        yield();
+    }
+    f.close();
 }
 
 } // namespace
@@ -159,41 +289,109 @@ std::map<String, std::vector<LyricLine>> LYRICS = {
     }},
 };
 
-bool scanFromSd() {
-    uint32_t startMs = millis();
-    File root = SD.open("/");
-    if (!root) return false;
+bool usingIndex() { return indexReady; }
 
-    std::vector<LibraryAlbum> albums;
-    std::vector<Playlist> playlists;
+bool ensureIndex(bool force) {
+    if (!force && SD.exists(kIndexPath)) {
+        // Trust an existing index rather than re-scanning -- this is the
+        // whole point (the slow FAT walk only needs to happen once, not
+        // every boot). No auto-detection of SD content changes; see
+        // "Rescan library" in Settings for the manual way to force this.
+        Serial.println(F("[library] using existing on-SD index (no rescan)"));
+        indexReady = true;
+        return true;
+    }
 
-    while (File entry = root.openNextFile()) {
-        if (entry.isDirectory()) {
-            String name = entry.name();
-            String path = String("/") + name;
-            if (isPlaylistFolderName(name)) {
-                scanPlaylistFolder(entry, path, name, playlists);
-            } else {
-                scanArtistFolder(entry, path, name, albums);
-            }
+    Serial.println(force ? F("[library] rescanning SD (manual request)...")
+                          : F("[library] building on-SD index (first boot)..."));
+    indexReady = buildIndexFile();
+    if (!indexReady) {
+        Serial.println(F("[library] index build found nothing playable -- keeping placeholder library"));
+    } else {
+        // Ephemeral "Add to Playlist" additions from before a rescan refer
+        // to a library that may no longer match what's on the card --
+        // drop them rather than risk them pointing at stale paths.
+        extraPlaylistTracks.clear();
+    }
+    return indexReady;
+}
+
+std::vector<String> indexArtists() {
+    std::vector<String> out;
+    forEachRecord([&](const IndexRecord &r) {
+        if (r.isPlaylist) return;
+        for (auto &a : out) if (a == r.artist) return;
+        out.push_back(r.artist);
+    });
+    return out;
+}
+
+std::vector<std::pair<String, int>> indexAlbumsForArtist(const String &artist) {
+    std::vector<std::pair<String, int>> out;
+    forEachRecord([&](const IndexRecord &r) {
+        if (r.isPlaylist || r.artist != artist) return;
+        for (auto &p : out) {
+            if (p.first == r.album) { p.second++; return; }
         }
-        entry.close();
-    }
-    root.close();
+        out.push_back({r.album, 1});
+    });
+    return out;
+}
 
-    if (albums.empty() && playlists.empty()) {
-        Serial.println(F("[library] SD scan found no playable tracks -- keeping placeholder library"));
-        return false;
-    }
+std::vector<Track> indexTracksForAlbum(const String &artist, const String &album) {
+    std::vector<Track> out;
+    forEachRecord([&](const IndexRecord &r) {
+        if (r.isPlaylist || r.artist != artist || r.album != album) return;
+        Track t;
+        t.artist = artist;
+        t.album = album;
+        t.title = r.title;
+        t.path = r.path;
+        out.push_back(std::move(t));
+    });
+    return out;
+}
 
-    ALBUMS = std::move(albums);
-    PLAYLISTS = std::move(playlists);
-    // No real lyrics source yet -- scanned tracks just show "No lyrics for
-    // this track" (renderLyrics/drawLyrics already handle a missing key).
-    LYRICS.clear();
-    Serial.printf("[library] scanned SD: %u albums, %u playlists (%lums)\n",
-                   (unsigned)ALBUMS.size(), (unsigned)PLAYLISTS.size(), (unsigned long)(millis() - startMs));
-    return true;
+std::vector<std::pair<String, int>> indexPlaylists() {
+    std::vector<std::pair<String, int>> out;
+    forEachRecord([&](const IndexRecord &r) {
+        if (!r.isPlaylist) return;
+        for (auto &p : out) {
+            if (p.first == r.playlistName) { p.second++; return; }
+        }
+        out.push_back({r.playlistName, 1});
+    });
+    for (auto &kv : extraPlaylistTracks) {
+        if (kv.second.empty()) continue;
+        bool found = false;
+        for (auto &p : out) {
+            if (p.first == kv.first) { p.second += (int)kv.second.size(); found = true; break; }
+        }
+        if (!found) out.push_back({kv.first, (int)kv.second.size()});
+    }
+    return out;
+}
+
+std::vector<Track> indexTracksForPlaylist(const String &name) {
+    std::vector<Track> out;
+    forEachRecord([&](const IndexRecord &r) {
+        if (!r.isPlaylist || r.playlistName != name) return;
+        Track t;
+        t.artist = r.artist;
+        t.album = r.album;
+        t.title = r.title;
+        t.path = r.path;
+        out.push_back(std::move(t));
+    });
+    auto it = extraPlaylistTracks.find(name);
+    if (it != extraPlaylistTracks.end()) {
+        for (auto &t : it->second) out.push_back(t);
+    }
+    return out;
+}
+
+void addToPlaylist(const String &playlistName, const Track &t) {
+    extraPlaylistTracks[playlistName].push_back(t);
 }
 
 } // namespace Library

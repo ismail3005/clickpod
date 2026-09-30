@@ -8,7 +8,7 @@
 // implemented by hand rather than depending on ESP32-audioI2S to expose
 // it (spec section 10's open question: it may not).
 //
-// Deliberately NOT run during Library::scanFromSd()'s bulk directory
+// Deliberately NOT run during Library::ensureIndex()'s bulk directory
 // walk -- reading/parsing tags (and especially embedded lyrics, which can
 // be several KB of text) for every file up front would both slow the
 // scan down further and risk holding a lot of string data in RAM for

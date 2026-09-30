@@ -74,26 +74,29 @@ to iterate on the UX before committing it to firmware. It's wired into
 `main.cpp` and drives the real TFT + ANO input.
 
 **Library data** (`src/ui/Library.*`) is no longer just a hand-written
-mock set -- `Library::scanFromSd()` walks the real SD card at boot and
-replaces it. Each top-level folder becomes an Artist (subfolders are
+mock set, and no longer holds the whole card's contents in RAM for the
+whole session either. `Library::ensureIndex()` builds a compact index
+file on the SD card itself (`/clickpod.idx`) the first time it doesn't
+already exist -- each top-level folder becomes an Artist (subfolders are
 Albums, files are Tracks), except folder names recognized as playlist
 folders (currently just `funky times`, see `isPlaylistFolderName()` in
 `Library.cpp`), whose Artist/Album/track tree becomes one named Playlist
-instead of separate Music entries -- keeps a playlist folder that
-duplicates albums also downloaded separately from showing those albums
-twice. Selecting a track now plays that exact file
-(`src/audio/AudioBridge.*`), not just "whatever's first on the card."
-Track titles start out from filenames, but real per-track metadata --
-exact duration, real artist/title/album tags, embedded lyrics, and
-embedded cover art -- is read directly from each FLAC file's metadata
-blocks (`src/audio/FlacMeta.*`, a hand-written parser against the open
-FLAC spec) the moment a track becomes Now Playing. Album art is decoded
-via `src/ui/AlbumArt.*` (JPEG only). This is deliberately lazy (not done
-during the bulk SD scan) to keep boot time from growing further -- see
-CLAUDE.md for the full writeup, including the one known gap (scrubbing
-moves the on-screen position correctly now, but doesn't yet seek the
-real audio decoder to match). The mock placeholder set is kept as a
-fallback for bench-testing with no SD card inserted.
+instead of separate Music entries. Every boot after the first just reads
+that index file back (fast) instead of re-walking the SD card (slow) --
+a manual "Rescan library" row in Settings forces a rebuild if the card's
+contents change. Menus read from the index lazily and boundedly: only
+the one album or playlist actually being opened gets materialized into
+memory, not the whole library, freed again once you navigate away -- see
+CLAUDE.md's "on-SD compact index" section for the full design. Selecting
+a track plays that exact file (`src/audio/AudioBridge.*`), not just
+"whatever's first on the card." Track titles start out from filenames,
+but real per-track metadata -- exact duration, real artist/title/album
+tags, embedded lyrics, and embedded cover art -- is read directly from
+each FLAC file's metadata blocks (`src/audio/FlacMeta.*`, a hand-written
+parser against the open FLAC spec) the moment a track becomes Now
+Playing. Album art is decoded via `src/ui/AlbumArt.*` (JPEG only). The
+mock placeholder set is kept as a fallback for bench-testing with no SD
+card inserted, or a card the index build finds nothing playable on.
 
 **Bluetooth** is also no longer a placeholder. The Bluetooth screen is a
 real on/off toggle wired to `src/bt/BluetoothSource.*`
@@ -174,7 +177,8 @@ src/state/Persist.*     NVS-backed settings + Bluetooth-on persistence
 src/audio/AudioBridge.* bridges UI playback intent to real ESP32-audioI2S output
 src/audio/FlacMeta.*    FLAC metadata parser: duration, tags, lyrics, embedded art
 src/ui/UiTypes.h        shared data shapes (Track, Menu, MenuItem, ...)
-src/ui/Library.*        real SD-scanned library (Library::scanFromSd()), mock fallback
+src/ui/Library.*        on-SD compact index (Library::ensureIndex(), /clickpod.idx),
+                         read lazily/boundedly per screen, mock fallback
 src/ui/MenuEngine.*     menu-stack construction + navigation (ported from the simulator)
 src/ui/InputRouter.*    ANO events -> state transitions (ported from the simulator)
 src/ui/AlbumArt.*       decodes embedded FLAC cover art for Now Playing

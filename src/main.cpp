@@ -66,20 +66,17 @@ static bool initSd() {
     // SD.begin()'s defaults are conservative for a real library scan: a
     // plain SD.begin(cs) uses 4MHz SPI and a 5-file handle limit, both
     // fine for the original bring-up test (play one file) but painfully
-    // slow and tight once Library::scanFromSd() is walking hundreds of
+    // slow and tight once Library::ensureIndex() is walking hundreds of
     // files with up to ~5 directories open at once (a playlist-folder
     // scan nests SD root -> playlist -> artist -> album -> file). Bumped
     // from 4MHz first to 20MHz, now to 25MHz -- confirmed reliable at
     // 20MHz on this board's wiring (a 425-track scan completed clean, no
     // corruption/retry errors in the serial log), so pushing a bit
-    // further. A real library scan is dominated by FAT directory-lookup
-    // latency (many small file opens) more than raw SPI throughput, so
-    // this alone won't cut scan time dramatically -- if boot speed still
-    // isn't good enough, the bigger win is scanning off the blocking
-    // boot path entirely, which needs care around the fact that TFT_eSPI
-    // and SD share this physical SPI bus (see CLAUDE.md for why that
-    // hasn't been done yet). Drop back to 20MHz if this causes SD
-    // errors.
+    // further. Only matters for the FIRST ever boot (or after a manual
+    // "Rescan library") now -- ensureIndex() skips this walk entirely on
+    // every subsequent boot once the on-SD index exists (see Library.h) --
+    // but still worth keeping fast for whenever it does need to run. Drop
+    // back to 20MHz if this causes SD errors.
     if (!SD.begin(PIN_SD_CS, SPI, 25000000, "/sd", 10)) {
         Serial.println(F("[bringup] FAIL: SD.begin() failed. Check wiring/CS pin and "
                           "that the card is FAT32-formatted."));
@@ -156,18 +153,24 @@ void setup() {
     UI::begin(tft);
 
     if (sdOk) {
-        // Visual proof that this is a slow scan in progress, not a hang --
-        // easy to mistake for one otherwise on a large library (this is
-        // literally what happened during bring-up). Plain direct tft
-        // prints, same as the original step-1-6 bring-up status lines --
-        // no need to route this through the UI state machine for a
-        // one-off message drawn once before real UI::update() calls start.
+        // Visual proof that this might take a moment -- easy to mistake
+        // for a hang otherwise (this is literally what happened during
+        // bring-up). Plain direct tft prints, same as the original
+        // step-1-6 bring-up status lines -- no need to route this through
+        // the UI state machine for a one-off message drawn once before
+        // real UI::update() calls start. In practice this is only slow on
+        // the FIRST ever boot (or after a manual "Rescan library" from
+        // Settings) -- ensureIndex() just checks the index file exists on
+        // every boot after that and skips the FAT walk entirely, so this
+        // message usually only flashes by for a moment. See Library.h/
+        // CLAUDE.md for the on-SD index this replaced the old always-
+        // rescan-every-boot scanFromSd() with.
         tft.setTextColor(TFT_WHITE, TFT_BLACK);
         tft.setTextSize(1);
         tft.setCursor(10, 220);
-        tft.print("Scanning library...");
-        Library::scanFromSd(); // replaces the placeholder library if it finds any real tracks
-        Serial.printf("[bringup] free heap after library scan: %u bytes total, %u internal\n",
+        tft.print("Loading library...");
+        Library::ensureIndex();
+        Serial.printf("[bringup] free heap after library index: %u bytes total, %u internal\n",
                       ESP.getFreeHeap(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     }
 

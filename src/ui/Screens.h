@@ -16,4 +16,9 @@ namespace Screens {
 void begin(TFT_eSPI &tft);
 void render(); // draws per state.dirty/progressDirty, then clears whichever fired
 
+// Draws msg immediately, bypassing the normal dirty-flag render() path --
+// for a blocking call (e.g. a manual library rescan) that needs on-screen
+// feedback BEFORE it blocks, not after the fact.
+void showBusyMessage(const String &msg);
+
 } // namespace Screens
