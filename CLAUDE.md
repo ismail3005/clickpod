@@ -96,8 +96,11 @@ src/power/Battery.*      MAX17048 fuel gauge polling over I2C (step 7) —
                          Battery::update() throttles to one poll/2s internally;
                          main.cpp's syncBatteryToUi() pushes it into state.battery
 src/audio/AudioBridge.*  bridges UI "play this track" intent to real ESP32-audioI2S
-                         output — plays the first real file found on SD; see
-                         "known placeholders" below for why
+                         output — plays the given track's real path, or falls back
+                         to the first playable file found for tracks with none
+src/audio/FlacMeta.*     hand-written FLAC metadata-block parser (duration, tags,
+                         lyrics, embedded art) — called lazily at track-start, not
+                         during the bulk SD scan; see its dedicated section below
 src/ui/UiTypes.h         shared shapes: Track, Menu, MenuItem (mirrors the simulator's
                          JS object shapes 1:1 — cross-check against simulator source
                          if unsure what a field means)
@@ -108,6 +111,8 @@ src/ui/MenuEngine.*      menu-stack build/navigate (buildMainMenu, enterBluetoot
                          function from the simulator's JS of the same names
 src/ui/InputRouter.*     ANO events -> state transitions (handleTap/handleLongPress/
                          handleDoubleTap/rotate/togglePower) — also ported 1:1
+src/ui/AlbumArt.*        decodes embedded FLAC cover art (via FlacMeta + TJpg_Decoder)
+                         into a small cached buffer for the Now Playing screen
 src/ui/Screens.*         TFT_eSPI rendering for every screen
 src/ui/UI.*              boot sequence, playback clock, redraw dispatch
 src/ui/Util.*            shared fmtTime(), hasAudioExtension()
@@ -366,6 +371,107 @@ expected to also be at SD root (alongside `funky times/`) aren't being
 found by the scan; worth checking the card's actual root layout matches
 what `Library::scanFromSd()` expects (top-level folder ->
 Artist/Album/track.flac) once the crash itself is confirmed fixed.
+
+**Fifth real hardware bug (found, fixed): most menu navigation never
+triggered a redraw at all.** Reported as "right-tap does nothing, then a
+down-tap suddenly shows the menu" / "gotta select THEN press down for it
+to register" -- looked at first like the known redraw-speed issue, but
+turned out to be a correctness bug, not a performance one. `pushMenu()`
+(the one function every `build*()` menu-constructing function funnels
+through to enter a new menu level) never set `state.dirty`. So selecting
+into Music/Playlists/an Artist/an Album/Settings correctly changed the
+underlying state but never scheduled a redraw -- the screen only updated
+once some LATER, unrelated action (the next UP/DOWN, which does set
+dirty) happened to force one, showing the by-then-already-changed menu
+and making it look like it belonged to the wrong button press. Fixed by
+setting `state.dirty = true` once, in `pushMenu()` itself. Audited every
+other `state.mode`/`state.menuStack` mutation site in `MenuEngine.cpp`
+and `InputRouter.cpp` at the same time to confirm this was the only gap
+of its kind.
+
+## Real per-track metadata: duration, tags, lyrics, album art (FlacMeta + AlbumArt)
+
+`Library::scanFromSd()` still only reads filenames during the bulk
+directory walk (kept fast on purpose -- see the scanning section above).
+Real FLAC metadata is read **lazily, once, when a track actually becomes
+Now Playing** -- `MenuEngine::setNowPlaying()` calls into
+`src/audio/FlacMeta.*`, a hand-written FLAC metadata-block parser (the
+format itself is a fixed, openly-documented binary spec, so this is
+implemented directly rather than depending on an uncertain third-party
+library API):
+- `readStreamInfo()` -- the STREAMINFO block (always block 0, first in
+  the file) gives an exact duration without decoding anything. This
+  replaces the `durSec=0` placeholder for any track that gets played,
+  which was also the actual root cause of "scrubbing doesn't work":
+  `InputRouter.cpp`'s scrub math (`constrain(pos, 0, durSec)`) could
+  never move away from 0 when `durSec` was always 0. **The UI-side
+  scrub/progress-bar system now works correctly as a result.** What's
+  still NOT done: making the real audio decoder actually seek to the
+  scrubbed position -- `AudioBridge` has no seek call, and
+  `ESP32-audioI2S`'s seek support for FLAC specifically is genuinely
+  uncertain (unlike the STREAMINFO/Vorbis-comment parsing above, this
+  would depend on an unverified library API, not a fixed format spec) --
+  deliberately not guessed at blind since a wrong method name there
+  risks a build break for a library import, not just a missing feature.
+  If real backend seeking is wanted, that's the next piece, and needs
+  either the real installed header to check against or the user
+  confirming the exact API on real hardware.
+- `readTags()` -- the VORBIS_COMMENT block. Overrides filename-derived
+  artist/title/album with the real tags when present, and picks up a
+  `LYRICS`/`UNSYNCEDLYRICS` comment into `Library::LYRICS[key]` if
+  present (split into lines by `MenuEngine.cpp`'s
+  `splitLyricsIntoLines()`). **Known cosmetic limitation**: Vorbis
+  "unsynced" lyrics are plain text with no per-line timestamps, so every
+  line gets `atSec=0` -- `drawLyrics()`'s "active line" picks the LAST
+  line whenever candidates tie, so real lyrics display correctly but the
+  scrolling highlight doesn't track playback position the way the one
+  hand-written time-synced demo entry does. Real text beats no text;
+  not worth more engineering for a format that's plain text by design.
+- `readPicture()` -- the PICTURE block (embedded cover art), handed to
+  `src/ui/AlbumArt.*` for JPEG decode (via the new `TJpg_Decoder`
+  dependency) into a small cached RGB565 buffer sized to the Now Playing
+  art box. Decoded ONCE per track-start, not on every screen redraw
+  (`Screens.cpp`'s `drawNowPlaying()` just blits the cached buffer) --
+  re-decoding a JPEG on every redraw (volume change, play/pause, return
+  from another screen, ...) would undo the whole redraw-speed effort
+  below. Falls back to the pre-existing placeholder glyph square if the
+  file has no PICTURE block, or the embedded art is PNG rather than
+  JPEG (`TJpg_Decoder` doesn't handle PNG).
+
+**`AlbumArt.cpp` is the least-verified piece of this round's work** --
+`TJpg_Decoder`'s exact API (`setCallback`'s callback signature,
+`drawJpg`'s return type/constants, `getJpgSize`) is written from general
+knowledge of this specific, fairly well-known library, not checked
+against its actual installed header. If art decoding doesn't compile or
+doesn't render correctly, start there.
+
+## Redraw-speed pass (partial, flagged for more if still not enough)
+
+On top of the pushMenu correctness fix above, did one real perf pass:
+`MenuEngine::moveSelection()` (UP/DOWN/rotate within a plain list --
+Music/Playlists/Artist/Album/Settings/BT/track-context menus) now sets
+a new, lighter `state.selectionDirty` instead of the full `state.dirty`.
+`Screens.cpp`'s `updateMenuSelection()` redraws just the old + new
+selected rows (a shared `drawMenuRow()` helper keeps this and the full
+`drawMenu()` loop from drifting apart) instead of wiping and redrawing
+the whole list on every single navigation tap -- falls back to a full
+redraw automatically if the viewport needs to scroll to keep the new
+selection visible, or if there's no valid previous-selection baseline
+yet (e.g. right after entering a different menu).
+
+**Deliberately NOT done this round** (flagged, not silently skipped):
+- The main-menu grid (`drawMainMenuGrid()`, only 4 items) still does a
+  full redraw on every selection move -- cheap enough at that size that
+  it wasn't worth the same treatment yet.
+- `drawQueue()` (queue list navigation) still does a full redraw too --
+  same pattern as `drawMenu()`, just not done yet, same reasoning as the
+  main menu (lower priority than the Music/Playlists/Artist/Album path,
+  which is the one most exercised now that the library is real).
+- `adjustSlider()`/`cycleChoice()` (Settings' Brightness/Sort/Appearance
+  rows) still trigger a full redraw for what's really a one-row
+  sub-label change.
+If menus still feel slow after this, these three are the next places to
+apply the same `drawMenuRow()`-style partial-redraw pattern.
 
 ## Working style this project has used (carry forward)
 

@@ -83,6 +83,12 @@ struct AppState {
     // UI.cpp's tickPlaybackClock. Avoids a full-screen flicker every
     // second during playback.
     bool progressDirty = false;
+    // Lighter still: set when the selection cursor moves within the same
+    // menu list (UP/DOWN/rotate), which only needs the old + new selected
+    // rows redrawn, not the whole list -- see Screens::render()'s
+    // updateMenuSelection(). Falls back to a full `dirty` redraw itself
+    // if the viewport needs to scroll to keep the new selection visible.
+    bool selectionDirty = false;
 };
 
 extern AppState state;

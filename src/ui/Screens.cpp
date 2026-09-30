@@ -1,5 +1,6 @@
 #include "Screens.h"
 
+#include "AlbumArt.h"
 #include "Library.h"
 #include "MenuEngine.h"
 #include "Util.h"
@@ -156,11 +157,44 @@ void drawMainMenuGrid() {
     }
 }
 
+constexpr int16_t kMenuRowH = 22;
+constexpr int16_t kMenuListY = kBodyY + 26;
+
+int16_t menuMaxRows() { return (kBodyH - 26) / kMenuRowH; }
+int menuStartIdx(int selected) {
+    int16_t maxRows = menuMaxRows();
+    return selected >= maxRows ? selected - maxRows + 1 : 0;
+}
+
+// Shared by the full drawMenu() loop and updateMenuSelection()'s partial
+// redraw below -- one place for the row layout so they can't drift apart.
+// Always clears its own row background first (not just when selected),
+// since the partial-redraw caller has no prior full-body clear to rely on.
+void drawMenuRow(Menu *m, int i, int16_t y, const Palette &p) {
+    bool sel = i == m->selected;
+    tftPtr->fillRect(0, y, kScreenW, kMenuRowH, sel ? p.accent : p.bg);
+    tftPtr->setTextColor(sel ? TFT_WHITE : p.fg, sel ? p.accent : p.bg);
+    tftPtr->setCursor(12, y + 6);
+    tftPtr->print(m->items[i].label);
+    String sub = m->items[i].liveSub();
+    if (sub.length()) {
+        tftPtr->setCursor(kScreenW - 12 - sub.length() * 6, y + 6);
+        tftPtr->print(sub);
+    }
+}
+
+// Baseline for updateMenuSelection()'s partial redraw: what was actually
+// drawn on screen last, as of the most recent full drawMenu() call. -1
+// means "no valid baseline, must fall back to a full redraw" (e.g. right
+// after navigating into a different menu).
+int lastDrawnMenuSelected = -1;
+int lastDrawnMenuStartIdx = -1;
+
 void drawMenu() {
     const Palette &p = pal();
     tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
     Menu *m = MenuEngine::currentMenu();
-    if (!m) return;
+    if (!m) { lastDrawnMenuSelected = -1; return; }
 
     tftPtr->setTextSize(1);
     if (state.mode == AppMode::BT) drawBtGlyph(10, kBodyY + 8, 12, p.accent);
@@ -168,26 +202,38 @@ void drawMenu() {
     tftPtr->setCursor(state.mode == AppMode::BT ? 26 : 10, kBodyY + 10);
     tftPtr->print(m->title);
 
-    int16_t rowH = 22;
-    int16_t y = kBodyY + 26;
-    int16_t maxRows = (kBodyH - 26) / rowH;
-    // simple viewport clamp so the selection stays visible without a full scrollbar
-    int16_t startIdx = 0;
-    if (m->selected >= maxRows) startIdx = m->selected - maxRows + 1;
-
+    int maxRows = menuMaxRows();
+    int startIdx = menuStartIdx(m->selected);
+    int16_t y = kMenuListY;
     for (int i = startIdx; i < (int)m->items.size() && (i - startIdx) < maxRows; i++) {
-        bool sel = i == m->selected;
-        if (sel) tftPtr->fillRect(0, y, kScreenW, rowH, p.accent);
-        tftPtr->setTextColor(sel ? TFT_WHITE : p.fg, sel ? p.accent : p.bg);
-        tftPtr->setCursor(12, y + 6);
-        tftPtr->print(m->items[i].label);
-        String sub = m->items[i].liveSub();
-        if (sub.length()) {
-            tftPtr->setCursor(kScreenW - 12 - sub.length() * 6, y + 6);
-            tftPtr->print(sub);
-        }
-        y += rowH;
+        drawMenuRow(m, i, y, p);
+        y += kMenuRowH;
     }
+    lastDrawnMenuSelected = m->selected;
+    lastDrawnMenuStartIdx = startIdx;
+}
+
+// Redraws just the previously-selected and newly-selected rows instead of
+// the whole list -- the common case for plain UP/DOWN/rotate navigation.
+// Escalates to a full state.dirty redraw (handled by the caller falling
+// through to the normal dispatch in the same render() call, so there's no
+// extra frame of delay) if the viewport needs to scroll to keep the new
+// selection visible, or if there's no valid baseline yet.
+void updateMenuSelection() {
+    Menu *m = MenuEngine::currentMenu();
+    if (!m || lastDrawnMenuSelected < 0) { state.dirty = true; return; }
+
+    int newStartIdx = menuStartIdx(m->selected);
+    if (newStartIdx != lastDrawnMenuStartIdx) { state.dirty = true; return; }
+
+    const Palette &p = pal();
+    if (lastDrawnMenuSelected != m->selected) {
+        int16_t oldY = kMenuListY + (int16_t)(lastDrawnMenuSelected - lastDrawnMenuStartIdx) * kMenuRowH;
+        drawMenuRow(m, lastDrawnMenuSelected, oldY, p);
+    }
+    int16_t newY = kMenuListY + (int16_t)(m->selected - newStartIdx) * kMenuRowH;
+    drawMenuRow(m, m->selected, newY, p);
+    lastDrawnMenuSelected = m->selected;
 }
 
 // Redraws just the progress bar + elapsed/remaining time strip, without
@@ -231,13 +277,9 @@ void drawNowPlaying() {
         return;
     }
 
-    int16_t artSize = 92; // ~36% of ~256px content width, matches the simulator's ratio after the overflow fix
+    int16_t artSize = AlbumArt::kSize; // matches the simulator's ratio after the overflow fix
     int16_t artX = kScreenW / 2 - artSize / 2, artY = kBodyY + 8;
-    tftPtr->fillRoundRect(artX, artY, artSize, artSize, 8, 0x2D9F);
-    tftPtr->setTextColor(TFT_WHITE, 0x2D9F);
-    tftPtr->setTextSize(2);
-    tftPtr->setCursor(artX + artSize / 2 - 6, artY + artSize / 2 - 8);
-    tftPtr->print(String(n.art));
+    AlbumArt::draw(artX, artY, artSize, artSize, n.art, 0x2D9F);
 
     int16_t metaY = artY + artSize + 8;
     tftPtr->setTextSize(1);
@@ -350,11 +392,19 @@ void begin(TFT_eSPI &tft) { tftPtr = &tft; }
 void render() {
     if (!tftPtr) return;
 
-    if (!state.dirty) {
-        if (state.progressDirty && state.mode == AppMode::NOW_PLAYING) drawNowPlayingProgress();
-        state.progressDirty = false;
-        return;
+    if (state.progressDirty && !state.dirty && state.mode == AppMode::NOW_PLAYING) {
+        drawNowPlayingProgress();
     }
+    state.progressDirty = false;
+
+    if (state.selectionDirty && !state.dirty) {
+        if (state.mode == AppMode::MENU || state.mode == AppMode::BT || state.mode == AppMode::TRACK_MENU) {
+            updateMenuSelection(); // may itself set state.dirty as a scroll-needed fallback
+        }
+    }
+    state.selectionDirty = false;
+
+    if (!state.dirty) return;
 
     if (state.mode == AppMode::BOOT) {
         drawStatusbar();
@@ -379,7 +429,6 @@ void render() {
     }
 
     state.dirty = false;
-    state.progressDirty = false; // a full redraw already covers the progress bar too
 }
 
 } // namespace Screens

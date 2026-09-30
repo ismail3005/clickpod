@@ -83,10 +83,17 @@ instead of separate Music entries -- keeps a playlist folder that
 duplicates albums also downloaded separately from showing those albums
 twice. Selecting a track now plays that exact file
 (`src/audio/AudioBridge.*`), not just "whatever's first on the card."
-Track titles come from filenames and durations are unknown (0) until real
-FLAC metadata parsing exists (spec section 10 is still open) -- the
-mock placeholder set is kept as a fallback for bench-testing with no SD
-card inserted.
+Track titles start out from filenames, but real per-track metadata --
+exact duration, real artist/title/album tags, embedded lyrics, and
+embedded cover art -- is read directly from each FLAC file's metadata
+blocks (`src/audio/FlacMeta.*`, a hand-written parser against the open
+FLAC spec) the moment a track becomes Now Playing. Album art is decoded
+via `src/ui/AlbumArt.*` (JPEG only). This is deliberately lazy (not done
+during the bulk SD scan) to keep boot time from growing further -- see
+CLAUDE.md for the full writeup, including the one known gap (scrubbing
+moves the on-screen position correctly now, but doesn't yet seek the
+real audio decoder to match). The mock placeholder set is kept as a
+fallback for bench-testing with no SD card inserted.
 
 **Bluetooth** is also no longer a placeholder. The Bluetooth screen is a
 real on/off toggle wired to `src/bt/BluetoothSource.*`

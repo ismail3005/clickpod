@@ -1,6 +1,7 @@
 #include "UI.h"
 
 #include "../state/AppState.h"
+#include "AlbumArt.h"
 #include "InputRouter.h"
 #include "MenuEngine.h"
 #include "Screens.h"
@@ -24,10 +25,10 @@ void tickPlaybackClock() {
     if (!state.now.playing || !state.now.hasTrack) return;
 
     state.now.posSec += kClockMs / 1000.0f;
-    // durSec==0 means unknown (real scanned tracks don't have a known
-    // duration yet -- see Library::scanFromSd()), not "already over" --
-    // without this guard playback would auto-skip to the next track
-    // within the first tick of starting.
+    // durSec==0 means unknown, not "already over" -- true for placeholder/
+    // mock tracks, or a real track whose FlacMeta::readStreamInfo() call
+    // in MenuEngine::setNowPlaying() failed. Without this guard playback
+    // would auto-skip to the next track within the first tick of starting.
     if (state.now.durSec > 0 && state.now.posSec >= state.now.durSec) {
         MenuEngine::playNextInQueue(); // sets state.dirty itself -- new track needs a full redraw
     } else {
@@ -41,6 +42,7 @@ void tickPlaybackClock() {
 
 void begin(TFT_eSPI &tft) {
     Screens::begin(tft);
+    AlbumArt::begin(tft);
 
     MenuEngine::buildMainMenu();
     state.mode = AppMode::BOOT;

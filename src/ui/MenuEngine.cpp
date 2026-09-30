@@ -5,8 +5,10 @@
 #include <utility>
 
 #include "../audio/AudioBridge.h"
+#include "../audio/FlacMeta.h"
 #include "../bt/BluetoothSource.h"
 #include "../state/AppState.h"
+#include "AlbumArt.h"
 #include "Library.h"
 #include "Util.h"
 
@@ -17,7 +19,58 @@ Track trackObj(const NowPlaying &n) {
     return Track{n.artist, n.album, n.title, n.durSec, n.art, n.path};
 }
 
-void setNowPlaying(const Track &t) {
+// Splits a lyrics blob (as stored in a LYRICS/UNSYNCEDLYRICS Vorbis
+// comment -- plain text, NOT time-synced, hence "unsynced") into lines
+// for the Lyrics screen. Every line gets atSec=0 since there's no real
+// timing data to assign -- drawLyrics()'s "active line" picks the LAST
+// line whenever every candidate ties on atSec, so with real embedded
+// lyrics the screen shows real text (the actual ask) at the cost of the
+// scrolling highlight not tracking playback position the way it does
+// for the one hand-written time-synced demo entry. Not worth more
+// engineering than that for a tag format that's plain text by design.
+std::vector<LyricLine> splitLyricsIntoLines(const String &text) {
+    std::vector<LyricLine> lines;
+    int start = 0;
+    for (int i = 0; i <= text.length(); i++) {
+        if (i == text.length() || text[i] == '\n') {
+            String line = text.substring(start, i);
+            if (line.endsWith("\r")) line = line.substring(0, line.length() - 1);
+            if (line.length() > 0) lines.push_back(LyricLine{0, line});
+            start = i + 1;
+        }
+    }
+    return lines;
+}
+
+void setNowPlaying(Track t) {
+    // Lazy real-metadata fetch -- only for the ONE track actually becoming
+    // Now Playing, not during the bulk SD scan (see FlacMeta.h for why).
+    // Upgrades filename-derived artist/title/album to real tags when
+    // present, fills in a real duration (durSec stays 0/unknown if this
+    // fails, which UI.cpp's playback clock already guards against), and
+    // picks up real embedded lyrics if the file has them.
+    if (t.path.length() > 0) {
+        FlacMeta::StreamInfo si;
+        if (FlacMeta::readStreamInfo(t.path, si)) {
+            float dur = FlacMeta::durationSec(si);
+            if (dur > 0 && dur < 65536) t.durSec = (uint16_t)dur;
+        }
+
+        FlacMeta::Tags tags;
+        if (FlacMeta::readTags(t.path, tags)) {
+            if (tags.hasArtist) t.artist = tags.artist;
+            if (tags.hasTitle) t.title = tags.title;
+            if (tags.hasAlbum) t.album = tags.album;
+            if (tags.hasLyrics) {
+                Library::LYRICS[Library::keyFor(t)] = splitLyricsIntoLines(tags.lyrics);
+            }
+        }
+
+        AlbumArt::loadForTrack(t.path); // no-op-safe if the file has no (or non-JPEG) embedded art
+    } else {
+        AlbumArt::clear(); // placeholder/mock track with no real path -- don't show the previous track's art
+    }
+
     state.now.hasTrack = true;
     state.now.key = Library::keyFor(t);
     state.now.artist = t.artist;
@@ -375,8 +428,16 @@ void moveSelection(int delta) {
     Menu *m = currentMenu();
     if (!m || m->items.empty()) return;
     int n = (int)m->items.size();
+    int prev = m->selected;
     m->selected = ((m->selected + delta) % n + n) % n;
-    state.dirty = true;
+    if (prev == m->selected) return;
+    // The main-menu grid's partial-redraw path isn't implemented (only 4
+    // items, full redraw there is already cheap) -- everywhere else
+    // (Music/Playlists/Artist/Album/Settings/BT/track-context lists) gets
+    // the lighter selectionDirty path instead of a full-body redraw on
+    // every single UP/DOWN tap.
+    if (isMainMenuRoot()) state.dirty = true;
+    else state.selectionDirty = true;
 }
 
 void moveQueueSelection(int delta) {
