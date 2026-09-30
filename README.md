@@ -36,11 +36,11 @@ Following the bring-up order from spec section 4:
       No wiring needed, pure software/pairing. Per spec section 7, wired
       and BT are mutually exclusive outputs; `kTestWiredPlayback` in
       `main.cpp` picks which one this build exercises (flip to `false` to
-      test BT instead of wired playback). **Watch out for:** the classic
-      BT stack is a sizable chunk of flash on top of everything else in
-      this build -- if it overflows the default partition scheme's app
-      slot, switch `board_build.partitions` to something with a bigger
-      single app partition (e.g. `huge_app.csv`).
+      test BT instead of wired playback). **Hardware note:** classic BT
+      did overflow the default partition scheme's app slot (build came in
+      at 1.72MB vs. ~1.25MB available) -- switched
+      `board_build.partitions` to `huge_app.csv` (~3MB single app
+      partition, no OTA) to fix it.
 - [x] 6. ANO encoder + buttons — hardware-confirmed on the rebuilt board.
       Encoder rotation, all 5 buttons, and the tap/double-tap/long-press
       state machine for CENTER (spec 5.3) all correct. Board has no
