@@ -1,6 +1,7 @@
 #include "MenuEngine.h"
 
 #include <set>
+#include <utility>
 
 #include "../audio/AudioBridge.h"
 #include "../state/AppState.h"
@@ -355,6 +356,20 @@ void moveQueueSelection(int delta) {
     if (state.queue.empty()) return;
     int n = (int)state.queue.size();
     state.queueSelected = ((state.queueSelected + delta) % n + n) % n;
+    state.dirty = true;
+}
+
+// While a queue row is "grabbed" (see the RIGHT-tap toggle in
+// InputRouter), UP/DOWN swap it with its neighbor and move the cursor
+// along with it, instead of just moving the cursor -- the drag-and-drop
+// equivalent for a device with no touchscreen.
+void moveGrabbedQueueItem(int delta) {
+    int n = (int)state.queue.size();
+    if (n < 2) return;
+    int from = state.queueSelected;
+    int to = ((from + delta) % n + n) % n;
+    std::swap(state.queue[from], state.queue[to]);
+    state.queueSelected = to;
     state.dirty = true;
 }
 

@@ -265,7 +265,7 @@ void drawQueue() {
     tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
     tftPtr->setTextColor(p.fg, p.bg);
     tftPtr->setCursor(10, kBodyY + 10);
-    tftPtr->print("Queue - select to play");
+    tftPtr->print(state.queueGrabbed ? "Queue - UP/DOWN move, RIGHT drop" : "Queue - RIGHT to grab, select to play");
 
     if (state.queue.empty()) {
         tftPtr->setTextColor(p.muted, p.bg);
@@ -283,14 +283,24 @@ void drawQueue() {
 
     for (int i = startIdx; i < (int)state.queue.size() && (i - startIdx) < maxRows; i++) {
         bool sel = i == state.queueSelected;
-        if (sel) tftPtr->fillRect(0, y, kScreenW, rowH, p.accent);
-        tftPtr->setTextColor(sel ? TFT_WHITE : p.muted2, sel ? p.accent : p.bg);
-        tftPtr->setCursor(12, y + 6);
-        tftPtr->print(String(i + 1));
-        tftPtr->setTextColor(sel ? TFT_WHITE : p.fg, sel ? p.accent : p.bg);
+        bool grabbed = sel && state.queueGrabbed;
+        uint16_t rowColor = grabbed ? 0xFD20 /*amber*/ : p.accent;
+        if (sel) tftPtr->fillRect(0, y, kScreenW, rowH, rowColor);
+        if (grabbed) {
+            // Three-bar "grip" glyph in place of the index number, and a
+            // dashed border, so a grabbed row for reordering reads
+            // differently from a merely-selected one.
+            tftPtr->drawRect(0, y, kScreenW, rowH, TFT_WHITE);
+            for (int b = 0; b < 3; b++) tftPtr->drawFastHLine(10, y + 8 + b * 4, 6, TFT_WHITE);
+        } else {
+            tftPtr->setTextColor(sel ? TFT_WHITE : p.muted2, sel ? rowColor : p.bg);
+            tftPtr->setCursor(12, y + 6);
+            tftPtr->print(String(i + 1));
+        }
+        tftPtr->setTextColor(sel ? TFT_WHITE : p.fg, sel ? rowColor : p.bg);
         tftPtr->setCursor(34, y + 2);
         tftPtr->print(state.queue[i].title);
-        tftPtr->setTextColor(sel ? 0xE73C : p.muted, sel ? p.accent : p.bg);
+        tftPtr->setTextColor(sel ? 0xE73C : p.muted, sel ? rowColor : p.bg);
         tftPtr->setCursor(34, y + 12);
         tftPtr->print(state.queue[i].artist);
         y += rowH;

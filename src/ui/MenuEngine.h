@@ -35,6 +35,7 @@ void closeTrackMenu();
 
 void moveSelection(int delta);
 void moveQueueSelection(int delta);
+void moveGrabbedQueueItem(int delta);
 void adjustSlider(MenuItem &item, int delta);
 void cycleChoice(MenuItem &item, int dir);
 

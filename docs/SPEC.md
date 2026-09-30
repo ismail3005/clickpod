@@ -164,7 +164,7 @@ sort views, settings, BT device list, etc.)
 | Rotate (CW/CCW) | Fast scroll through list items |
 | Up / Down (single press) | Move one item at a time (slower, precise scroll) |
 | Up / Down (long press) | Fast scroll (same effective behavior as rotating) |
-| Left / Right | Navigate menu levels — Left = back/up a level, Right = enter/forward (dpad-style navigation) |
+| Left / Right | Navigate menu levels — Left = back/up a level, Right = enter/forward (dpad-style navigation). **AMENDED**: on a slider or choice settings row (Brightness, Sort tracks by, Appearance — see section 6 item 9), Left/Right instead decrement/increment that row's value, mirroring Center's increment. Without this there was no way to bring a slider back down once raised, since Left always meant "back". Only rows that aren't currently adjustable fall through to the normal back/forward navigation. |
 | Center (single tap) | Select / confirm current item |
 | Center (long press) | Power on/off (see section 5.4) |
 | Right (long press) | Enter Bluetooth pairing/discoverable mode (see 5.4 — RESOLVED: dedicated to Right specifically, chosen because it has no other long-press assignment anywhere in the app, unlike Up/Down which are used for Queue/Lyrics in NOW_PLAYING mode). Available globally, not just from a BT settings screen. |
@@ -178,7 +178,7 @@ sort views, settings, BT device list, etc.)
 | Up / Down | Volume up/down |
 | Left / Right (single tap) | Skip to next/previous track. **AMENDED** (was originally fast-forward/rewind on tap) -- rotate already covers scrubbing position, so tap L/R is free for track skip instead, matching classic iPod physical-button behavior (tap to skip, as opposed to touch-wheel seek). Right long press stays reserved globally for BT pairing (5.4), never reassigned here. |
 | Center (single tap) | Play/Pause toggle |
-| Center (double tap, within ~300-400ms window) | Return to menu — music CONTINUES PLAYING in background, does not pause |
+| Center (double tap, within ~300-400ms window) | Return to menu — music CONTINUES PLAYING in background, does not pause. **AMENDED (reverse direction)**: the same double-tap gesture, performed from anywhere else (MENU at any depth, Lyrics, Queue, Bluetooth, the track context menu) while a track is loaded, jumps straight back to Now Playing. Without this, once you left Now Playing there was no way back to it except starting a new track — which reset the queue, breaking the common case of browsing to a different album/playlist to queue something up and then wanting to return to what was already playing. |
 | Center (long press) | Power on/off (see section 5.4) |
 | Down (long press) | Show lyrics screen (see section 6.5) |
 | Up (long press) | Show queue screen (see section 6.6) |
@@ -189,7 +189,9 @@ sort views, settings, BT device list, etc.)
 Center button must distinguish THREE distinct behaviors:
 1. **Single tap** → Play/Pause (in NOW_PLAYING) or Select (in MENU)
 2. **Double tap** (second press-release within ~300-400ms of first
-   release) → Return to menu without pausing (NOW_PLAYING mode only)
+   release) → Return to menu without pausing (NOW_PLAYING mode only).
+   **AMENDED**: the same gesture also works in reverse from anywhere else
+   back to Now Playing, if a track is loaded — see 5.2.
 3. **Long press** (hold beyond a threshold, e.g. 600-800ms — tune by feel) →
    Power on/off
 
@@ -364,7 +366,16 @@ MP3/ID3v2), so flagging explicitly:
    (so "previous" from Now Playing can still walk back through them);
    everything after the selected track stays queued behind it. Long-press
    Left on a queue entry opens the track context menu (5.5) for it, same as
-   everywhere else a track appears.
+   everywhere else a track appears. **AMENDED (reordering)**: since the
+   device has no touchscreen to drag-and-drop with, Right tap toggles
+   "grabbing" the highlighted entry — a physical-button equivalent to
+   picking it up. While grabbed, Up/Down move the entry itself up/down the
+   queue (instead of moving the selection cursor), and Left/Center are
+   ignored so a drag can't be interrupted by accidentally exiting or
+   playing mid-reorder; a second Right tap drops it back in place. The
+   grabbed row is shown with a three-bar "grip" glyph in place of its
+   index number, echoing the drag-handle convention from touch-based
+   reorderable lists.
 8. **Bluetooth menu** — list of paired/available devices, connect/disconnect,
    pairing mode trigger
 9. **Settings menu** — general device settings (exact contents TBD/flexible,

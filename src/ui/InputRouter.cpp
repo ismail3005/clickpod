@@ -25,6 +25,7 @@ void togglePower() {
     } else {
         state.lastActiveMode = state.mode;
         state.mode = AppMode::OFF;
+        state.queueGrabbed = false;
         Serial.println(F("[ui] power off"));
     }
     state.dirty = true;
@@ -52,7 +53,17 @@ void handleTap(AnoButton btn) {
         } else if (btn == AnoButton::DOWN) {
             MenuEngine::moveSelection(1);
         } else if (btn == AnoButton::LEFT) {
-            if (state.mode == AppMode::BT) {
+            // On a slider/choice row, LEFT decrements (mirrors RIGHT/CENTER
+            // incrementing) instead of navigating back -- otherwise there
+            // was no way to ever bring a slider back down. Only rows that
+            // AREN'T currently adjustable fall through to the normal back
+            // gesture.
+            MenuItem *item = (m && !m->items.empty()) ? &m->items[m->selected] : nullptr;
+            if (item && item->isSlider) {
+                MenuEngine::adjustSlider(*item, -5);
+            } else if (item && item->isChoice) {
+                MenuEngine::cycleChoice(*item, -1);
+            } else if (state.mode == AppMode::BT) {
                 MenuEngine::exitBluetooth();
             } else if (state.mode == AppMode::TRACK_MENU) {
                 if (state.menuStack.size() > 1) state.menuStack.pop_back();
@@ -95,10 +106,19 @@ void handleTap(AnoButton btn) {
     } else if (state.mode == AppMode::QUEUE) {
         // Queue behaves like a selectable list: UP/DOWN move the cursor,
         // CENTER plays the highlighted track directly -- LEFT is the way
-        // back out instead, since CENTER is now spoken for.
-        if (btn == AnoButton::UP) MenuEngine::moveQueueSelection(-1);
+        // back out instead, since CENTER is now spoken for. RIGHT toggles
+        // "grabbing" the highlighted row for reordering (no touchscreen to
+        // drag with) -- while grabbed, UP/DOWN move the row itself instead
+        // of the cursor, and LEFT/CENTER are ignored so a drag can't be
+        // interrupted early.
+        if (btn == AnoButton::RIGHT) { state.queueGrabbed = !state.queueGrabbed; state.dirty = true; }
+        else if (state.queueGrabbed) {
+            if (btn == AnoButton::UP) MenuEngine::moveGrabbedQueueItem(-1);
+            else if (btn == AnoButton::DOWN) MenuEngine::moveGrabbedQueueItem(1);
+        }
+        else if (btn == AnoButton::UP) MenuEngine::moveQueueSelection(-1);
         else if (btn == AnoButton::DOWN) MenuEngine::moveQueueSelection(1);
-        else if (btn == AnoButton::LEFT) { state.mode = AppMode::NOW_PLAYING; state.dirty = true; }
+        else if (btn == AnoButton::LEFT) { state.mode = AppMode::NOW_PLAYING; state.queueGrabbed = false; state.dirty = true; }
         else if (btn == AnoButton::CENTER) MenuEngine::playFromQueueIndex(state.queueSelected);
     }
 }
@@ -122,7 +142,7 @@ void handleLongPress(AnoButton btn) {
         }
     } else if (state.mode == AppMode::NOW_PLAYING) {
         if (btn == AnoButton::DOWN) { state.mode = AppMode::LYRICS; state.dirty = true; }
-        else if (btn == AnoButton::UP) { state.mode = AppMode::QUEUE; state.queueSelected = 0; state.dirty = true; }
+        else if (btn == AnoButton::UP) { state.mode = AppMode::QUEUE; state.queueSelected = 0; state.queueGrabbed = false; state.dirty = true; }
         else if (btn == AnoButton::LEFT && state.now.hasTrack) {
             Track t{state.now.artist, state.now.album, state.now.title, state.now.durSec, state.now.art};
             MenuEngine::openTrackMenu(t);
@@ -133,8 +153,8 @@ void handleLongPress(AnoButton btn) {
         // Holding the same button that opened the screen closes it again.
         if (btn == AnoButton::DOWN) { state.mode = AppMode::NOW_PLAYING; state.dirty = true; }
     } else if (state.mode == AppMode::QUEUE) {
-        if (btn == AnoButton::UP) { state.mode = AppMode::NOW_PLAYING; state.dirty = true; }
-        else if (btn == AnoButton::LEFT && !state.queue.empty()) {
+        if (btn == AnoButton::UP) { state.mode = AppMode::NOW_PLAYING; state.queueGrabbed = false; state.dirty = true; }
+        else if (btn == AnoButton::LEFT && !state.queue.empty() && !state.queueGrabbed) {
             MenuEngine::openTrackMenu(state.queue[state.queueSelected]);
         }
     }
@@ -144,6 +164,16 @@ void handleDoubleTap() {
     if (state.mode == AppMode::NOW_PLAYING) {
         state.mode = AppMode::MENU; // playback keeps going
         if (state.menuStack.empty()) MenuEngine::buildMainMenu();
+        state.dirty = true;
+    } else if (state.now.hasTrack && state.mode != AppMode::OFF && state.mode != AppMode::BOOT) {
+        // Same gesture, reversed: jump straight back to whatever's loaded
+        // (playing or paused) from anywhere -- MENU (however deep),
+        // Lyrics, Queue, BT, a track context menu. Without this there was
+        // no way back to Now Playing except starting a new track, which
+        // reset the queue -- e.g. adding something to the queue from a
+        // different album/playlist and then wanting to return to what was
+        // already playing.
+        state.mode = AppMode::NOW_PLAYING;
         state.dirty = true;
     }
 }
