@@ -29,7 +29,7 @@
 // at once, same rule applies here. kTestWiredPlayback below picks which
 // one this bring-up pass exercises; SD/display/ANO stay active either way
 // since none of those conflict with the choice of audio output.
-constexpr bool kTestWiredPlayback = true;
+constexpr bool kTestWiredPlayback = false;
 constexpr const char *kBtDeviceName = "clickpod";
 //
 // TFT_eSPI's pin/driver config lives in platformio.ini's build_flags (not
