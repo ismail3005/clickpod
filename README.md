@@ -31,7 +31,16 @@ Following the bring-up order from spec section 4:
 - [x] 4. ILI9341 display alongside SD on shared SPI bus — hardware-confirmed
       on the rebuilt board. `TFT_eSPI` config is set via `platformio.ini`
       build flags rather than editing the library's `User_Setup.h`.
-- [ ] 5. ESP32-A2DP Bluetooth output as a separate playback path
+- [ ] 5. ESP32-A2DP Bluetooth output, tested in isolation — code written
+      (streams a 440Hz test tone via A2DP source), awaiting hardware test.
+      No wiring needed, pure software/pairing. Per spec section 7, wired
+      and BT are mutually exclusive outputs; `kTestWiredPlayback` in
+      `main.cpp` picks which one this build exercises (flip to `false` to
+      test BT instead of wired playback). **Watch out for:** the classic
+      BT stack is a sizable chunk of flash on top of everything else in
+      this build -- if it overflows the default partition scheme's app
+      slot, switch `board_build.partitions` to something with a bigger
+      single app partition (e.g. `huge_app.csv`).
 - [x] 6. ANO encoder + buttons — hardware-confirmed on the rebuilt board.
       Encoder rotation, all 5 buttons, and the tap/double-tap/long-press
       state machine for CENTER (spec 5.3) all correct. Board has no
@@ -61,10 +70,11 @@ Board: ESP32-WROVER-B (N4), 4MB flash / 4MB PSRAM.
 
 ```
 platformio.ini       PlatformIO project + dependency config
-src/main.cpp          entry point; currently implements bring-up steps 1-4, 6
+src/main.cpp          entry point; currently implements bring-up steps 1-6
 src/config/Pins.h     pin assignments, cross-checked against the WROVER-B datasheet
 src/state/AppState.h  UI mode enum (MENU, NOW_PLAYING, BT_PAIRING, ...)
 src/input/AnoInput.*  ANO encoder + button input logic (step 6)
+src/bt/BluetoothSource.* A2DP source test tone (step 5)
 docs/SPEC.md          full project specification
 ```
 

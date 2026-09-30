@@ -4,6 +4,7 @@
 #include <SPI.h>
 #include <TFT_eSPI.h>
 
+#include "bt/BluetoothSource.h"
 #include "config/Pins.h"
 #include "input/AnoInput.h"
 #include "state/AppState.h"
@@ -13,15 +14,23 @@
 //   2. ESP32 + SD card init                  [this file]
 //   3. ESP32 + PCM5102 playback via ESP32-audioI2S [this file]
 //   4. ILI9341 display alongside SD on shared SPI bus [this file]
-//   5. ESP32-A2DP Bluetooth output as a separate playback path
+//   5. ESP32-A2DP Bluetooth output, tested in isolation [this file]
 //   6. ANO encoder + buttons                 [this file, done ahead of step 5]
 //   7. MAX17048 battery monitoring
 //
-// This step (6) only wires up and reports raw input events (tap, long
-// press, double tap, encoder rotation) to prove the encoder + 5 buttons
-// are correctly wired and debounced -- deciding what each event means in
-// a given UI mode is menu/screen code that doesn't exist yet (spec
-// section 6). See src/input/AnoInput.h/.cpp for the actual input logic.
+// Step 6 only wires up and reports raw input events (tap, long press,
+// double tap, encoder rotation) to prove the encoder + 5 buttons are
+// correctly wired and debounced -- deciding what each event means in a
+// given UI mode is menu/screen code that doesn't exist yet (spec section
+// 6). See src/input/AnoInput.h/.cpp for the actual input logic.
+//
+// Step 5: per spec section 7, wired (I2S) and Bluetooth are mutually
+// exclusive output paths, manually switched by the user -- never run both
+// at once, same rule applies here. kTestWiredPlayback below picks which
+// one this bring-up pass exercises; SD/display/ANO stay active either way
+// since none of those conflict with the choice of audio output.
+constexpr bool kTestWiredPlayback = true;
+constexpr const char *kBtDeviceName = "clickpod";
 //
 // TFT_eSPI's pin/driver config lives in platformio.ini's build_flags (not
 // the library's User_Setup.h, which would get clobbered on reinstall).
@@ -186,30 +195,39 @@ void setup() {
 
     appMode = AppMode::MENU;
 
-    if (sdOk) {
-        String trackPath;
-        File root = SD.open("/");
-        bool found = findFirstAudioFile(root, "", trackPath);
-        root.close();
+    if (kTestWiredPlayback) {
+        if (sdOk) {
+            String trackPath;
+            File root = SD.open("/");
+            bool found = findFirstAudioFile(root, "", trackPath);
+            root.close();
 
-        if (found) {
-            Serial.printf("[bringup] Playing first audio file found: %s\n", trackPath.c_str());
-            audio.setPinout(PIN_I2S_BCLK, PIN_I2S_LRC, PIN_I2S_DOUT);
-            audio.setVolume(10); // 0-21; start low, raise once confirmed working
-            audio.connecttoFS(SD, trackPath.c_str());
-            appMode = AppMode::NOW_PLAYING;
+            if (found) {
+                Serial.printf("[bringup] Playing first audio file found: %s\n", trackPath.c_str());
+                audio.setPinout(PIN_I2S_BCLK, PIN_I2S_LRC, PIN_I2S_DOUT);
+                audio.setVolume(10); // 0-21; start low, raise once confirmed working
+                audio.connecttoFS(SD, trackPath.c_str());
+                appMode = AppMode::NOW_PLAYING;
 
-            tft.setCursor(10, 60);
-            tft.println(trackPath);
-        } else {
-            Serial.println(F("[bringup] No .flac/.mp3/.wav/.m4a/.aac file found on the "
-                              "card -- copy a test track over to exercise I2S playback."));
+                tft.setCursor(10, 60);
+                tft.println(trackPath);
+            } else {
+                Serial.println(F("[bringup] No .flac/.mp3/.wav/.m4a/.aac file found on the "
+                                  "card -- copy a test track over to exercise I2S playback."));
+            }
         }
+    } else {
+        BluetoothSource::begin(kBtDeviceName);
+        tft.setCursor(10, 60);
+        tft.print("BT: ");
+        tft.println(kBtDeviceName);
     }
 }
 
 void loop() {
-    audio.loop();
+    if (kTestWiredPlayback) {
+        audio.loop();
+    }
     reportAnoInput();
 }
 
