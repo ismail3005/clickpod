@@ -159,9 +159,9 @@ void setup() {
     Serial.println(F("\n=== DIY iPod-Classic MP3 Player - bring-up build ==="));
 
     verifyPsram();
-    // TEMP: display + ANO not physically wired back in yet during the
-    // rebuild. Re-enable both once they're back on the breadboard.
-    // initDisplay();
+    initDisplay();
+    // TEMP: ANO not physically wired back in yet during the rebuild.
+    // Re-enable once it's back on the breadboard.
     // AnoInput::begin();
 
     bool sdOk = initSd();
@@ -181,8 +181,8 @@ void setup() {
             audio.connecttoFS(SD, trackPath.c_str());
             appMode = AppMode::NOW_PLAYING;
 
-            // tft.setCursor(10, 60); // TEMP: display disconnected, skip touching it
-            // tft.println(trackPath);
+            tft.setCursor(10, 60);
+            tft.println(trackPath);
         } else {
             Serial.println(F("[bringup] No .flac/.mp3/.wav/.m4a/.aac file found on the "
                               "card -- copy a test track over to exercise I2S playback."));
