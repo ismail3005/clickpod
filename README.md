@@ -28,10 +28,9 @@ Following the bring-up order from spec section 4:
       — hardware-confirmed on the rebuilt board, real audio out of the DAC.
       `ESP32-audioI2S` is pinned to `3.0.12` (default branch needs C++20
       `std::span`, not available on this platform's GCC 8.4 toolchain).
-- [ ] 4. ILI9341 display alongside SD on shared SPI bus — previously
-      hardware-confirmed, not yet wired back in after the full rebuild.
-      `TFT_eSPI` config is set via `platformio.ini` build flags rather than
-      editing the library's `User_Setup.h`.
+- [x] 4. ILI9341 display alongside SD on shared SPI bus — hardware-confirmed
+      on the rebuilt board. `TFT_eSPI` config is set via `platformio.ini`
+      build flags rather than editing the library's `User_Setup.h`.
 - [ ] 5. ESP32-A2DP Bluetooth output as a separate playback path
 - [ ] 6. ANO encoder + buttons — code written (interrupt-driven quadrature
       decode, tap/double-tap/long-press state machine for CENTER per spec
