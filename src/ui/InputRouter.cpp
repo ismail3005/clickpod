@@ -36,7 +36,11 @@ void rotate(int dir) {
     if (state.mode == AppMode::MENU || state.mode == AppMode::BT) {
         MenuEngine::moveSelection(dir > 0 ? 1 : -1);
     } else if (state.mode == AppMode::NOW_PLAYING) {
-        state.now.posSec = constrain(state.now.posSec + dir * 3, 0.0f, (float)state.now.durSec);
+        // 1 second/tick, not 3 -- "finer" scrubbing per user feedback.
+        // Simple fixed step, not variable/accelerating like some iPod-style
+        // scroll wheels -- if 1s/tick feels too slow to cross a long track,
+        // that's the next thing to try (not attempted here).
+        state.now.posSec = constrain(state.now.posSec + dir * 1, 0.0f, (float)state.now.durSec);
         // Actually seeks the real decoder (confirmed against ESP32-
         // audioI2S 3.0.12's real header, not guessed) -- without this,
         // only the on-screen position moved, the audio itself didn't.

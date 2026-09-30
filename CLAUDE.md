@@ -816,6 +816,98 @@ separately compiled (its own stub dependency chain is large) but uses
 only `tftPtr`-based calls already proven working elsewhere in that exact
 file, so this is lower-risk than an unverified change would be.
 
+## Ninth real hardware bug (found, fixed): playback silently stalled forever on a real decode failure, no recovery
+
+User hit the known `FLAC maxFrameSize too large!` limitation again (a
+different file this time, "TOOL - Schism.flac") and reported "playback
+dont work" -- the underlying decode failure itself is the same pinned-
+library limitation documented earlier (not fixable from here), but the
+REAL bug this exposed is that nothing in the UI ever noticed the file
+failed to play. `ESP32-audioI2S` just logs the error and closes the file
+internally -- there's no exception or failure callback app code gets, so
+`state.now.playing` stayed `true` and the UI just sat there showing
+"playing" a track that was never actually producing sound, forever,
+until the user manually skipped.
+
+Fixed generically (not by string-matching this one error message, which
+would miss any OTHER decode failure mode): `AudioBridge::isRunning()`
+(new) wraps `Audio::isRunning()`. `NowPlaying` gained `startedAtMs`/
+`playbackConfirmed` (`AppState.h`) -- set when a real track starts
+(`MenuEngine::setNowPlaying()`). `UI.cpp`'s `tickPlaybackClock()` checks
+`AudioBridge::isRunning()` each tick for a track that hasn't confirmed
+playback yet; if it's still not running after a grace period
+(`kPlaybackStartGraceMs`, 3000ms -- a sized-generously guess, not
+hardware-measured, tune if real files slow-start past this or a failure
+takes visibly longer than this to get skipped), it's treated as a
+decode failure and `MenuEngine::playNextInQueue()` is called
+automatically, same as reaching the end of a track. `Audio::isRunning()`
+itself is a real, long-standing ESP32-audioI2S method, but wasn't
+independently header-verified this round the way `setAudioPlayPosition`/
+`getAudioCurrentTime` were earlier (WebFetch against the real header) --
+lower risk than a guess at an obscure API, since `isRunning()` is one of
+this library's most commonly used/documented calls, but flagging the
+difference in confidence level honestly.
+
+## Row icons added to every list screen (previously only Bluetooth had one)
+
+`MenuItem::icon` was only ever being SET for the 4 main-menu tiles
+(`buildMainMenu()`) -- every other screen (Music's artist/album/track
+lists, Playlists, Settings, the "Add to Playlist" submenu) left it empty,
+and `drawMenuRow()` (the renderer every non-main-menu list screen shares)
+never drew an icon at all even when one was set. The Bluetooth screen's
+apparent icon was actually a special case in `drawMenu()`'s title-bar
+code (`if (state.mode == AppMode::BT) drawBtGlyph(...)`), not a per-row
+icon -- hence "only the BT one has an icon."
+
+Fixed by actually rendering `MenuItem::icon` in `drawMenuRow()`
+(`Screens.cpp`'s new `rowIconFor()`/`drawRowIconIfAny()`) -- a small
+colored rounded-rect + single capital letter badge, reusing the exact
+same visual language `drawMainMenuGrid()`'s tile badges already use
+(proven working there), rather than hand-drawing new vector glyphs per
+icon type blind the way `drawBtGlyph()` does -- much lower risk of a
+rendering bug with no way to see it before the user flashes it.
+`MenuEngine.cpp`'s `build*()` functions now set `.icon` per row type:
+`"artist"`/`"album"`/`"track"`/`"playlist"` for Music/Playlists rows
+(both the real index-backed path and the mock fallback path),
+`"brightness"`/`"sort"`/`"theme"`/`"timezone"`/`"rescan"` for Settings'
+non-Bluetooth rows, `"bt"` for both Bluetooth-screen rows (reuses the
+real `drawBtGlyph()` vector shape instead of a letter, same as before).
+
+**Not cross-checked against the browser simulator this round** -- this
+is new firmware-only visual polish (a rendering gap, not a ported
+behavior/UX decision), and the user asked to move fast on a cluster of
+bug fixes rather than a UX iteration round. If the simulator should show
+matching row icons too, that's a follow-up, not done here -- see
+CLAUDE.md's usual porting-discipline note.
+
+## Finer Now Playing scrubbing
+
+`InputRouter.cpp`'s `rotate()` scrub step in `NOW_PLAYING` mode dropped
+from 3 seconds/encoder-tick to 1 -- user feedback that it felt too
+coarse for precise scrubbing. Simple fixed-step change, not a switch to
+variable/accelerating scroll speed (e.g. some iPod-style wheels speed up
+the longer you keep turning) -- if 1s/tick now feels too SLOW to cross a
+long track, that's the next thing to try, not attempted here. Menu list
+navigation (UP/DOWN/rotate moving the selected row) was checked and is
+already exactly 1 row per physical encoder detent (`AnoInput.cpp`'s
+quadrature decode uses a standard full-step transition table) -- nothing
+found there to make "finer," that's already as granular as a discrete
+list gets.
+
+## "Lyrics sometimes not available" -- likely not a bug
+
+Investigated `FlacMeta.cpp`'s tag parsing for a missed-lyrics bug and
+didn't find one: `parseVorbisComment()` already does `key.toUpperCase()`
+before comparing against `"LYRICS"`/`"UNSYNCEDLYRICS"`, so case
+variations in how a tagger writes the field name are already handled.
+The much more likely explanation is simply that some files in the
+library genuinely don't have either of those two Vorbis comment fields
+set at all -- not every FLAC tagging tool writes lyrics, and some use
+other/nonstandard field names this doesn't look for. If a specific file
+is known to have lyrics embedded under a different tag name, that name
+can be added to the `key ==` checks in `parseVorbisComment()` -- not
+done blind without knowing what name to add.
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time

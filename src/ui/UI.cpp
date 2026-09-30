@@ -12,6 +12,15 @@ namespace {
 
 constexpr uint32_t kBootMs = 1100;   // matches the simulator's boot->MENU timeout
 constexpr uint32_t kClockMs = 500;   // matches the simulator's playback-clock setInterval
+// How long to give a real track to actually start producing audio before
+// treating it as a decode failure and skipping it -- see AppState.h's
+// NowPlaying::playbackConfirmed comment. Not independently measured on
+// hardware; sized generously (normal playback should start in well under
+// a second) specifically to avoid a false-positive skip on a legitimately
+// slow-starting file. If a real file that DOES eventually play gets
+// skipped, raise this; if a failed file takes noticeably longer than this
+// to get skipped, it can come down.
+constexpr uint32_t kPlaybackStartGraceMs = 3000;
 
 uint32_t bootAt = 0;
 uint32_t lastClockMs = 0;
@@ -24,6 +33,22 @@ void tickPlaybackClock() {
 
     if (state.mode == AppMode::OFF) return;
     if (!state.now.playing || !state.now.hasTrack) return;
+
+    // Detect a real file that failed to actually start decoding (see
+    // AppState.h's NowPlaying comment) and skip it rather than stall
+    // silently forever. Only applies to real files (path set) -- placeholder/
+    // mock tracks have nothing to confirm against AudioBridge for.
+    if (state.now.path.length() > 0 && !state.now.playbackConfirmed) {
+        if (AudioBridge::isRunning()) {
+            state.now.playbackConfirmed = true;
+        } else if (millis() - state.now.startedAtMs >= kPlaybackStartGraceMs) {
+            Serial.printf("[audio] \"%s\" never started playing -- skipping (see CLAUDE.md: some "
+                          "real files fail to decode, e.g. a FLAC frame too large for this library)\n",
+                          state.now.title.c_str());
+            MenuEngine::playNextInQueue(); // sets state.dirty itself
+            return;
+        }
+    }
 
     // Real position for a real file (confirmed API, see AudioBridge.h) --
     // simulated increment only as a fallback for placeholder/mock tracks

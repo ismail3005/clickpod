@@ -32,6 +32,20 @@ struct NowPlaying {
     float posSec = 0;
     bool playing = false;
     String path; // real SD path if known (see Track::path); empty for placeholder tracks
+
+    // Playback-failure detection (UI.cpp's tickPlaybackClock()): some real
+    // files fail to decode (e.g. a FLAC frame exceeding ESP32-audioI2S's
+    // fixed internal buffer -- a real, hit-in-the-field, unfixable-from-
+    // here library limitation, see CLAUDE.md) and the decoder just closes
+    // the file and goes idle, with no exception/callback app code can
+    // catch directly. Without this, playback just silently stops with no
+    // recovery. startedAtMs is set (MenuEngine::setNowPlaying()) the
+    // moment a real track starts; playbackConfirmed flips true once
+    // AudioBridge::isRunning() is seen true for it. If it's STILL false
+    // after a grace period, the track is treated as failed-to-play and
+    // skipped automatically.
+    uint32_t startedAtMs = 0;
+    bool playbackConfirmed = false;
 };
 
 // Snapshot of where to unwind back to after leaving a globally-reachable
@@ -74,8 +88,8 @@ struct AppState {
     bool darkMode = false;
     // UTC offset for the statusbar clock (TimeSync::currentTimeString()),
     // -12..+14 -- doesn't cover half-hour zones (e.g. India UTC+5:30),
-    // a deliberate simplification. Not persisted across reboots (no NVS/
-    // flash write for settings exists yet); resets to 0 each boot.
+    // a deliberate simplification. Persisted across reboots along with the
+    // other settings below it -- see src/state/Persist.*.
     int utcOffsetHours = 0;
 
     MenuReturn btReturn;

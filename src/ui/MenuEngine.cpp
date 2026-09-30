@@ -90,6 +90,12 @@ void setNowPlaying(Track t) {
     state.now.posSec = 0;
     state.now.playing = true;
     state.now.path = t.path;
+    // See AppState.h's NowPlaying comment -- UI.cpp's tickPlaybackClock()
+    // uses these to notice and skip a track that fails to actually start
+    // decoding (some real files can't play at all, e.g. a FLAC frame too
+    // large for the decoder's fixed buffer) instead of silently stalling.
+    state.now.startedAtMs = millis();
+    state.now.playbackConfirmed = false;
     AudioBridge::playSomething(t.path);
 }
 
@@ -148,6 +154,7 @@ void buildArtistList() {
         for (auto &name : Library::indexArtists()) {
             MenuItem it;
             it.label = name;
+            it.icon = "artist";
             it.action = [name]() { buildAlbumListFromIndex(name); };
             items.push_back(std::move(it));
         }
@@ -160,6 +167,7 @@ void buildArtistList() {
         for (auto &name : artists) {
             MenuItem it;
             it.label = name;
+            it.icon = "artist";
             it.action = [name]() { buildAlbumList(name); };
             items.push_back(std::move(it));
         }
@@ -172,6 +180,7 @@ void buildAlbumListFromIndex(const String &artist) {
     for (auto &kv : Library::indexAlbumsForArtist(artist)) {
         MenuItem it;
         it.label = kv.first;
+        it.icon = "album";
         it.sub = String(kv.second) + " tracks";
         String artistCopy = artist;
         String albumCopy = kv.first;
@@ -187,6 +196,7 @@ void buildAlbumList(const String &artist) {
         if (al.artist != artist) continue;
         MenuItem it;
         it.label = al.album;
+        it.icon = "album";
         it.sub = String((int)al.tracks.size()) + " tracks";
         LibraryAlbum copy = al; // captured by value: album list is small/static, cheap to copy
         it.action = [copy]() { buildTrackList(copy); };
@@ -210,6 +220,7 @@ void buildTrackList(const LibraryAlbum &album) {
         const Track &t = album.tracks[i];
         MenuItem it;
         it.label = t.title;
+        it.icon = "track";
         it.sub = fmtTime(t.durSec);
         it.isTrack = true;
         it.trackData = Track{album.artist, album.album, t.title, t.durSec, album.art, t.path};
@@ -232,6 +243,7 @@ void buildTrackListFromIndex(const String &artist, const String &album) {
         const Track &t = (*tracks)[i];
         MenuItem it;
         it.label = t.title;
+        it.icon = "track";
         it.sub = fmtTime(t.durSec);
         it.isTrack = true;
         it.trackData = t;
@@ -255,6 +267,7 @@ void buildPlaylistTrackListFromIndex(const String &name) {
         const Track &t = (*tracks)[i];
         MenuItem row;
         row.label = t.title;
+        row.icon = "track";
         row.sub = t.artist;
         row.isTrack = true;
         row.trackData = t;
@@ -271,6 +284,7 @@ void buildPlaylistList() {
         for (auto &kv : Library::indexPlaylists()) {
             MenuItem it;
             it.label = kv.first;
+            it.icon = "playlist";
             it.sub = String(kv.second) + " tracks";
             String plName = kv.first;
             it.action = [plName]() { buildPlaylistTrackListFromIndex(plName); };
@@ -280,6 +294,7 @@ void buildPlaylistList() {
         for (auto &p : Library::PLAYLISTS) {
             MenuItem it;
             it.label = p.name;
+            it.icon = "playlist";
             it.sub = String((int)p.tracks.size()) + " tracks";
             // Shared ONCE per playlist-open (see buildTrackList's comment for
             // why this matters -- this was the actual crash).
@@ -291,6 +306,7 @@ void buildPlaylistList() {
                     const Track &t = (*tracksPtr)[i];
                     MenuItem row;
                     row.label = t.title;
+                    row.icon = "track";
                     row.sub = t.artist;
                     row.isTrack = true;
                     row.trackData = t;
@@ -309,16 +325,19 @@ void buildPlaylistList() {
 void buildSettings() {
     std::vector<MenuItem> items(6);
     items[0].label = "Bluetooth";
+    items[0].icon = "bt";
     items[0].subFn = btStatusLabel;
     items[0].action = []() { enterBluetooth(); };
 
     items[1].label = "Brightness";
+    items[1].icon = "brightness";
     items[1].sub = String(state.brightness) + "%";
     items[1].isSlider = true;
     items[1].getInt = []() { return state.brightness; };
     items[1].setInt = [](int v) { state.brightness = constrain(v, 10, 100); Persist::save(); };
 
     items[2].label = "Sort tracks by";
+    items[2].icon = "sort";
     items[2].sub = state.sortPref;
     items[2].isChoice = true;
     items[2].options = {"Artist", "Album"};
@@ -326,6 +345,7 @@ void buildSettings() {
     items[2].setChoice = [](const String &v) { state.sortPref = v; Persist::save(); };
 
     items[3].label = "Appearance";
+    items[3].icon = "theme";
     items[3].sub = state.darkMode ? "Dark" : "Light";
     items[3].isChoice = true;
     items[3].options = {"Light", "Dark"};
@@ -333,6 +353,7 @@ void buildSettings() {
     items[3].setChoice = [](const String &v) { state.darkMode = (v == "Dark"); Persist::save(); };
 
     items[4].label = "Time zone";
+    items[4].icon = "timezone";
     items[4].isSlider = true;
     items[4].sliderStep = 1; // hour offsets, not 0-100%
     items[4].getInt = []() { return state.utcOffsetHours; };
@@ -355,6 +376,7 @@ void buildSettings() {
     // message first -- same reasoning as the boot splash fix, a silent
     // multi-second freeze looks exactly like a hang/crash otherwise.
     items[5].label = "Rescan library";
+    items[5].icon = "rescan";
     items[5].sub = "";
     items[5].action = []() {
         Serial.println(F("[ui] manual library rescan requested"));
@@ -457,6 +479,7 @@ void enterBluetooth() {
     // a single real row for that target, not a device picker.
     std::vector<MenuItem> items(2);
     items[0].label = BluetoothSource::kTargetDeviceName;
+    items[0].icon = "bt";
     items[0].subFn = btStatusLabel;
     items[0].action = []() {
         if (!state.btOn) {
@@ -469,6 +492,7 @@ void enterBluetooth() {
     };
 
     items[1].label = "Turn Bluetooth Off";
+    items[1].icon = "bt";
     items[1].action = []() {
         BluetoothSource::end();
         state.btOn = false;
@@ -519,6 +543,7 @@ void openTrackMenu(const Track &track) {
             for (auto &kv : Library::indexPlaylists()) {
                 MenuItem row;
                 row.label = kv.first;
+                row.icon = "playlist";
                 row.sub = String(kv.second) + " tracks";
                 String plName = kv.first;
                 Track track2 = t;
@@ -537,6 +562,7 @@ void openTrackMenu(const Track &track) {
             for (auto &p : Library::PLAYLISTS) {
                 MenuItem row;
                 row.label = p.name;
+                row.icon = "playlist";
                 row.sub = String((int)p.tracks.size()) + " tracks";
                 String plName = p.name;
                 Track track2 = t;

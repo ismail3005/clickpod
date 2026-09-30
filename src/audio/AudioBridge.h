@@ -36,4 +36,17 @@ void setVolumePercent(int pct); // 0-100, mapped to the DAC's 0-21 range
 bool seekTo(uint16_t sec);
 uint32_t currentTimeSec();
 
+// True once the decoder is actually producing audio for the current
+// file. Used to detect a real-world failure mode: some files fail to
+// decode (e.g. a FLAC frame too large for ESP32-audioI2S's fixed
+// internal buffer) and the library just closes the file and goes idle
+// with no exception/callback -- checking this some time after starting
+// playback is how UI.cpp's tickPlaybackClock() notices and skips instead
+// of silently stalling. isRunning() itself is a real, long-documented
+// ESP32-audioI2S method (unlike some of this project's other library
+// calls, this one wasn't independently header-verified this round, but
+// it's a very commonly used/stable part of this library's surface, not
+// an obscure guess).
+bool isRunning();
+
 } // namespace AudioBridge

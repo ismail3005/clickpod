@@ -167,6 +167,70 @@ int menuStartIdx(int selected) {
     return selected >= maxRows ? selected - maxRows + 1 : 0;
 }
 
+// Small colored letter-badge icons for plain list rows (Artist/Album/
+// Track/Playlist/Settings entries) -- everywhere that isn't the main-menu
+// grid (which already has its own, larger version of this same idea, see
+// drawMainMenuGrid() above) or the Bluetooth screen's real drawn glyph
+// (drawBtGlyph()). Added because every list screen except Bluetooth's
+// title bar had NO icon at all -- MenuItem::icon was only ever being set
+// for the 4 main-menu tiles before this round.
+//
+// Deliberately reuses the same "colored rounded-rect + single capital
+// letter" visual language as drawMainMenuGrid()'s tile badges (proven
+// working there) rather than hand-drawing new vector glyphs per icon
+// type the way drawBtGlyph() does -- inventing several new hand-drawn
+// shapes blind, with no way to see how they actually render on real
+// hardware, is a lot more surface area for a visual bug than reusing an
+// already-shipped pattern. Not cross-checked against the browser
+// simulator this round (see CLAUDE.md) -- this is new firmware-only
+// polish, not a ported behavior/UX decision.
+struct RowIcon {
+    bool present = false;
+    bool isBt = false;
+    char letter = 0;
+    uint16_t color = 0;
+};
+
+RowIcon rowIconFor(const String &icon) {
+    // Same 4-color rotation as drawMainMenuGrid()'s badgeColors.
+    static const uint16_t colors[4] = {0x2D9F, 0x855F, 0x0725, 0xFC80};
+    if (icon == "bt") return {true, true, 0, colors[2]};
+    if (icon == "artist") return {true, false, 'A', colors[0]};
+    if (icon == "album") return {true, false, 'D', colors[1]}; // D = disc, avoids clashing with Artist's A
+    if (icon == "track") return {true, false, 'N', colors[2]}; // N = note
+    if (icon == "playlist") return {true, false, 'P', colors[1]};
+    if (icon == "brightness") return {true, false, 'B', colors[0]};
+    if (icon == "sort") return {true, false, 'S', colors[1]};
+    if (icon == "theme") return {true, false, 'T', colors[2]};
+    if (icon == "timezone") return {true, false, 'Z', colors[3]};
+    if (icon == "rescan") return {true, false, 'R', colors[0]};
+    return {false, false, 0, 0};
+}
+
+// Draws a row's icon badge (if it has one) and returns the x position the
+// label text should start at -- a row with no icon (or an unrecognized
+// one) gets back the old, unindented x=12 so nothing shifts for rows this
+// round didn't touch.
+int16_t drawRowIconIfAny(const MenuItem &item, int16_t y) {
+    if (item.icon.length() == 0) return 12;
+    RowIcon ic = rowIconFor(item.icon);
+    if (!ic.present) return 12;
+
+    int16_t badgeSize = 16;
+    int16_t bx = 8, by = y + (kMenuRowH - badgeSize) / 2;
+    tftPtr->fillRoundRect(bx, by, badgeSize, badgeSize, 4, ic.color);
+    if (ic.isBt) {
+        drawBtGlyph(bx + 3, by + 3, badgeSize - 6, TFT_WHITE);
+    } else {
+        tftPtr->setTextColor(TFT_WHITE, ic.color);
+        tftPtr->setTextSize(1);
+        tftPtr->setCursor(bx + badgeSize / 2 - 3, by + badgeSize / 2 - 4);
+        char buf[2] = {ic.letter, 0};
+        tftPtr->print(buf);
+    }
+    return bx + badgeSize + 6;
+}
+
 // Shared by the full drawMenu() loop and updateMenuSelection()'s partial
 // redraw below -- one place for the row layout so they can't drift apart.
 // Always clears its own row background first (not just when selected),
@@ -174,8 +238,9 @@ int menuStartIdx(int selected) {
 void drawMenuRow(Menu *m, int i, int16_t y, const Palette &p) {
     bool sel = i == m->selected;
     tftPtr->fillRect(0, y, kScreenW, kMenuRowH, sel ? p.accent : p.bg);
+    int16_t textX = drawRowIconIfAny(m->items[i], y);
     tftPtr->setTextColor(sel ? TFT_WHITE : p.fg, sel ? p.accent : p.bg);
-    tftPtr->setCursor(12, y + 6);
+    tftPtr->setCursor(textX, y + 6);
     tftPtr->print(m->items[i].label);
     String sub = m->items[i].liveSub();
     if (sub.length()) {

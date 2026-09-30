@@ -94,4 +94,9 @@ uint32_t currentTimeSec() {
     return audioPtr->getAudioCurrentTime();
 }
 
+bool isRunning() {
+    if (!audioPtr || !playing) return false;
+    return audioPtr->isRunning();
+}
+
 } // namespace AudioBridge
