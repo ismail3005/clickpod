@@ -1,0 +1,85 @@
+#include "AudioBridge.h"
+
+#include "../config/Pins.h"
+
+namespace AudioBridge {
+namespace {
+
+Audio *audioPtr = nullptr;
+bool sdOk = false;
+bool playing = false;
+
+bool hasAudioExtension(const String &name) {
+    String lower = name;
+    lower.toLowerCase();
+    return lower.endsWith(".flac") || lower.endsWith(".mp3") ||
+           lower.endsWith(".wav") || lower.endsWith(".m4a") ||
+           lower.endsWith(".aac");
+}
+
+// Recursively searches for the first playable, actually-openable audio file
+// on the card -- see main.cpp's original bring-up comment for why paths are
+// threaded through the recursion and why SD.exists() re-checks each
+// candidate (a file can list but still fail to open by that exact path).
+bool findFirstAudioFile(File dir, const String &dirPath, String &outPath) {
+    while (File entry = dir.openNextFile()) {
+        String path = dirPath + "/" + entry.name();
+
+        if (entry.isDirectory()) {
+            bool found = findFirstAudioFile(entry, path, outPath);
+            entry.close();
+            if (found) return true;
+        } else {
+            if (hasAudioExtension(path) && SD.exists(path)) {
+                outPath = path;
+                entry.close();
+                return true;
+            }
+            entry.close();
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+void begin(Audio &audio) {
+    audioPtr = &audio;
+    sdOk = SD.cardType() != CARD_NONE;
+    if (sdOk) {
+        audioPtr->setPinout(PIN_I2S_BCLK, PIN_I2S_LRC, PIN_I2S_DOUT);
+    }
+}
+
+bool sdReady() { return sdOk; }
+
+void playSomething() {
+    if (!audioPtr || !sdOk) return;
+
+    String trackPath;
+    File root = SD.open("/");
+    bool found = findFirstAudioFile(root, "", trackPath);
+    root.close();
+
+    if (!found) {
+        Serial.println(F("[audio] no playable file found on card"));
+        return;
+    }
+
+    Serial.printf("[audio] playing: %s\n", trackPath.c_str());
+    audioPtr->connecttoFS(SD, trackPath.c_str());
+    playing = true;
+}
+
+void pauseResume() {
+    if (!audioPtr || !playing) return;
+    audioPtr->pauseResume();
+}
+
+void setVolumePercent(int pct) {
+    if (!audioPtr) return;
+    pct = constrain(pct, 0, 100);
+    audioPtr->setVolume(map(pct, 0, 100, 0, 21));
+}
+
+} // namespace AudioBridge

@@ -4,10 +4,12 @@
 #include <SPI.h>
 #include <TFT_eSPI.h>
 
+#include "audio/AudioBridge.h"
 #include "bt/BluetoothSource.h"
 #include "config/Pins.h"
 #include "input/AnoInput.h"
 #include "state/AppState.h"
+#include "ui/UI.h"
 
 // Bring-up sequence (docs/SPEC.md section 4):
 //   1. ESP32 + PSRAM verification            [this file]
@@ -18,17 +20,24 @@
 //   6. ANO encoder + buttons                 [this file, done ahead of step 5]
 //   7. MAX17048 battery monitoring
 //
-// Step 6 only wires up and reports raw input events (tap, long press,
-// double tap, encoder rotation) to prove the encoder + 5 buttons are
-// correctly wired and debounced -- deciding what each event means in a
-// given UI mode is menu/screen code that doesn't exist yet (spec section
-// 6). See src/input/AnoInput.h/.cpp for the actual input logic.
+// Steps 1-6 are hardware-confirmed (see README). The real UI/UX layer
+// (menus, now playing, lyrics, queue, Bluetooth screen -- docs/SPEC.md
+// section 6) is ported from the browser simulator into src/ui/, src/state/,
+// and src/audio/ -- see UI::begin()/UI::update() below. It navigates a
+// placeholder mock library (src/ui/Library.h) since real FLAC metadata
+// parsing is still an open risk (spec section 10); selecting a track plays
+// real audio via AudioBridge (whatever file it finds first on the card),
+// so DAC output is real even though the on-screen metadata isn't matched
+// to the specific file yet.
 //
 // Step 5: per spec section 7, wired (I2S) and Bluetooth are mutually
 // exclusive output paths, manually switched by the user -- never run both
-// at once, same rule applies here. kTestWiredPlayback below picks which
-// one this bring-up pass exercises; SD/display/ANO stay active either way
-// since none of those conflict with the choice of audio output.
+// at once. kTestWiredPlayback below picks which one this build exercises;
+// SD/display/ANO/UI stay active either way since none of those conflict
+// with the choice of audio output. AudioBridge (the UI's real-playback
+// hook) is only wired up in the wired path -- BT bring-up still runs its
+// own isolated test tone via BluetoothSource, so selecting a track from
+// the UI in that mode won't produce sound, only navigate.
 constexpr bool kTestWiredPlayback = true;
 // In A2DP SOURCE mode this is the name of the target SINK device to scan
 // for and auto-connect to (e.g. your headphones/speaker) -- NOT the
@@ -41,7 +50,6 @@ constexpr const char *kBtDeviceName = "ULT WEAR";
 // TFT_eSPI's pin/driver config lives in platformio.ini's build_flags (not
 // the library's User_Setup.h, which would get clobbered on reinstall).
 
-static AppMode appMode = AppMode::BOOT;
 static Audio audio;
 static TFT_eSPI tft = TFT_eSPI();
 
@@ -81,117 +89,15 @@ static bool initSd() {
 static void initDisplay() {
     Serial.println(F("[bringup] Initializing display..."));
     tft.init();
-    tft.setRotation(1); // landscape; revisit once the enclosure/UI layout is set
+    tft.setRotation(1); // landscape; UI is built for 320x240
     tft.fillScreen(TFT_BLACK);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.setTextSize(2);
-    tft.setCursor(10, 10);
-    tft.println("clickpod");
-    tft.setTextSize(1);
-    tft.setCursor(10, 40);
-    tft.println("bring-up step 4: display OK");
     Serial.println(F("[bringup] Display initialized."));
-}
-
-static const char *buttonName(AnoButton button) {
-    switch (button) {
-        case AnoButton::UP: return "UP";
-        case AnoButton::DOWN: return "DOWN";
-        case AnoButton::LEFT: return "LEFT";
-        case AnoButton::RIGHT: return "RIGHT";
-        case AnoButton::CENTER: return "CENTER";
-        default: return "?";
-    }
-}
-
-// y-position reserved for the last-ANO-event line, below the track path
-// printed at y=60. Cleared with fillRect before each new line so a shorter
-// message doesn't leave stale characters from a longer previous one.
-constexpr int16_t kAnoStatusY = 90;
-
-static void showAnoStatus(const String &text) {
-    tft.fillRect(0, kAnoStatusY, tft.width(), 10, TFT_BLACK);
-    tft.setCursor(10, kAnoStatusY);
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.setTextSize(1);
-    tft.print(text);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK); // restore default for other screen text
-}
-
-// Bring-up step 6 validation: report every raw input event to serial and
-// echo the latest one on screen too. Not wired to any actual UI action yet
-// -- see AnoInput.h for why.
-static void reportAnoInput() {
-    AnoInput::update();
-
-    int16_t delta = AnoInput::takeEncoderDelta();
-    if (delta != 0) {
-        const char *dir = delta > 0 ? "CW" : "CCW";
-        Serial.printf("[ano] rotate %s (delta %d)\n", dir, delta);
-        showAnoStatus(String("rotate ") + dir + " (" + delta + ")");
-    }
-
-    for (uint8_t i = 0; i < static_cast<uint8_t>(AnoButton::COUNT); i++) {
-        AnoButton b = static_cast<AnoButton>(i);
-        if (AnoInput::wasTapped(b)) {
-            Serial.printf("[ano] %s tap\n", buttonName(b));
-            showAnoStatus(String(buttonName(b)) + " tap");
-        }
-        if (AnoInput::wasLongPressed(b)) {
-            Serial.printf("[ano] %s long-press\n", buttonName(b));
-            showAnoStatus(String(buttonName(b)) + " long-press");
-        }
-    }
-
-    if (AnoInput::centerWasDoubleTapped()) {
-        Serial.println(F("[ano] CENTER double-tap"));
-        showAnoStatus("CENTER double-tap");
-    }
-}
-
-static bool hasAudioExtension(const String &name) {
-    String lower = name;
-    lower.toLowerCase();
-    return lower.endsWith(".flac") || lower.endsWith(".mp3") ||
-           lower.endsWith(".wav") || lower.endsWith(".m4a") ||
-           lower.endsWith(".aac");
-}
-
-// Recursively searches for the first playable, actually-openable audio file
-// on the card, so bring-up doesn't depend on a particular library layout
-// being present yet. entry.name() only ever returns the bare filename (not
-// the path from root), so the caller-supplied dirPath has to be threaded
-// through the recursion to build a real absolute path for nested files --
-// almost everything on a real library is Artist/Album/track.flac, not
-// sitting at the root. Candidates are also verified with SD.exists() before
-// being accepted: a file can be listed but still fail to open by that exact
-// path (e.g. non-ASCII punctuation in the name that doesn't round-trip
-// through the filesystem the same way twice) -- better to skip to the next
-// track than hand the audio library a path we already know won't resolve.
-static bool findFirstAudioFile(File dir, const String &dirPath, String &outPath) {
-    while (File entry = dir.openNextFile()) {
-        String path = dirPath + "/" + entry.name();
-
-        if (entry.isDirectory()) {
-            bool found = findFirstAudioFile(entry, path, outPath);
-            entry.close();
-            if (found) return true;
-        } else {
-            if (hasAudioExtension(path) && SD.exists(path)) {
-                outPath = path;
-                entry.close();
-                return true;
-            }
-            entry.close();
-        }
-    }
-    return false;
 }
 
 void setup() {
     Serial.begin(115200);
     delay(500);
-    Serial.println(F("\n=== DIY iPod-Classic MP3 Player - bring-up build ==="));
+    Serial.println(F("\n=== clickpod firmware ==="));
 
     verifyPsram();
     initDisplay();
@@ -199,46 +105,22 @@ void setup() {
 
     bool sdOk = initSd();
 
-    appMode = AppMode::MENU;
-
+    UI::begin(tft);
     if (kTestWiredPlayback) {
-        if (sdOk) {
-            String trackPath;
-            File root = SD.open("/");
-            bool found = findFirstAudioFile(root, "", trackPath);
-            root.close();
-
-            if (found) {
-                Serial.printf("[bringup] Playing first audio file found: %s\n", trackPath.c_str());
-                audio.setPinout(PIN_I2S_BCLK, PIN_I2S_LRC, PIN_I2S_DOUT);
-                audio.setVolume(10); // 0-21; start low, raise once confirmed working
-                audio.connecttoFS(SD, trackPath.c_str());
-                appMode = AppMode::NOW_PLAYING;
-
-                tft.setCursor(10, 60);
-                tft.println(trackPath);
-            } else {
-                Serial.println(F("[bringup] No .flac/.mp3/.wav/.m4a/.aac file found on the "
-                                  "card -- copy a test track over to exercise I2S playback."));
-            }
-        }
+        if (sdOk) AudioBridge::begin(audio);
     } else {
-        BluetoothSource::begin(kBtDeviceName);
-        tft.setCursor(10, 60);
-        tft.print("BT: ");
-        tft.println(kBtDeviceName);
+        BluetoothSource::begin(kBtDeviceName); // UI still runs for navigation; no AudioBridge wiring in this mode
     }
 }
 
 void loop() {
-    if (kTestWiredPlayback) {
-        audio.loop();
-    }
-    reportAnoInput();
+    if (kTestWiredPlayback) audio.loop(); // pumps I2S streaming; must run every iteration
+    AnoInput::update();
+    UI::update();
 }
 
-// ESP32-audioI2S optional callbacks -- useful during bring-up to see what
-// the library actually parsed out of the file.
+// ESP32-audioI2S optional callbacks -- useful to see what the library
+// actually parsed out of the file.
 void audio_info(const char *info) {
     Serial.printf("[audio] info: %s\n", info);
 }

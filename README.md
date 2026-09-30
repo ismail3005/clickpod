@@ -57,6 +57,34 @@ Open technical risk to validate early (spec section 10): how deep
 `ESP32-audioI2S`'s FLAC metadata support goes (Vorbis comments, PICTURE
 block, STREAMINFO) vs. needing manual FLAC metadata-block parsing.
 
+## UI/UX
+
+The real UI layer (menus, Now Playing, Lyrics, Queue, Bluetooth screen,
+Settings, track context menu, dark mode -- spec section 6) is implemented
+in `src/ui/`, ported directly from an interactive browser simulator used
+to iterate on the UX before committing it to firmware. It's wired into
+`main.cpp` and drives the real TFT + ANO input, but two things are still
+placeholders, called out with `TODO` comments at their definitions:
+
+- **Library data** (`src/ui/Library.h`) is a hand-written mock
+  Artist/Album/Track/Playlist set, not a real SD scan -- real FLAC
+  metadata parsing is the open risk noted above (spec section 10) and
+  hasn't been built yet. Selecting a mock track still plays real audio
+  (`src/audio/AudioBridge.*` plays the first playable file found on the
+  card), so DAC output is real; the on-screen metadata just isn't
+  guaranteed to match the specific file actually playing yet.
+- **Battery % and Bluetooth connection status** shown in the UI
+  (`state.battery`, `state.btOn`/`state.btConnectedTo` in
+  `src/state/AppState.h`) are UI-internal placeholders, not readings from
+  the real MAX17048 (step 7, not yet built) or the real A2DP link
+  (`src/bt/BluetoothSource.*`, still an isolated bring-up test path per
+  `kTestWiredPlayback`, not merged into normal playback). Wiring both up
+  is follow-up work.
+
+This hasn't been build-tested on real hardware yet (only syntax-checked
+against stub headers, no `pio run` available in this environment) --
+expect the usual bring-up shakeout on first flash.
+
 ## Build
 
 This is a [PlatformIO](https://platformio.org/) project.
@@ -72,15 +100,20 @@ Board: ESP32-WROVER-B (N4), 4MB flash / 4MB PSRAM.
 ## Layout
 
 ```
-platformio.ini       PlatformIO project + dependency config
-src/main.cpp          entry point; currently implements bring-up steps 1-6
-src/config/Pins.h     pin assignments, cross-checked against the WROVER-B datasheet
-src/state/AppState.h  UI mode enum (MENU, NOW_PLAYING, BT_PAIRING, ...)
-src/input/AnoInput.*  ANO encoder + button input logic (step 6)
+platformio.ini        PlatformIO project + dependency config
+src/main.cpp           entry point; bring-up steps 1-6 + wires up the UI layer
+src/config/Pins.h      pin assignments, cross-checked against the WROVER-B datasheet
+src/state/AppState.h   full app state (mode, menu stack, now playing, queue, settings)
+src/input/AnoInput.*   ANO encoder + button input logic (step 6)
 src/bt/BluetoothSource.* A2DP source test tone (step 5)
-docs/SPEC.md          full project specification
+src/audio/AudioBridge.* bridges UI playback intent to real ESP32-audioI2S output
+src/ui/UiTypes.h        shared data shapes (Track, Menu, MenuItem, ...)
+src/ui/Library.*        placeholder mock library/playlists/lyrics/BT devices
+src/ui/MenuEngine.*      menu-stack construction + navigation (ported from the simulator)
+src/ui/InputRouter.*     ANO events -> state transitions (ported from the simulator)
+src/ui/Screens.*         TFT_eSPI rendering for every screen
+src/ui/UI.*              top-level glue: boot sequence, playback clock, redraw dispatch
+docs/SPEC.md            full project specification
 ```
 
-Subsystem modules (audio/, ui/, input/, bt/, power/, storage/) get added as
-each bring-up step above is tackled, per the spec's stated order — don't
-build multiple subsystems simultaneously.
+Power (MAX17048, step 7) is the only bring-up step left to build.
