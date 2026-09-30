@@ -94,6 +94,11 @@ void drawOff() {
     tftPtr->print("hold CENTER to power on");
 }
 
+// Matches the simulator's .menu-grid EXACTLY: flex-direction:column, so
+// items stack as a single vertical column of full-width rows -- each row
+// itself is icon+text side-by-side (that's the only "side by side" part),
+// not a 2x2 grid of rows. Previous version of this function built an
+// actual 2x2 grid, which was wrong -- see CLAUDE.md for how that was found.
 void drawMainMenuGrid() {
     const Palette &p = pal();
     tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
@@ -101,18 +106,29 @@ void drawMainMenuGrid() {
     if (!m) return;
 
     const uint16_t badgeColors[4] = {0x2D9F, 0x855F, 0x0725, 0xFC80}; // blue/purple/teal/amber, matches .badge-0..3
-    int16_t cols = 2, rows = 2;
-    int16_t cellW = kScreenW / cols, cellH = kBodyH / rows;
-    for (size_t i = 0; i < m->items.size() && i < 4; i++) {
-        int16_t col = i % cols, row = i / cols;
-        int16_t cx = col * cellW, cy = kBodyY + row * cellH;
+    size_t n = m->items.size();
+    if (n > 4) n = 4;
+    if (n == 0) return;
+
+    int16_t padX = kScreenW * 5 / 100;   // .menu-grid padding: 4% 5%
+    int16_t padY = kBodyH * 4 / 100;
+    int16_t gap = kBodyH * 4 / 100;      // .menu-grid gap: 4%
+    int16_t rowW = kScreenW - 2 * padX;
+    int16_t usableH = kBodyH - 2 * padY - gap * (int16_t)(n - 1);
+    int16_t rowH = usableH / (int16_t)n;
+
+    int16_t y = kBodyY + padY;
+    for (size_t i = 0; i < n; i++) {
+        int16_t cx = padX, cy = y;
         bool sel = (int)i == m->selected;
 
-        if (sel) tftPtr->fillRect(cx + 2, cy + 2, cellW - 4, cellH - 4, p.accent);
-        else tftPtr->drawRect(cx + 2, cy + 2, cellW - 4, cellH - 4, p.border);
+        if (sel) tftPtr->fillRoundRect(cx, cy, rowW, rowH, 8, p.accent);
+        else tftPtr->drawRoundRect(cx, cy, rowW, rowH, 8, p.border);
 
-        int16_t badgeSize = min(cellW, cellH) / 3;
-        int16_t bx = cx + 12, by = cy + (cellH - badgeSize) / 2;
+        int16_t tilePad = rowW * 5 / 100;  // .tile padding: 0 5%
+        int16_t badgeSize = min((int16_t)(rowW * 15 / 100), (int16_t)(rowH - 6)); // .tile-badge width:15%
+        int16_t bx = cx + tilePad, by = cy + (rowH - badgeSize) / 2;
+
         tftPtr->fillRoundRect(bx, by, badgeSize, badgeSize, 6, badgeColors[i % 4]);
         if (m->items[i].icon == "bt") {
             drawBtGlyph(bx + badgeSize / 4, by + badgeSize / 4, badgeSize / 2, TFT_WHITE);
@@ -124,16 +140,19 @@ void drawMainMenuGrid() {
             tftPtr->print(letter);
         }
 
+        int16_t textX = bx + badgeSize + (rowW * 4 / 100); // .tile gap: 4%
         tftPtr->setTextSize(1);
         tftPtr->setTextColor(sel ? TFT_WHITE : p.fg, sel ? p.accent : p.bg);
-        tftPtr->setCursor(bx + badgeSize + 10, by + badgeSize / 2 - 10);
+        tftPtr->setCursor(textX, cy + rowH / 2 - 10);
         tftPtr->print(m->items[i].label);
         String sub = m->items[i].liveSub();
         if (sub.length()) {
             tftPtr->setTextColor(sel ? TFT_WHITE : p.muted2, sel ? p.accent : p.bg);
-            tftPtr->setCursor(bx + badgeSize + 10, by + badgeSize / 2 + 2);
+            tftPtr->setCursor(textX, cy + rowH / 2 + 2);
             tftPtr->print(sub);
         }
+
+        y += rowH + gap;
     }
 }
 

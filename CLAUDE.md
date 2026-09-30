@@ -180,6 +180,35 @@ real C++20 `std::span` gap noted below for `ESP32-audioI2S`). If new
 build errors show structs failing to aggregate-initialize again, check
 this didn't get reverted before chasing anything else.
 
+**First real upload gotcha (found, fixed):** `pio run -t upload` failed
+right after stepping up to the configured baud rate ("Unable to verify
+flash chip connection (No serial data received.)"). Classic symptom of
+the actual USB-serial link (this board flashes over a separate
+USB-to-serial adapter, not a devboard's onboard USB chip) not keeping up
+at speed. Fixed by dropping `upload_speed` from 921600 to 115200 in
+`platformio.ini`. If uploads are reliable, this can be bumped back up for
+speed later — not urgent.
+
+**First real hardware UI bug (found, fixed):** the main menu (4 root
+tiles: Music/Playlists/Bluetooth/Settings) rendered as a 2x2 grid on the
+actual screen instead of a vertical stack of 4 rows like the simulator.
+Root cause: `Screens.cpp`'s `drawMainMenuGrid()` was written from a
+mistaken assumption that the "bigger icon tiles" redesign was a 2-column
+grid — it never was. Re-reading the simulator's actual CSS confirmed
+`.menu-grid{flex-direction:column}`: tiles stack vertically, one per
+row, each row is icon+text *side by side within itself* (that's the only
+horizontal arrangement). Fixed to match. **Lesson**: when re-implementing
+something from the simulator in firmware, read the simulator's actual
+source (`Artifact` tool, `action:"read"`) rather than reconstructing the
+layout from memory/description — memory of "bigger icon tiles" doesn't
+preserve exact flex-direction.
+
+**Known, not yet fixed:** screen refresh feels slow -- full `fillRect` +
+per-character SPI text draw on every button press, no sprite buffering
+or DMA in `Screens.cpp`. Real limitation, not a bug; TFT_eSPI supports
+sprite-based partial redraws, worth doing once functional gaps are
+closed, not before.
+
 ## Working style this project has used (carry forward)
 
 - User is terse and direct; they'll correct behavior that doesn't match
