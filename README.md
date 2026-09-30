@@ -32,12 +32,13 @@ Following the bring-up order from spec section 4:
       on the rebuilt board. `TFT_eSPI` config is set via `platformio.ini`
       build flags rather than editing the library's `User_Setup.h`.
 - [ ] 5. ESP32-A2DP Bluetooth output as a separate playback path
-- [ ] 6. ANO encoder + buttons — code written (interrupt-driven quadrature
-      decode, tap/double-tap/long-press state machine for CENTER per spec
-      5.3), previously hardware-confirmed (button-to-GPIO mapping fixed to
-      match actual physical wiring), not yet wired back in after the full
-      rebuild. Board has no onboard pull-ups, so all 7 signal lines
-      (encoder A/B + 5 buttons) need external 10k pull-ups to 3.3V.
+- [x] 6. ANO encoder + buttons — hardware-confirmed on the rebuilt board.
+      Encoder rotation, all 5 buttons, and the tap/double-tap/long-press
+      state machine for CENTER (spec 5.3) all correct. Board has no
+      onboard pull-ups, so all 7 signal lines (encoder A/B + 5 buttons)
+      need external 10k pull-ups to 3.3V. Button-to-GPIO mapping is
+      hardware-order-dependent (not fixed by the board's SWn silkscreen
+      labels) -- confirm/refix in `Pins.h` after any rewiring.
 - [ ] 7. MAX17048 battery monitoring
 
 Open technical risk to validate early (spec section 10): how deep
