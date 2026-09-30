@@ -242,6 +242,11 @@ fire a spurious single/double tap on release).
    - Battery percentage (from MAX17048)
    - Current volume level indicator
 6. **Lyrics screen** — accessed via long-press Down from Now Playing.
+   **AMENDED (return gesture):** exits back to Now Playing via CENTER tap,
+   LEFT tap (the app's normal back gesture), or holding Down again --
+   symmetric with how the screen was opened. Not specified in the original
+   text; caught as a real dead-end (no way out once in) while validating
+   the flow in the UI simulator.
    RESOLVED, and confirmed via direct file inspection (`metaflac --list`
    on a real track): lyrics live in the Vorbis comment field **`LYRICS`**,
    and — better than initially assumed — they are **full LRC-format synced
@@ -321,7 +326,9 @@ MP3/ID3v2), so flagging explicitly:
   more manual work). Flag this to the user as a checkpoint once explored,
   since it affects implementation approach/time estimate.
 7. **Queue screen** — accessed via long-press Up from Now Playing. Shows
-   upcoming tracks in the current playback queue.
+   upcoming tracks in the current playback queue. **AMENDED (return
+   gesture):** same as Lyrics above -- CENTER tap, LEFT tap, or holding Up
+   again all return to Now Playing.
 8. **Bluetooth menu** — list of paired/available devices, connect/disconnect,
    pairing mode trigger
 9. **Settings menu** — general device settings (exact contents TBD/flexible,
