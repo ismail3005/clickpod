@@ -60,7 +60,7 @@ void handleTap(AnoButton btn) {
             // gesture.
             MenuItem *item = (m && !m->items.empty()) ? &m->items[m->selected] : nullptr;
             if (item && item->isSlider) {
-                MenuEngine::adjustSlider(*item, -5);
+                MenuEngine::adjustSlider(*item, -item->sliderStep);
             } else if (item && item->isChoice) {
                 MenuEngine::cycleChoice(*item, -1);
             } else if (state.mode == AppMode::BT) {
@@ -74,7 +74,7 @@ void handleTap(AnoButton btn) {
             state.dirty = true;
         } else if ((btn == AnoButton::RIGHT || btn == AnoButton::CENTER) && m && !m->items.empty()) {
             MenuItem &item = m->items[m->selected];
-            if (item.isSlider) MenuEngine::adjustSlider(item, 5);
+            if (item.isSlider) MenuEngine::adjustSlider(item, item.sliderStep);
             else if (item.isChoice) MenuEngine::cycleChoice(item, 1);
             else if (item.action) item.action();
         }

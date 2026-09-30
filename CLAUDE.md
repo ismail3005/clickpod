@@ -95,6 +95,8 @@ src/bt/BluetoothSource.* real on/off-toggleable A2DP source (step 5), wired into
 src/power/Battery.*      MAX17048 fuel gauge polling over I2C (step 7) —
                          Battery::update() throttles to one poll/2s internally;
                          main.cpp's syncBatteryToUi() pushes it into state.battery
+src/net/TimeSync.*       WiFi NTP clock, no RTC hardware — background task, see
+                         its dedicated section below
 src/audio/AudioBridge.*  bridges UI "play this track" intent to real ESP32-audioI2S
                          output — plays the given track's real path, or falls back
                          to the first playable file found for tracks with none
@@ -472,6 +474,47 @@ yet (e.g. right after entering a different menu).
   sub-label change.
 If menus still feel slow after this, these three are the next places to
 apply the same `drawMenuRow()`-style partial-redraw pattern.
+
+## Statusbar clock (TimeSync) -- WiFi NTP, no RTC hardware
+
+There's no RTC chip in the BOM. Instead of leaving the clock a permanent
+"--:--" placeholder, `src/net/TimeSync.*` grabs wall-clock time "for
+free": scans for an open (no-password) WiFi network nearby, joins it
+briefly, fetches NTP time via the ESP32 core's own `configTime()`/
+`getLocalTime()`, then disconnects and turns the radio off, keeping time
+locally via `millis()` from then on. Re-attempts every 6h to correct
+drift and to cover the case where no open network was around the first
+time (a device that only works if you happen to be near an open network
+will often just show "--:--" -- that's an inherent limit of "for free,
+no configuration", not a bug). Settings gained a "Time zone" row
+(`state.utcOffsetHours`, -12..+14, doesn't cover half-hour zones like
+India UTC+5:30) since NTP gives UTC and there's no way to auto-detect
+the user's zone without geolocation.
+
+Runs entirely on a background FreeRTOS task (`xTaskCreatePinnedToCore`,
+core 0) so it never blocks boot -- unlike backgrounding the SD library
+scan (deliberately NOT done, see the gotcha above), this carries no
+cross-peripheral risk: WiFi doesn't touch the SPI bus TFT/SD share. It
+DOES share the ESP32's one radio with classic Bluetooth, so a scan+sync
+attempt could cause a brief BT audio glitch if BT happens to be actively
+streaming at that exact moment -- not worked around, since BT playback
+is currently just a test tone anyway (see `BluetoothSource.h`); revisit
+if/when BT streams real audio and this becomes noticeable.
+
+**Higher confidence than the FlacMeta/AlbumArt work**: `WiFi.h` and
+`configTime()`/`getLocalTime()` are core ESP32 Arduino framework APIs,
+not a third-party library guess -- WiFi is already compiled into this
+project's build regardless (visible in any `pio run` log's object file
+list), so this adds no new dependency and the API surface is much
+better-trodden than `TJpg_Decoder`'s.
+
+`MenuItem` gained `sliderStep` (default 5, matching the existing
+Brightness row's percentage steps) so the new Time zone row can step by
+whole hours instead -- `InputRouter.cpp`'s two `adjustSlider()` call
+sites now use `item.sliderStep` instead of a hardcoded `5`. Not
+persisted across reboots (no NVS/flash settings write exists yet) --
+`utcOffsetHours` resets to 0 on every boot, same as brightness/sort
+preference/dark mode.
 
 ## Working style this project has used (carry forward)
 

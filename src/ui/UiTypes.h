@@ -52,6 +52,7 @@ struct MenuItem {
     bool isSlider = false;
     std::function<int()> getInt;
     std::function<void(int)> setInt;
+    int sliderStep = 5; // magnitude per Left/Right/Center tap; e.g. 1 for an hour-offset row, not a 0-100% one
 
     bool isChoice = false;
     std::vector<String> options;

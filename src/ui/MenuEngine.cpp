@@ -217,7 +217,7 @@ void buildPlaylistList() {
 }
 
 void buildSettings() {
-    std::vector<MenuItem> items(4);
+    std::vector<MenuItem> items(5);
     items[0].label = "Bluetooth";
     items[0].subFn = btStatusLabel;
     items[0].action = []() { enterBluetooth(); };
@@ -241,6 +241,20 @@ void buildSettings() {
     items[3].options = {"Light", "Dark"};
     items[3].getChoice = []() { return state.darkMode ? String("Dark") : String("Light"); };
     items[3].setChoice = [](const String &v) { state.darkMode = (v == "Dark"); };
+
+    items[4].label = "Time zone";
+    items[4].isSlider = true;
+    items[4].sliderStep = 1; // hour offsets, not 0-100%
+    items[4].getInt = []() { return state.utcOffsetHours; };
+    items[4].setInt = [](int v) { state.utcOffsetHours = constrain(v, -12, 14); };
+    // subFn (not the plain `sub` adjustSlider() writes on adjust, which
+    // always appends "%") formats this as "UTC+3"/"UTC-5"/"UTC+0" --
+    // takes priority over `sub` per MenuItem::liveSub().
+    items[4].subFn = []() {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "UTC%+d", state.utcOffsetHours);
+        return String(buf);
+    };
 
     pushMenu("Settings", std::move(items));
 }
@@ -463,6 +477,9 @@ void moveGrabbedQueueItem(int delta) {
 
 void adjustSlider(MenuItem &item, int delta) {
     item.setInt(item.getInt() + delta);
+    // "%"-suffixed by default (Brightness); rows with their own subFn
+    // (e.g. Settings' Time zone) ignore this entirely -- liveSub() prefers
+    // subFn over this plain `sub` field.
     item.sub = String(item.getInt()) + "%";
     state.dirty = true;
 }

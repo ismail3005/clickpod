@@ -8,6 +8,7 @@
 #include "bt/BluetoothSource.h"
 #include "config/Pins.h"
 #include "input/AnoInput.h"
+#include "net/TimeSync.h"
 #include "power/Battery.h"
 #include "state/AppState.h"
 #include "ui/Library.h"
@@ -142,6 +143,10 @@ void setup() {
     Battery::begin();
 
     if (sdOk) AudioBridge::begin(audio); // wired output; Bluetooth is a separate on/off toggle driven from the UI
+
+    // Runs entirely on its own background task -- doesn't block the rest
+    // of setup() or touch anything else here. See TimeSync.h.
+    TimeSync::begin();
 }
 
 // Pushes the fuel gauge's latest reading into the UI's state, only marking

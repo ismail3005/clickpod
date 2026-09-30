@@ -72,6 +72,11 @@ struct AppState {
     int brightness = 70;
     String sortPref = "Artist";
     bool darkMode = false;
+    // UTC offset for the statusbar clock (TimeSync::currentTimeString()),
+    // -12..+14 -- doesn't cover half-hour zones (e.g. India UTC+5:30),
+    // a deliberate simplification. Not persisted across reboots (no NVS/
+    // flash write for settings exists yet); resets to 0 each boot.
+    int utcOffsetHours = 0;
 
     MenuReturn btReturn;
     MenuReturn trackMenuReturn;

@@ -4,6 +4,7 @@
 #include "Library.h"
 #include "MenuEngine.h"
 #include "Util.h"
+#include "../net/TimeSync.h"
 #include "../state/AppState.h"
 
 namespace Screens {
@@ -57,7 +58,7 @@ void drawStatusbar() {
     tftPtr->drawFastHLine(0, kStatusbarH - 1, kScreenW, p.border);
 
     tftPtr->setCursor(10, 9);
-    tftPtr->print("--:--"); // TODO: wire to a real clock/RTC once one exists
+    tftPtr->print(TimeSync::currentTimeString());
 
     int battPct = constrain(state.battery, 0, 100);
     int battX = kScreenW - 46;

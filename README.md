@@ -111,6 +111,17 @@ instead of the I2S DAC is separate, not-yet-done work.
 Battery % (`state.battery`) is also no longer a placeholder -- see step 7
 above, now synced from the real MAX17048 each loop iteration.
 
+The statusbar clock is real too, without any RTC hardware -- see
+`src/net/TimeSync.*`. There's no RTC chip in the BOM, so instead of
+faking elapsed-boot-time as if it were wall clock, it grabs real time
+"for free": scans for an open (no-password) WiFi network nearby, joins
+briefly, fetches NTP time, then disconnects and keeps time locally via
+`millis()` afterward, re-syncing every 6h. Entirely on a background task
+so it never blocks boot. If no open network is ever in range, the clock
+just stays at "--:--" -- an inherent limit of "no configuration needed",
+not a bug. Settings gained a "Time zone" row (UTC offset, whole hours
+only) since NTP gives UTC with no way to auto-detect the user's zone.
+
 This has been flashed and run on real hardware through several rounds of
 fixes -- see `CLAUDE.md`'s gotcha list for what's been found/fixed so
 far (a menu-layout bug, a full-screen playback flicker, an O(n^2)
@@ -132,19 +143,22 @@ Board: ESP32-WROVER-B (N4), 4MB flash / 4MB PSRAM.
 
 ```
 platformio.ini        PlatformIO project + dependency config
-src/main.cpp           entry point; bring-up steps 1-7 + wires up the UI layer
-src/config/Pins.h      pin assignments, cross-checked against the WROVER-B datasheet
-src/state/AppState.h   full app state (mode, menu stack, now playing, queue, settings)
-src/input/AnoInput.*   ANO encoder + button input logic (step 6)
-src/bt/BluetoothSource.* A2DP source test tone (step 5)
-src/power/Battery.*    MAX17048 fuel gauge polling over I2C (step 7)
+src/main.cpp            entry point; bring-up steps 1-7 + wires up the UI layer
+src/config/Pins.h       pin assignments, cross-checked against the WROVER-B datasheet
+src/state/AppState.h    full app state (mode, menu stack, now playing, queue, settings)
+src/input/AnoInput.*    ANO encoder + button input logic (step 6)
+src/bt/BluetoothSource.* real on/off Bluetooth toggle (test tone only, not real audio yet)
+src/power/Battery.*     MAX17048 fuel gauge polling over I2C (step 7)
+src/net/TimeSync.*      WiFi NTP clock (no RTC hardware) -- background task
 src/audio/AudioBridge.* bridges UI playback intent to real ESP32-audioI2S output
+src/audio/FlacMeta.*    FLAC metadata parser: duration, tags, lyrics, embedded art
 src/ui/UiTypes.h        shared data shapes (Track, Menu, MenuItem, ...)
-src/ui/Library.*        placeholder mock library/playlists/lyrics/BT devices
-src/ui/MenuEngine.*      menu-stack construction + navigation (ported from the simulator)
-src/ui/InputRouter.*     ANO events -> state transitions (ported from the simulator)
-src/ui/Screens.*         TFT_eSPI rendering for every screen
-src/ui/UI.*              top-level glue: boot sequence, playback clock, redraw dispatch
+src/ui/Library.*        real SD-scanned library (Library::scanFromSd()), mock fallback
+src/ui/MenuEngine.*     menu-stack construction + navigation (ported from the simulator)
+src/ui/InputRouter.*    ANO events -> state transitions (ported from the simulator)
+src/ui/AlbumArt.*       decodes embedded FLAC cover art for Now Playing
+src/ui/Screens.*        TFT_eSPI rendering for every screen
+src/ui/UI.*             top-level glue: boot sequence, playback clock, redraw dispatch
 docs/SPEC.md            full project specification
 ```
 
