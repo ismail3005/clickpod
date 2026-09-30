@@ -53,10 +53,10 @@
 // direction, only that the constant here matches what's physically wired.
 #define PIN_ANO_ENC_A      32
 #define PIN_ANO_ENC_B      33
-#define PIN_ANO_BTN_UP     39   // input-only, no internal pull — needs external/onboard pull resistor
+#define PIN_ANO_BTN_UP     14
 #define PIN_ANO_BTN_DOWN   35   // input-only pin, fine for a button; moved off GPIO12 (boot-voltage strap risk)
-#define PIN_ANO_BTN_LEFT   34   // input-only; also RTC-capable (fine if ever needed for wake)
-#define PIN_ANO_BTN_RIGHT  14
-#define PIN_ANO_BTN_CENTER 13   // must be a valid ext0 deep-sleep wake source -- GPIO13 is RTC-capable, OK
+#define PIN_ANO_BTN_LEFT   13
+#define PIN_ANO_BTN_RIGHT  34   // input-only; also RTC-capable (fine if ever needed for wake)
+#define PIN_ANO_BTN_CENTER 39   // input-only, no internal pull — needs external/onboard pull resistor; RTC-capable, valid ext0 deep-sleep wake source
 
 // Spare, unused for now: GPIO36 (input-only; candidate for a MAX17048 ALERT line later)
