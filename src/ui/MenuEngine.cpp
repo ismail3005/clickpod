@@ -39,6 +39,18 @@ void pushMenu(const String &title, std::vector<MenuItem> items, int selected) {
     m.items = std::move(items);
     m.selected = selected;
     state.menuStack.push_back(std::move(m));
+    // Every build*() function (buildArtistList, buildAlbumList,
+    // buildTrackList, buildPlaylistList, buildSettings, ...) funnels
+    // through here to enter a new menu level -- most of them never set
+    // state.dirty themselves, which meant selecting into Music/Playlists/
+    // an Artist/an Album/Settings did nothing visible until some LATER,
+    // unrelated action (e.g. the next UP/DOWN) happened to set dirty and
+    // trigger a redraw -- at which point the already-changed menu would
+    // suddenly appear, looking like it belonged to the wrong button press.
+    // Setting it here once, in the one function every menu-entry path
+    // goes through, fixes all of them at once instead of patching each
+    // build*() individually.
+    state.dirty = true;
 }
 
 Menu *currentMenu() {
