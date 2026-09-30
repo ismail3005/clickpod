@@ -97,6 +97,9 @@ src/power/Battery.*      MAX17048 fuel gauge polling over I2C (step 7) —
                          main.cpp's syncBatteryToUi() pushes it into state.battery
 src/net/TimeSync.*       WiFi NTP clock, no RTC hardware — background task, see
                          its dedicated section below
+src/net/RadioLock.h      mutex between TimeSync (WiFi) and BluetoothSource (BT) --
+                         ESP32's one shared radio, see the crash writeup below
+src/state/Persist.*      NVS-backed settings + Bluetooth-on persistence across reboots
 src/audio/AudioBridge.*  bridges UI "play this track" intent to real ESP32-audioI2S
                          output — plays the given track's real path, or falls back
                          to the first playable file found for tracks with none
@@ -509,12 +512,100 @@ list), so this adds no new dependency and the API surface is much
 better-trodden than `TJpg_Decoder`'s.
 
 `MenuItem` gained `sliderStep` (default 5, matching the existing
-Brightness row's percentage steps) so the new Time zone row can step by
+Brightness row's percentage steps) so the Time zone row can step by
 whole hours instead -- `InputRouter.cpp`'s two `adjustSlider()` call
-sites now use `item.sliderStep` instead of a hardcoded `5`. Not
-persisted across reboots (no NVS/flash settings write exists yet) --
-`utcOffsetHours` resets to 0 on every boot, same as brightness/sort
-preference/dark mode.
+sites use `item.sliderStep` instead of a hardcoded `5`.
+
+## Sixth real hardware bug (found, best-effort fixed): WiFi+BT coexistence crash
+
+User turned Bluetooth on (via the UI) and got a real crash + reboot loop,
+twice in a row: `[bt] Starting Bluetooth A2DP source...` followed
+immediately by `assert failed: hash_map_set hash_map.c:129 (data !=
+NULL)` inside Bluedroid. This appeared right after TimeSync's WiFi usage
+was added in the previous round of work -- ESP32's WiFi+BT coexistence
+(one shared radio) is a real, documented source of crashes when both
+subsystems touch the radio around the same time, and the timing
+correlation is the leading explanation here. **Not confirmed via
+reproduction** (no hardware access in this environment) -- if turning
+Bluetooth on still crashes after this fix, this diagnosis was wrong and
+it's worth looking elsewhere (the other log line in the same report,
+`FLAC maxFrameSize too large!`, is a separate, likely-unrelated issue --
+see below).
+
+Fix: `src/net/RadioLock.h`, a simple mutual-exclusion flag between
+`TimeSync` (WiFi) and `BluetoothSource` (classic BT) -- whichever is
+using the radio holds it for its whole active duration (BT from
+`begin()` to `end()`, not just start/stop; a TimeSync sync attempt for
+one scan+connect+NTP cycle), the other simply skips/defers its own radio
+use rather than risk an overlap. `BluetoothSource::begin()` silently
+declines (logs + returns) if TimeSync currently holds the lock; a
+`TimeSync` sync attempt does the same in reverse. Both sides are
+designed to fail safe (skip, don't crash, retry later) rather than block
+waiting for the lock.
+
+**Separately, also logged**: a real FLAC decode failure --
+`read_FLAC_Header(): FLAC maxFrameSize too large!` for a specific file
+("Aerosmith - Dream On.flac"), which `ESP32-audioI2S` responded to by
+closing the file and refusing to play it. This is an internal limitation
+of the pinned 3.0.12 library version (some files' FLAC frame sizes
+exceed whatever fixed buffer it allocates) -- not something fixable from
+application code without patching the library itself, and not attempted
+here. If more files hit this, it's a real constraint of this pinned
+library version to flag back to the user, not a bug in this codebase.
+
+## Real seek + real position sync (verified API, not guessed)
+
+Unlike `TJpg_Decoder` (guessed from general knowledge, flagged as the
+least-verified piece of that work), `ESP32-audioI2S` 3.0.12's actual
+header was fetched and checked (`WebFetch` against the real
+`github.com/schreibfaul1/ESP32-audioI2S` tag) before writing this --
+confirmed real methods: `setAudioPlayPosition(uint16_t sec)`,
+`getAudioCurrentTime()`, `getAudioFileDuration()`. `AudioBridge` now
+exposes `seekTo()`/`currentTimeSec()` wrapping these.
+
+This fixes "scrubbing looks like it works but doesn't actually move the
+audio" -- `InputRouter.cpp`'s `rotate()` now calls
+`AudioBridge::seekTo()` in addition to updating the UI's own
+`posSec`. It also replaces the old always-simulated position clock:
+`UI.cpp`'s `tickPlaybackClock()` now syncs `state.now.posSec` from
+`AudioBridge::currentTimeSec()` (the REAL decoder position) whenever
+playing a real file, falling back to the simulated increment only for
+placeholder/mock tracks with no real path. The progress bar and Lyrics
+screen were both silently working off a locally-guessed number before
+this that had no relationship to what was actually playing.
+
+## Approximate lyrics sync
+
+`LYRICS`/`UNSYNCEDLYRICS` Vorbis comments are plain text with no
+per-line timestamps (the format's own name says "unsynced"). Previously
+every line got `atSec=0`, so `drawLyrics()`'s "active line" picker
+always landed on the last line the whole song, which read as "lyrics
+don't move." `MenuEngine.cpp`'s `splitLyricsIntoLines()` now spreads
+lines evenly across the track's real duration (`line i` at
+`i/(n-1) * durSec`) instead -- not real sync (no real per-line timing
+data exists to use), but the highlight now visibly advances over the
+course of the song, which is what "lyrics should move with the song"
+actually needs even without being frame-accurate. Real sync would need
+an LRC-style timestamped format, which FLAC Vorbis comments don't carry.
+
+## Settings + Bluetooth-on persistence (Persist / NVS)
+
+`src/state/Persist.*` saves brightness, dark mode, sort preference, time
+zone, and whether Bluetooth was left on to the ESP32's NVS flash (via
+the core `Preferences` library -- built into the framework, not a new
+dependency) and restores them at boot, before `UI::begin()` so the first
+screen already reflects saved settings. Each setting's change site
+(`MenuEngine.cpp`'s `buildSettings()` setters, the Bluetooth on/off
+actions) calls `Persist::save()` directly -- no debouncing, settings
+change rarely enough that this is simpler and safe for NVS wear.
+
+If `state.btOn` was persisted `true`, `main.cpp`'s `setup()` calls
+`BluetoothSource::begin()` at boot to resume it -- this is what "want
+paired BT stuff to persist" currently means, since there's only ever one
+configured target device (`BluetoothSource::kTargetDeviceName`) to
+resume, not a list of paired devices to choose from (see the spec 8
+amendment on why). If the UI ever supports configuring a different
+target device name, that choice belongs in `Persist` too.
 
 ## Working style this project has used (carry forward)
 

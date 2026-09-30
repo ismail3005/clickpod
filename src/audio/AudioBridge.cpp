@@ -84,4 +84,14 @@ void setVolumePercent(int pct) {
     audioPtr->setVolume(map(pct, 0, 100, 0, 21));
 }
 
+bool seekTo(uint16_t sec) {
+    if (!audioPtr || !playing) return false;
+    return audioPtr->setAudioPlayPosition(sec);
+}
+
+uint32_t currentTimeSec() {
+    if (!audioPtr || !playing) return 0;
+    return audioPtr->getAudioCurrentTime();
+}
+
 } // namespace AudioBridge

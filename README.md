@@ -122,10 +122,24 @@ just stays at "--:--" -- an inherent limit of "no configuration needed",
 not a bug. Settings gained a "Time zone" row (UTC offset, whole hours
 only) since NTP gives UTC with no way to auto-detect the user's zone.
 
+Scrubbing and the progress bar now reflect real audio decoder state
+(`AudioBridge::seekTo()`/`currentTimeSec()`, checked against
+`ESP32-audioI2S`'s actual header -- not guessed) instead of a purely
+simulated position that had no real relationship to what was playing.
+Lyrics lines are spread evenly across the track's real duration so the
+highlight actually advances over the song (embedded FLAC lyrics tags
+have no real per-line timestamps to sync to -- this is an approximation,
+not frame-accurate sync). Settings (brightness, dark mode, sort
+preference, time zone) and whether Bluetooth was left on now persist
+across reboots via the ESP32's NVS flash (`src/state/Persist.*`).
+
 This has been flashed and run on real hardware through several rounds of
 fixes -- see `CLAUDE.md`'s gotcha list for what's been found/fixed so
-far (a menu-layout bug, a full-screen playback flicker, an O(n^2)
-memory crash opening a large playlist, and boot-time SD scan tuning).
+far, including a real WiFi+Bluetooth coexistence crash (best-effort
+fixed with a mutex between the two radio users, not confirmed via
+reproduction) and a separate, unrelated FLAC decode failure on at least
+one file that's an internal limitation of the pinned `ESP32-audioI2S`
+version, not something fixable from this codebase.
 
 ## Build
 
@@ -150,6 +164,8 @@ src/input/AnoInput.*    ANO encoder + button input logic (step 6)
 src/bt/BluetoothSource.* real on/off Bluetooth toggle (test tone only, not real audio yet)
 src/power/Battery.*     MAX17048 fuel gauge polling over I2C (step 7)
 src/net/TimeSync.*      WiFi NTP clock (no RTC hardware) -- background task
+src/net/RadioLock.h     mutex between TimeSync (WiFi) and BluetoothSource (BT radio)
+src/state/Persist.*     NVS-backed settings + Bluetooth-on persistence
 src/audio/AudioBridge.* bridges UI playback intent to real ESP32-audioI2S output
 src/audio/FlacMeta.*    FLAC metadata parser: duration, tags, lyrics, embedded art
 src/ui/UiTypes.h        shared data shapes (Track, Menu, MenuItem, ...)

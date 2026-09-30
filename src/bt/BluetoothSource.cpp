@@ -3,6 +3,8 @@
 #include <BluetoothA2DPSource.h>
 #include <math.h>
 
+#include "../net/RadioLock.h"
+
 namespace {
 
 BluetoothA2DPSource a2dpSource;
@@ -34,6 +36,16 @@ int32_t provideTestTone(uint8_t *data, int32_t byteCount) {
 } // namespace
 
 void BluetoothSource::begin(const char *targetDeviceName) {
+    if (running) return;
+    // Holds the radio lock for as long as BT stays on (released in end()),
+    // not just for this call -- see RadioLock.h. If TimeSync's WiFi is
+    // mid-cycle right now, this just doesn't start; try again in a
+    // moment (a TimeSync cycle is short-lived).
+    if (!RadioLock::tryAcquire()) {
+        Serial.println(F("[bt] can't start yet -- WiFi time sync is active, try again shortly"));
+        return;
+    }
+
     Serial.println(F("[bt] Starting Bluetooth A2DP source..."));
     a2dpSource.set_data_callback(provideTestTone);
     a2dpSource.start(targetDeviceName);
@@ -48,6 +60,7 @@ void BluetoothSource::end() {
     if (!running) return;
     a2dpSource.end();
     running = false;
+    RadioLock::release();
     Serial.println(F("[bt] A2DP source stopped"));
 }
 

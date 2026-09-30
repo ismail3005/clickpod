@@ -8,6 +8,7 @@
 #include "../audio/FlacMeta.h"
 #include "../bt/BluetoothSource.h"
 #include "../state/AppState.h"
+#include "../state/Persist.h"
 #include "AlbumArt.h"
 #include "Library.h"
 #include "Util.h"
@@ -21,23 +22,30 @@ Track trackObj(const NowPlaying &n) {
 
 // Splits a lyrics blob (as stored in a LYRICS/UNSYNCEDLYRICS Vorbis
 // comment -- plain text, NOT time-synced, hence "unsynced") into lines
-// for the Lyrics screen. Every line gets atSec=0 since there's no real
-// timing data to assign -- drawLyrics()'s "active line" picks the LAST
-// line whenever every candidate ties on atSec, so with real embedded
-// lyrics the screen shows real text (the actual ask) at the cost of the
-// scrolling highlight not tracking playback position the way it does
-// for the one hand-written time-synced demo entry. Not worth more
-// engineering than that for a tag format that's plain text by design.
-std::vector<LyricLine> splitLyricsIntoLines(const String &text) {
-    std::vector<LyricLine> lines;
+// for the Lyrics screen. There's no real per-line timing data in the tag,
+// so lines are spread evenly across the track's real duration (line i at
+// i/(n-1) of durSec) -- an approximation, not real sync, but it means the
+// highlighted line actually advances over the course of the song instead
+// of sitting on the last line the whole time (every line tied at atSec=0
+// before this). Real per-line timestamps would need a synced lyrics
+// format (e.g. LRC), which isn't what FLAC's Vorbis comment tags carry.
+std::vector<LyricLine> splitLyricsIntoLines(const String &text, uint16_t durSec) {
+    std::vector<String> raw;
     int start = 0;
     for (int i = 0; i <= text.length(); i++) {
         if (i == text.length() || text[i] == '\n') {
             String line = text.substring(start, i);
             if (line.endsWith("\r")) line = line.substring(0, line.length() - 1);
-            if (line.length() > 0) lines.push_back(LyricLine{0, line});
+            if (line.length() > 0) raw.push_back(line);
             start = i + 1;
         }
+    }
+
+    std::vector<LyricLine> lines;
+    size_t n = raw.size();
+    for (size_t i = 0; i < n; i++) {
+        uint16_t atSec = (n > 1 && durSec > 0) ? (uint16_t)((uint32_t)i * durSec / (n - 1)) : 0;
+        lines.push_back(LyricLine{atSec, raw[i]});
     }
     return lines;
 }
@@ -62,7 +70,7 @@ void setNowPlaying(Track t) {
             if (tags.hasTitle) t.title = tags.title;
             if (tags.hasAlbum) t.album = tags.album;
             if (tags.hasLyrics) {
-                Library::LYRICS[Library::keyFor(t)] = splitLyricsIntoLines(tags.lyrics);
+                Library::LYRICS[Library::keyFor(t)] = splitLyricsIntoLines(tags.lyrics, t.durSec);
             }
         }
 
@@ -226,27 +234,27 @@ void buildSettings() {
     items[1].sub = String(state.brightness) + "%";
     items[1].isSlider = true;
     items[1].getInt = []() { return state.brightness; };
-    items[1].setInt = [](int v) { state.brightness = constrain(v, 10, 100); };
+    items[1].setInt = [](int v) { state.brightness = constrain(v, 10, 100); Persist::save(); };
 
     items[2].label = "Sort tracks by";
     items[2].sub = state.sortPref;
     items[2].isChoice = true;
     items[2].options = {"Artist", "Album"};
     items[2].getChoice = []() { return state.sortPref; };
-    items[2].setChoice = [](const String &v) { state.sortPref = v; };
+    items[2].setChoice = [](const String &v) { state.sortPref = v; Persist::save(); };
 
     items[3].label = "Appearance";
     items[3].sub = state.darkMode ? "Dark" : "Light";
     items[3].isChoice = true;
     items[3].options = {"Light", "Dark"};
     items[3].getChoice = []() { return state.darkMode ? String("Dark") : String("Light"); };
-    items[3].setChoice = [](const String &v) { state.darkMode = (v == "Dark"); };
+    items[3].setChoice = [](const String &v) { state.darkMode = (v == "Dark"); Persist::save(); };
 
     items[4].label = "Time zone";
     items[4].isSlider = true;
     items[4].sliderStep = 1; // hour offsets, not 0-100%
     items[4].getInt = []() { return state.utcOffsetHours; };
-    items[4].setInt = [](int v) { state.utcOffsetHours = constrain(v, -12, 14); };
+    items[4].setInt = [](int v) { state.utcOffsetHours = constrain(v, -12, 14); Persist::save(); };
     // subFn (not the plain `sub` adjustSlider() writes on adjust, which
     // always appends "%") formats this as "UTC+3"/"UTC-5"/"UTC+0" --
     // takes priority over `sub` per MenuItem::liveSub().
@@ -350,7 +358,8 @@ void enterBluetooth() {
     items[0].action = []() {
         if (!state.btOn) {
             BluetoothSource::begin(BluetoothSource::kTargetDeviceName);
-            state.btOn = true;
+            state.btOn = true; // optimistic; syncBluetoothToUi() corrects this next loop if begin() actually declined
+            Persist::save();
             Serial.println(F("[ui] Bluetooth on, connecting..."));
             state.dirty = true;
         }
@@ -361,6 +370,7 @@ void enterBluetooth() {
         BluetoothSource::end();
         state.btOn = false;
         state.btConnectedTo = "";
+        Persist::save();
         exitBluetooth();
     };
 

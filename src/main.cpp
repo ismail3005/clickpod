@@ -11,6 +11,7 @@
 #include "net/TimeSync.h"
 #include "power/Battery.h"
 #include "state/AppState.h"
+#include "state/Persist.h"
 #include "ui/Library.h"
 #include "ui/UI.h"
 
@@ -110,6 +111,12 @@ void setup() {
     delay(500);
     Serial.println(F("\n=== clickpod firmware ==="));
 
+    // Before anything else draws/reads state -- brightness/dark mode/sort/
+    // time zone/whether BT was left on all come from here if previously
+    // saved (src/state/Persist.*), so the very first screen already
+    // reflects them instead of a brief flash of defaults.
+    Persist::load();
+
     verifyPsram();
     initDisplay();
     AnoInput::begin();
@@ -143,6 +150,12 @@ void setup() {
     Battery::begin();
 
     if (sdOk) AudioBridge::begin(audio); // wired output; Bluetooth is a separate on/off toggle driven from the UI
+
+    // Resume Bluetooth if it was on when the device last powered off
+    // (state.btOn came from Persist::load() above). syncBluetoothToUi()
+    // below keeps the UI's status honest either way if this declines to
+    // start (e.g. RadioLock busy -- see BluetoothSource.cpp).
+    if (state.btOn) BluetoothSource::begin(BluetoothSource::kTargetDeviceName);
 
     // Runs entirely on its own background task -- doesn't block the rest
     // of setup() or touch anything else here. See TimeSync.h.

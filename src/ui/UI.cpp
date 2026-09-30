@@ -1,5 +1,6 @@
 #include "UI.h"
 
+#include "../audio/AudioBridge.h"
 #include "../state/AppState.h"
 #include "AlbumArt.h"
 #include "InputRouter.h"
@@ -24,7 +25,18 @@ void tickPlaybackClock() {
     if (state.mode == AppMode::OFF) return;
     if (!state.now.playing || !state.now.hasTrack) return;
 
-    state.now.posSec += kClockMs / 1000.0f;
+    // Real position for a real file (confirmed API, see AudioBridge.h) --
+    // simulated increment only as a fallback for placeholder/mock tracks
+    // with no real path. Without this the displayed position was always
+    // the UI's own guess, never what's actually playing -- which is also
+    // why scrubbing looked like it worked but didn't actually move the
+    // audio: the real decoder position and the UI's posSec were two
+    // unrelated numbers.
+    if (state.now.path.length() > 0) {
+        state.now.posSec = (float)AudioBridge::currentTimeSec();
+    } else {
+        state.now.posSec += kClockMs / 1000.0f;
+    }
     // durSec==0 means unknown, not "already over" -- true for placeholder/
     // mock tracks, or a real track whose FlacMeta::readStreamInfo() call
     // in MenuEngine::setNowPlaying() failed. Without this guard playback

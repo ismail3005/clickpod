@@ -26,4 +26,13 @@ void playSomething(const String &path = "");
 void pauseResume();
 void setVolumePercent(int pct); // 0-100, mapped to the DAC's 0-21 range
 
+// Real seek/position, confirmed against ESP32-audioI2S 3.0.12's actual
+// header (github.com/schreibfaul1/ESP32-audioI2S at that tag) -- unlike
+// earlier guesses in this codebase (TJpg_Decoder), this one was checked,
+// not assumed. seekTo() jumps the real decoder; currentTimeSec() is the
+// real playback position, not the UI's own simulated clock -- UI.cpp
+// syncs state.now.posSec from this when playing a real file.
+bool seekTo(uint16_t sec);
+uint32_t currentTimeSec();
+
 } // namespace AudioBridge

@@ -7,6 +7,7 @@
 #include <freertos/task.h>
 
 #include "../state/AppState.h"
+#include "RadioLock.h"
 
 namespace TimeSync {
 namespace {
@@ -20,6 +21,15 @@ constexpr uint32_t kConnectTimeoutMs = 8000;
 constexpr uint32_t kNtpTimeoutMs = 5000;
 
 bool tryOnce() {
+    // See RadioLock.h -- skip this cycle entirely if Bluetooth currently
+    // owns the radio, rather than risk the WiFi+BT coexistence crash that
+    // prompted adding this lock. Just retries next interval.
+    RadioLock::ScopedLock lock;
+    if (!lock.acquired) {
+        Serial.println(F("[time] skipping sync -- Bluetooth is active"));
+        return false;
+    }
+
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     delay(100);

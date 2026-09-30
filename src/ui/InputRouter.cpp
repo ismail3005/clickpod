@@ -37,6 +37,10 @@ void rotate(int dir) {
         MenuEngine::moveSelection(dir > 0 ? 1 : -1);
     } else if (state.mode == AppMode::NOW_PLAYING) {
         state.now.posSec = constrain(state.now.posSec + dir * 3, 0.0f, (float)state.now.durSec);
+        // Actually seeks the real decoder (confirmed against ESP32-
+        // audioI2S 3.0.12's real header, not guessed) -- without this,
+        // only the on-screen position moved, the audio itself didn't.
+        if (state.now.path.length() > 0) AudioBridge::seekTo((uint16_t)state.now.posSec);
         state.dirty = true;
     } else if (state.mode == AppMode::QUEUE) {
         MenuEngine::moveQueueSelection(dir > 0 ? 1 : -1);
