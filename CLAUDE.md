@@ -1,14 +1,10 @@
 # clickpod — working notes for Claude
 
-This file is gitignored (see `.gitignore`) — it never leaves this machine
-via git. If you're picking this project up in a new session (new machine,
-new container, ran out of cloud credits, whatever), **get a copy of this
-file onto that machine's clone first** — ask the previous session to send
-it to you, or copy it by hand. `docs/SPEC.md` and `README.md` are the
-source-of-truth project docs and travel with git normally; this file is
-the "how we actually got here and what to watch out for" layer on top,
-kept current as work happens so a fresh session doesn't have to
-re-derive it from scratch.
+This file is tracked in git (not gitignored) and travels with a normal
+clone. `docs/SPEC.md` and `README.md` are the source-of-truth project
+docs; this file is the "how we actually got here and what to watch out
+for" layer on top, kept current as work happens so a fresh session
+doesn't have to re-derive it from scratch.
 
 **Keep this file current.** Whenever you make a decision, hit a gotcha,
 or finish a chunk of work, update the relevant section below in the same
@@ -29,18 +25,24 @@ Full spec: `docs/SPEC.md`. Repo: `github.com/ismail3005/clickpod`.
 Hardware bring-up steps 1-6 are **hardware-confirmed** on the rebuilt
 physical board: PSRAM, SD, DAC/I2S playback, ILI9341 display, Bluetooth
 A2DP source, ANO encoder+buttons. Step 7 (MAX17048 battery/fuel gauge) is
-the only one left — **user is about to start on this** (soldering/wiring
-the battery, TP4056 charge circuit, MAX17048). They were mid-way through
-crimping a connector for the battery-to-TP4056 bridge wire last it came
-up.
+now **wired (physically) and implemented (firmware)** — `src/power/
+Battery.*`, polls cell % over I2C every 2s, synced into `state.battery`
+each loop from `main.cpp`. **User is about to flash this for the first
+time** — not yet hardware-confirmed, checkbox in README stays unchecked
+until it's been seen working. If it comes back with issues: check I2C
+wiring first (SDA=GPIO21, SCL=GPIO27, VIN=3.3V — see spec 3.1), then
+`Adafruit_MAX1704X`/`Adafruit_BusIO` library API (written from general
+knowledge, not verified against the actual installed header — see "Build/
+flash reminder" below).
 
 The real UI/UX layer (spec section 6) has been built and is on
 `src/ui/` + `src/state/AppState.h` + `src/audio/AudioBridge.*`, pushed to
 branch `claude/great-lovelace-ww4xy9` (tracks PR #1). **Not yet flashed/
 hardware-tested** — only syntax/link-checked against stub headers in a
-sandboxed session with no `pio run` available. First flash will likely
-surface the usual bring-up issues (pin/timing/rendering bugs) — that's
-expected, not a sign something is fundamentally wrong.
+sandboxed session with no `pio run` available (same for the battery
+module above). First flash will likely surface the usual bring-up issues
+(pin/timing/rendering bugs) — that's expected, not a sign something is
+fundamentally wrong.
 
 ## How the UI got built: browser simulator first, then ported to firmware
 
@@ -82,13 +84,16 @@ Right-tap-to-grab).
 ## Firmware structure (see also README.md's Layout section)
 
 ```
-src/main.cpp             entry point; steps 1-6 bring-up + wires up UI::begin()/update()
+src/main.cpp             entry point; steps 1-7 bring-up + wires up UI::begin()/update()
 src/config/Pins.h        pin assignments (see gotchas below — reconfirm after any rewire)
 src/state/AppState.h/.cpp  full app state singleton (`extern AppState state;`)
 src/input/AnoInput.*     ANO encoder + button tap/long-press/double-tap/isHeld (step 6)
 src/bt/BluetoothSource.* isolated A2DP source test tone (step 5) — NOT merged into
                          normal playback; kTestWiredPlayback in main.cpp picks
                          wired-vs-BT test mode, they're still separate paths
+src/power/Battery.*      MAX17048 fuel gauge polling over I2C (step 7) —
+                         Battery::update() throttles to one poll/2s internally;
+                         main.cpp's syncBatteryToUi() pushes it into state.battery
 src/audio/AudioBridge.*  bridges UI "play this track" intent to real ESP32-audioI2S
                          output — plays the first real file found on SD; see
                          "known placeholders" below for why
@@ -115,8 +120,6 @@ src/ui/Util.*            shared fmtTime()
   still plays **real** audio via `AudioBridge` (whatever file it finds
   first on the card), so DAC output is real, just not guaranteed to
   match the on-screen metadata yet.
-- **`state.battery`** (`src/state/AppState.h`): static placeholder int,
-  not a MAX17048 reading. This is what step 7 (about to start) replaces.
 - **`state.btOn` / `state.btConnectedTo`**: driven by the UI's own mock
   `Library::BT_DEVICES` list, not the real `BluetoothSource` A2DP link.
   Those are still separate/isolated (see `kTestWiredPlayback` above).

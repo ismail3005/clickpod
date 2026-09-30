@@ -8,6 +8,7 @@
 #include "bt/BluetoothSource.h"
 #include "config/Pins.h"
 #include "input/AnoInput.h"
+#include "power/Battery.h"
 #include "state/AppState.h"
 #include "ui/UI.h"
 
@@ -18,7 +19,7 @@
 //   4. ILI9341 display alongside SD on shared SPI bus [this file]
 //   5. ESP32-A2DP Bluetooth output, tested in isolation [this file]
 //   6. ANO encoder + buttons                 [this file, done ahead of step 5]
-//   7. MAX17048 battery monitoring
+//   7. MAX17048 battery monitoring           [src/power/Battery.*]
 //
 // Steps 1-6 are hardware-confirmed (see README). The real UI/UX layer
 // (menus, now playing, lyrics, queue, Bluetooth screen -- docs/SPEC.md
@@ -105,6 +106,12 @@ void setup() {
 
     bool sdOk = initSd();
 
+    // Non-fatal if the gauge doesn't ACK (e.g. bench-testing with the
+    // battery disconnected) -- the UI just keeps showing its placeholder
+    // battery % instead of a live reading, same "don't halt bring-up over
+    // a single subsystem" approach as SD/BT above.
+    Battery::begin();
+
     UI::begin(tft);
     if (kTestWiredPlayback) {
         if (sdOk) AudioBridge::begin(audio);
@@ -113,9 +120,24 @@ void setup() {
     }
 }
 
+// Pushes the fuel gauge's latest reading into the UI's state, only marking
+// the screen dirty when the displayed % actually changes -- polling itself
+// is throttled inside Battery::update(), this just avoids redundant
+// redraws on every loop() iteration in between polls.
+static void syncBatteryToUi() {
+    if (!Battery::ready()) return;
+    int pct = Battery::percent();
+    if (pct != state.battery) {
+        state.battery = pct;
+        state.dirty = true;
+    }
+}
+
 void loop() {
     if (kTestWiredPlayback) audio.loop(); // pumps I2S streaming; must run every iteration
     AnoInput::update();
+    Battery::update();
+    syncBatteryToUi();
     UI::update();
 }
 

@@ -57,8 +57,9 @@ struct AppState {
     std::vector<Track> history; // previously played tracks this session, for "skip previous"
 
     int volume = 62; // 0-100 UI scale; mapped to the DAC's 0-21 range in AudioBridge
-    // TODO(step 7): battery is a placeholder until the MAX17048 fuel gauge
-    // is wired in -- see README status item 7.
+    // Synced from the real MAX17048 reading each loop() iteration (see
+    // main.cpp's syncBatteryToUi()) once Battery::begin() succeeds; stays
+    // at this default otherwise (gauge not wired/not responding).
     int battery = 82;
     // TODO: btOn/btConnectedTo are placeholders driven by the UI's own mock
     // BT_DEVICES list (Library::BT_DEVICES), not the real BluetoothSource

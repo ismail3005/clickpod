@@ -51,7 +51,12 @@ Following the bring-up order from spec section 4:
       need external 10k pull-ups to 3.3V. Button-to-GPIO mapping is
       hardware-order-dependent (not fixed by the board's SWn silkscreen
       labels) -- confirm/refix in `Pins.h` after any rewiring.
-- [ ] 7. MAX17048 battery monitoring
+- [ ] 7. MAX17048 battery monitoring — wiring confirmed (spec section 3.1)
+      and firmware implemented (`src/power/Battery.*`, polls cell % every
+      2s over I2C, SDA=GPIO21/SCL=GPIO27), wired into the UI's status bar
+      via `main.cpp`'s `syncBatteryToUi()`. Not yet flashed/hardware-
+      confirmed -- checkbox stays unchecked until it's been seen working
+      on the real board.
 
 Open technical risk to validate early (spec section 10): how deep
 `ESP32-audioI2S`'s FLAC metadata support goes (Vorbis comments, PICTURE
@@ -73,13 +78,15 @@ placeholders, called out with `TODO` comments at their definitions:
   (`src/audio/AudioBridge.*` plays the first playable file found on the
   card), so DAC output is real; the on-screen metadata just isn't
   guaranteed to match the specific file actually playing yet.
-- **Battery % and Bluetooth connection status** shown in the UI
-  (`state.battery`, `state.btOn`/`state.btConnectedTo` in
-  `src/state/AppState.h`) are UI-internal placeholders, not readings from
-  the real MAX17048 (step 7, not yet built) or the real A2DP link
-  (`src/bt/BluetoothSource.*`, still an isolated bring-up test path per
-  `kTestWiredPlayback`, not merged into normal playback). Wiring both up
-  is follow-up work.
+- **Bluetooth connection status** shown in the UI
+  (`state.btOn`/`state.btConnectedTo` in `src/state/AppState.h`) is a
+  UI-internal placeholder driven by the UI's own mock device list, not a
+  reading from the real A2DP link (`src/bt/BluetoothSource.*`, still an
+  isolated bring-up test path per `kTestWiredPlayback`, not merged into
+  normal playback). Wiring it up is follow-up work.
+
+Battery % (`state.battery`) is **no longer** a placeholder -- see step 7
+above, now synced from the real MAX17048 each loop iteration.
 
 This hasn't been build-tested on real hardware yet (only syntax-checked
 against stub headers, no `pio run` available in this environment) --
@@ -101,11 +108,12 @@ Board: ESP32-WROVER-B (N4), 4MB flash / 4MB PSRAM.
 
 ```
 platformio.ini        PlatformIO project + dependency config
-src/main.cpp           entry point; bring-up steps 1-6 + wires up the UI layer
+src/main.cpp           entry point; bring-up steps 1-7 + wires up the UI layer
 src/config/Pins.h      pin assignments, cross-checked against the WROVER-B datasheet
 src/state/AppState.h   full app state (mode, menu stack, now playing, queue, settings)
 src/input/AnoInput.*   ANO encoder + button input logic (step 6)
 src/bt/BluetoothSource.* A2DP source test tone (step 5)
+src/power/Battery.*    MAX17048 fuel gauge polling over I2C (step 7)
 src/audio/AudioBridge.* bridges UI playback intent to real ESP32-audioI2S output
 src/ui/UiTypes.h        shared data shapes (Track, Menu, MenuItem, ...)
 src/ui/Library.*        placeholder mock library/playlists/lyrics/BT devices
@@ -116,4 +124,5 @@ src/ui/UI.*              top-level glue: boot sequence, playback clock, redraw d
 docs/SPEC.md            full project specification
 ```
 
-Power (MAX17048, step 7) is the only bring-up step left to build.
+All 7 bring-up steps are now implemented in firmware; step 7 (power) is
+the only one not yet flashed/hardware-confirmed.
