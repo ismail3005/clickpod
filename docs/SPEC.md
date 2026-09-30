@@ -175,7 +175,7 @@ sort views, settings, BT device list, etc.)
 |---|---|
 | Rotate (CW/CCW) | Scrub through current track position |
 | Up / Down | Volume up/down |
-| Left / Right | Fast-forward / rewind (seek) |
+| Left / Right (single tap) | Skip to next/previous track. **AMENDED** (was originally fast-forward/rewind on tap) -- rotate already covers scrubbing position, so tap L/R is free for track skip instead, matching classic iPod physical-button behavior (tap to skip, as opposed to touch-wheel seek). Left/Right long press is currently unbound in this mode -- Right long press stays reserved globally for BT pairing (5.4), never reassigned here. |
 | Center (single tap) | Play/Pause toggle |
 | Center (double tap, within ~300-400ms window) | Return to menu — music CONTINUES PLAYING in background, does not pause |
 | Center (long press) | Power on/off (see section 5.4) |
