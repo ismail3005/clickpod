@@ -4,11 +4,14 @@
 #include "../state/AppState.h"
 #include "AlbumArt.h"
 #include "InputRouter.h"
+#include "Library.h"
 #include "MenuEngine.h"
 #include "Screens.h"
 
 namespace UI {
 namespace {
+
+int lastLyricsActiveIdx = -1; // see tickPlaybackClock()'s LYRICS branch
 
 constexpr uint32_t kBootMs = 1100;   // matches the simulator's boot->MENU timeout
 constexpr uint32_t kClockMs = 500;   // matches the simulator's playback-clock setInterval
@@ -67,22 +70,31 @@ void tickPlaybackClock() {
     if (state.now.durSec > 0 && state.now.posSec >= state.now.durSec) {
         MenuEngine::playNextInQueue(); // sets state.dirty itself -- new track needs a full redraw
     } else if (state.mode == AppMode::LYRICS) {
-        // "Lyrics don't track" -- the active-line highlight is entirely
-        // position-driven (drawLyrics() picks it from state.now.posSec
-        // each time it draws), but the Lyrics screen was never actually
-        // being redrawn on an ordinary position tick: only progressDirty
-        // got set below, and Screens::render() only acts on progressDirty
-        // for AppMode::NOW_PLAYING, not LYRICS -- so posSec was updating
-        // correctly the whole time, the screen just never repainted to
-        // show it. Uses the heavier `dirty` flag (full redraw) rather
-        // than a lighter partial one like Now Playing's progress bar --
-        // every visible lyric line's Y position shifts together whenever
-        // the active line changes (it's a centered scrolling view), so a
-        // true partial redraw isn't as simple here. Real tradeoff, lower
-        // impact than Now Playing's flicker was (this screen isn't where
-        // most playback time is spent) -- candidate for the same
-        // partial-redraw treatment later if it's noticeable in practice.
-        state.dirty = true;
+        // "Lyrics don't track" (fixed earlier) needed the Lyrics screen to
+        // actually redraw on a position tick -- Screens::render() only
+        // acted on the lighter progressDirty for AppMode::NOW_PLAYING, not
+        // LYRICS, so posSec was updating correctly but nothing repainted
+        // to show it. The first fix set `dirty` (full redraw) on EVERY
+        // tick while on this screen, which fixed the tracking but visibly
+        // flickered -- a full-body fillRect + text redraw every ~500ms is
+        // exactly the class of bug the Now Playing progress bar already
+        // had fixed once before (see CLAUDE.md's second hardware bug).
+        // Fixed properly here: only actually redraw when the active line
+        // (MenuEngine::activeLyricIndex(), the same computation
+        // drawLyrics() itself uses -- one source of truth, not duplicated
+        // logic that could drift) has actually changed, which for real
+        // lyrics happens every several seconds, not twice a second. Still
+        // a full-body redraw when it DOES fire (every visible line's Y
+        // shifts together, since this is a centered scrolling view, not
+        // independent rows -- a true partial/row-level redraw isn't as
+        // simple here as Now Playing's single progress strip was), just
+        // not on every tick regardless of whether anything changed.
+        auto it = Library::LYRICS.find(state.now.key);
+        int activeIdx = (it != Library::LYRICS.end()) ? MenuEngine::activeLyricIndex(it->second) : -1;
+        if (activeIdx != lastLyricsActiveIdx) {
+            lastLyricsActiveIdx = activeIdx;
+            state.dirty = true;
+        }
     } else {
         // Just the position moved -- progressDirty triggers the cheap
         // partial redraw instead of a full-screen flicker every tick.

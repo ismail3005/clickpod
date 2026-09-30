@@ -1001,6 +1001,25 @@ whose tag actually has it, not just the visual fix of removing the
 visible tag text. Falls back to the existing even-spread approximation
 exactly as before for files with genuinely plain, untimed text.
 
+## Lyrics screen flicker (found immediately after the last fix, fixed properly)
+
+The previous round's "Lyrics don't track" fix (full `state.dirty` redraw
+on every position tick while on that screen) worked but introduced a
+visible flicker -- the exact same class of bug as the second hardware
+bug (Now Playing's progress-bar flicker), just reintroduced on a
+different screen. Fixed properly: `MenuEngine::activeLyricIndex()` (new,
+public -- the same active-line computation `drawLyrics()` already did
+inline, now shared instead of duplicated) lets `UI.cpp`'s
+`tickPlaybackClock()` compare the current active line against the last
+one it saw (`lastLyricsActiveIdx`) and only actually set `state.dirty`
+when it changed. Real lyrics only change lines every several seconds,
+not every 500ms tick, so this cuts the redraw rate dramatically while
+keeping the screen genuinely tracking. Still a full-body redraw when it
+DOES fire (every visible line's Y shifts together in this centered
+scrolling view -- a true partial/row-level redraw isn't as
+straightforward as Now Playing's single progress-bar strip was), just
+no longer firing on every tick regardless of whether anything changed.
+
 ## PSRAM pushed harder -- user's explicit call ("don't hesitate to use the sram... i paid extra for on this wrover")
 
 Three concrete moves, on top of everything the radio-heap-guard work
@@ -1044,6 +1063,70 @@ resource on this board (PSRAM: 4MB, essentially unused before this):
    if audio or Bluetooth output instead gets audibly glitchy/corrupted
    (a different symptom, not just a refusal-to-start) after this change,
    that's the first thing to suspect, and this one call is what to revert.
+
+## Open question, not attempted: real options for the two FLAC decode limitations (24-bit, maxFrameSize) without re-encoding
+
+User's real music collection has files hitting both known
+`ESP32-audioI2S` 3.0.12 limitations (24-bit samples unsupported;
+`maxFrameSize too large` on some files). The firmware-side fix so far is
+just "detect and skip fast, don't stall" -- it doesn't make those files
+actually playable, and re-encoding the whole affected set is a real
+hassle the user explicitly doesn't want to repeat. Options, not
+attempted, for whenever this gets picked back up -- roughly effort/risk
+ascending:
+
+1. **Re-encode just the affected files, not re-download them.** If the
+   user still has the original files anywhere off the SD card (a
+   computer, wherever they were ripped/downloaded from originally), only
+   THOSE specific files need converting to 16-bit FLAC (`ffmpeg -i in.flac
+   -sample_fmt s16 out.flac`, or any FLAC-capable tool), then copied back
+   onto the card in place and a "Rescan library" run. Lowest effort,
+   zero firmware risk, but does need access to source files outside the
+   SD card -- if the SD card is the only copy left, this still means
+   pulling files off it, converting, and putting them back, not
+   literally re-downloading from the original source.
+2. **Log which files failed, directly on the SD card, not just serial.**
+   Not a fix for the limitation itself, but makes option 1 far less
+   painful to act on -- right now the user has to catch the skip message
+   live in the serial monitor to know which files are affected. A small
+   addition to the skip path (`UI.cpp`'s `tickPlaybackClock()` /
+   `MenuEngine.cpp`'s `setNowPlaying()`) could append failed paths +
+   reasons to a plain text file on the card (e.g. `/clickpod_failed.txt`),
+   so the user can just open that file to get an exact list of what
+   needs re-encoding. Low effort, low risk, doesn't touch playback itself.
+3. **Patch `ESP32-audioI2S`'s FLAC frame buffer size.** The
+   `maxFrameSize too large` check is very likely a fixed-size internal
+   buffer in the library's own source (not investigated yet -- would need
+   to actually read `Audio.cpp`'s FLAC decode path on GitHub, not just
+   its public header the way `setAudioPlayPosition` etc. were verified).
+   If it's "just" a compile-time buffer size, bumping it (forking the
+   pinned 3.0.12 tag, pointing `platformio.ini`'s `lib_deps` at the fork)
+   could fix SOME of the maxFrameSize failures for a RAM cost, without
+   needing 24-bit support at all. Wouldn't help the 24-bit-specific
+   failures (that's a separate, harder validation check, not a buffer
+   size). Medium effort, real but bounded risk -- a wrong buffer-size
+   guess is a build/runtime issue to debug, not a device-bricking one.
+4. **Patch in real 24-bit support.** The hardest, highest-risk option --
+   modifying the decoder's internal PCM handling to accept and downmix/
+   truncate 24-bit samples to 16-bit (or pass them through if the I2S
+   output path can take it) touches the core of a complex audio decoder
+   this session hasn't read the internals of. Real risk of subtle audio
+   corruption/distortion bugs that are hard to verify without hardware
+   access and deep familiarity with the library. Not recommended as a
+   first move -- try 1-3 first.
+5. **Upgrade the pinned toolchain/library version.** The real,
+   structural fix would be moving off `ESP32-audioI2S` 3.0.12 to a
+   version with better FLAC support -- blocked by the documented C++20
+   `std::span` / GCC 8.4 incompatibility (see the hardware-gotchas
+   section). Upgrading the ESP32 Arduino platform/toolchain itself is a
+   significant, project-wide undertaking (re-verify everything still
+   builds, possible new incompatibilities elsewhere) -- biggest lift of
+   all these options, only worth it if 1-4 turn out insufficient.
+
+**Recommended order if/when this comes up again**: 1 (or 2 first, to make
+1 easy) is the practical near-term answer; 3 is worth a real look if
+option 1 still leaves too many files broken; 4/5 only if those don't get
+far enough.
 
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 

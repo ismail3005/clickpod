@@ -386,10 +386,7 @@ void drawLyrics() {
         return;
     }
     const std::vector<LyricLine> &lines = it->second;
-    int activeIdx = 0;
-    for (size_t i = 0; i < lines.size(); i++) {
-        if (state.now.posSec >= lines[i].atSec) activeIdx = (int)i;
-    }
+    int activeIdx = MenuEngine::activeLyricIndex(lines); // shared with UI.cpp's tick -- see its comment
     int16_t lineH = 18;
     int16_t centerY = kBodyY + kBodyH / 2;
     for (size_t i = 0; i < lines.size(); i++) {

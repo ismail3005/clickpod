@@ -31,6 +31,16 @@ void playFromQueueIndex(int idx);
 
 String btStatusLabel();
 void enterBluetooth();
+
+// Which line of `lines` is "active" right now (state.now.posSec), i.e.
+// the one Screens.cpp's drawLyrics() highlights. Shared between it and
+// UI.cpp's tickPlaybackClock() -- the latter uses this to only mark the
+// Lyrics screen dirty (full redraw) when the active line actually
+// changes, instead of on every ~500ms position tick regardless, which
+// was producing a visible flicker on that screen once it started
+// actually tracking. Returns 0 for an empty list (matches drawLyrics()'s
+// prior inline behavior).
+int activeLyricIndex(const std::vector<LyricLine> &lines);
 void exitBluetooth();
 
 void openTrackMenu(const Track &track);

@@ -556,6 +556,14 @@ String btStatusLabel() {
     return state.btConnectedTo.length() ? "Connected: " + state.btConnectedTo : "Connecting...";
 }
 
+int activeLyricIndex(const std::vector<LyricLine> &lines) {
+    int activeIdx = 0;
+    for (size_t i = 0; i < lines.size(); i++) {
+        if (state.now.posSec >= lines[i].atSec) activeIdx = (int)i;
+    }
+    return activeIdx;
+}
+
 void enterBluetooth() {
     // Bluetooth is reachable globally (long-press RIGHT from any mode), so
     // it needs its own way back to wherever the user actually was --
