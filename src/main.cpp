@@ -89,28 +89,48 @@ static const char *buttonName(AnoButton button) {
     }
 }
 
-// Bring-up step 6 validation: report every raw input event to serial. Not
-// wired to any actual UI action yet -- see AnoInput.h for why.
+// y-position reserved for the last-ANO-event line, below the track path
+// printed at y=60. Cleared with fillRect before each new line so a shorter
+// message doesn't leave stale characters from a longer previous one.
+constexpr int16_t kAnoStatusY = 90;
+
+static void showAnoStatus(const String &text) {
+    tft.fillRect(0, kAnoStatusY, tft.width(), 10, TFT_BLACK);
+    tft.setCursor(10, kAnoStatusY);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.setTextSize(1);
+    tft.print(text);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK); // restore default for other screen text
+}
+
+// Bring-up step 6 validation: report every raw input event to serial and
+// echo the latest one on screen too. Not wired to any actual UI action yet
+// -- see AnoInput.h for why.
 static void reportAnoInput() {
     AnoInput::update();
 
     int16_t delta = AnoInput::takeEncoderDelta();
     if (delta != 0) {
-        Serial.printf("[ano] rotate %s (delta %d)\n", delta > 0 ? "CW" : "CCW", delta);
+        const char *dir = delta > 0 ? "CW" : "CCW";
+        Serial.printf("[ano] rotate %s (delta %d)\n", dir, delta);
+        showAnoStatus(String("rotate ") + dir + " (" + delta + ")");
     }
 
     for (uint8_t i = 0; i < static_cast<uint8_t>(AnoButton::COUNT); i++) {
         AnoButton b = static_cast<AnoButton>(i);
         if (AnoInput::wasTapped(b)) {
             Serial.printf("[ano] %s tap\n", buttonName(b));
+            showAnoStatus(String(buttonName(b)) + " tap");
         }
         if (AnoInput::wasLongPressed(b)) {
             Serial.printf("[ano] %s long-press\n", buttonName(b));
+            showAnoStatus(String(buttonName(b)) + " long-press");
         }
     }
 
     if (AnoInput::centerWasDoubleTapped()) {
         Serial.println(F("[ano] CENTER double-tap"));
+        showAnoStatus("CENTER double-tap");
     }
 }
 
@@ -160,9 +180,7 @@ void setup() {
 
     verifyPsram();
     initDisplay();
-    // TEMP: ANO not physically wired back in yet during the rebuild.
-    // Re-enable once it's back on the breadboard.
-    // AnoInput::begin();
+    AnoInput::begin();
 
     bool sdOk = initSd();
 
@@ -192,7 +210,7 @@ void setup() {
 
 void loop() {
     audio.loop();
-    // reportAnoInput(); // TEMP disabled alongside AnoInput::begin() above
+    reportAnoInput();
 }
 
 // ESP32-audioI2S optional callbacks -- useful during bring-up to see what
