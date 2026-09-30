@@ -31,6 +31,7 @@ struct NowPlaying {
     uint16_t durSec = 0;
     float posSec = 0;
     bool playing = false;
+    String path; // real SD path if known (see Track::path); empty for placeholder tracks
 };
 
 // Snapshot of where to unwind back to after leaving a globally-reachable
@@ -77,7 +78,13 @@ struct AppState {
     MenuReturn btReturn;
     MenuReturn trackMenuReturn;
 
-    bool dirty = true; // set whenever state changes in a way that should trigger a redraw
+    bool dirty = true; // set whenever state changes in a way that needs a full-screen redraw
+    // Lighter-weight than `dirty`: set by the once-a-second Now Playing
+    // position tick, which only needs the progress bar/time strip
+    // redrawn, not the whole screen -- see Screens::render() and
+    // UI.cpp's tickPlaybackClock. Avoids a full-screen flicker every
+    // second during playback.
+    bool progressDirty = false;
 };
 
 extern AppState state;

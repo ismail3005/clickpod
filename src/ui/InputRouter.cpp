@@ -144,7 +144,7 @@ void handleLongPress(AnoButton btn) {
         if (btn == AnoButton::DOWN) { state.mode = AppMode::LYRICS; state.dirty = true; }
         else if (btn == AnoButton::UP) { state.mode = AppMode::QUEUE; state.queueSelected = 0; state.queueGrabbed = false; state.dirty = true; }
         else if (btn == AnoButton::LEFT && state.now.hasTrack) {
-            Track t{state.now.artist, state.now.album, state.now.title, state.now.durSec, state.now.art};
+            Track t{state.now.artist, state.now.album, state.now.title, state.now.durSec, state.now.art, state.now.path};
             MenuEngine::openTrackMenu(t);
         }
         // RIGHT long stays reserved globally for BT pairing; scrubbing is

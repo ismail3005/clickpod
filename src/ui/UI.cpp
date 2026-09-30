@@ -24,10 +24,17 @@ void tickPlaybackClock() {
     if (!state.now.playing || !state.now.hasTrack) return;
 
     state.now.posSec += kClockMs / 1000.0f;
-    if (state.now.posSec >= state.now.durSec) {
-        MenuEngine::playNextInQueue();
+    // durSec==0 means unknown (real scanned tracks don't have a known
+    // duration yet -- see Library::scanFromSd()), not "already over" --
+    // without this guard playback would auto-skip to the next track
+    // within the first tick of starting.
+    if (state.now.durSec > 0 && state.now.posSec >= state.now.durSec) {
+        MenuEngine::playNextInQueue(); // sets state.dirty itself -- new track needs a full redraw
+    } else {
+        // Just the position moved -- progressDirty triggers the cheap
+        // partial redraw instead of a full-screen flicker every tick.
+        state.progressDirty = true;
     }
-    state.dirty = true;
 }
 
 } // namespace

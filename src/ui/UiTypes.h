@@ -14,13 +14,19 @@ struct Track {
     String title;
     uint16_t durSec = 0;
     char art = '\x01'; // glyph key into Screens' icon set; '\x01' = generic note
+    // Real SD path (e.g. "/Artist/Album/01 Song.flac") for tracks that came
+    // from Library::scanFromSd(); empty for placeholder/mock tracks, which
+    // makes AudioBridge fall back to "play whatever's first on the card"
+    // instead of a specific file. No default member initializer needed --
+    // String's own default constructor already gives "".
+    String path;
 };
 
 struct LibraryAlbum {
     String artist;
     String album;
     char art = '\x01';
-    std::vector<Track> tracks; // title + durSec only; artist/album/art inherited from the album
+    std::vector<Track> tracks; // title + durSec + path; artist/album/art inherited from the album
 };
 
 struct Playlist {

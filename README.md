@@ -51,12 +51,18 @@ Following the bring-up order from spec section 4:
       need external 10k pull-ups to 3.3V. Button-to-GPIO mapping is
       hardware-order-dependent (not fixed by the board's SWn silkscreen
       labels) -- confirm/refix in `Pins.h` after any rewiring.
-- [ ] 7. MAX17048 battery monitoring — wiring confirmed (spec section 3.1)
-      and firmware implemented (`src/power/Battery.*`, polls cell % every
-      2s over I2C, SDA=GPIO21/SCL=GPIO27), wired into the UI's status bar
-      via `main.cpp`'s `syncBatteryToUi()`. Not yet flashed/hardware-
-      confirmed -- checkbox stays unchecked until it's been seen working
-      on the real board.
+- [ ] 7. MAX17048 battery monitoring — wiring fully done (spec section
+      3.1: battery, TP4056+boost, and the MAX17048's I2C header all
+      connected) and firmware implemented and flashed
+      (`src/power/Battery.*`, polls cell % every 2s over I2C,
+      SDA=GPIO21/SCL=GPIO27, wired into the UI's status bar via
+      `main.cpp`'s `syncBatteryToUi()`). Checkbox stays unchecked until an
+      actual on-screen reading has been confirmed sane, but the hardware
+      side is done. **Note:** the TP4056+boost module's `OUT+`/`OUT-` was
+      at one point wired to the 3.3V rail instead of the ESP32's 5V pin --
+      that's wrong per spec 3.1 (risks overvolting anything on the 3.3V
+      rail) and needs to be on 5V before running off battery power; check
+      this got fixed before trusting a battery-powered run.
 
 Open technical risk to validate early (spec section 10): how deep
 `ESP32-audioI2S`'s FLAC metadata support goes (Vorbis comments, PICTURE
@@ -68,17 +74,24 @@ The real UI layer (menus, Now Playing, Lyrics, Queue, Bluetooth screen,
 Settings, track context menu, dark mode -- spec section 6) is implemented
 in `src/ui/`, ported directly from an interactive browser simulator used
 to iterate on the UX before committing it to firmware. It's wired into
-`main.cpp` and drives the real TFT + ANO input, but two things are still
-placeholders, called out with `TODO` comments at their definitions:
+`main.cpp` and drives the real TFT + ANO input.
 
-- **Library data** (`src/ui/Library.h`) is a hand-written mock
-  Artist/Album/Track/Playlist set, not a real SD scan -- real FLAC
-  metadata parsing is the open risk noted above (spec section 10) and
-  hasn't been built yet. Selecting a mock track still plays real audio
-  (`src/audio/AudioBridge.*` plays the first playable file found on the
-  card), so DAC output is real; the on-screen metadata just isn't
-  guaranteed to match the specific file actually playing yet.
-- **Bluetooth connection status** shown in the UI
+**Library data** (`src/ui/Library.*`) is no longer just a hand-written
+mock set -- `Library::scanFromSd()` walks the real SD card at boot and
+replaces it. Each top-level folder becomes an Artist (subfolders are
+Albums, files are Tracks), except folder names recognized as playlist
+folders (currently just `funky times`, see `isPlaylistFolderName()` in
+`Library.cpp`), whose Artist/Album/track tree becomes one named Playlist
+instead of separate Music entries -- keeps a playlist folder that
+duplicates albums also downloaded separately from showing those albums
+twice. Selecting a track now plays that exact file
+(`src/audio/AudioBridge.*`), not just "whatever's first on the card."
+Track titles come from filenames and durations are unknown (0) until real
+FLAC metadata parsing exists (spec section 10 is still open) -- the
+mock placeholder set is kept as a fallback for bench-testing with no SD
+card inserted.
+
+**Bluetooth connection status** shown in the UI
   (`state.btOn`/`state.btConnectedTo` in `src/state/AppState.h`) is a
   UI-internal placeholder driven by the UI's own mock device list, not a
   reading from the real A2DP link (`src/bt/BluetoothSource.*`, still an

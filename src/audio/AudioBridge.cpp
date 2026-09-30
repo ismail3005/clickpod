@@ -1,6 +1,7 @@
 #include "AudioBridge.h"
 
 #include "../config/Pins.h"
+#include "../ui/Util.h"
 
 namespace AudioBridge {
 namespace {
@@ -8,14 +9,6 @@ namespace {
 Audio *audioPtr = nullptr;
 bool sdOk = false;
 bool playing = false;
-
-bool hasAudioExtension(const String &name) {
-    String lower = name;
-    lower.toLowerCase();
-    return lower.endsWith(".flac") || lower.endsWith(".mp3") ||
-           lower.endsWith(".wav") || lower.endsWith(".m4a") ||
-           lower.endsWith(".aac");
-}
 
 // Recursively searches for the first playable, actually-openable audio file
 // on the card -- see main.cpp's original bring-up comment for why paths are
@@ -53,9 +46,18 @@ void begin(Audio &audio) {
 
 bool sdReady() { return sdOk; }
 
-void playSomething() {
+void playSomething(const String &path) {
     if (!audioPtr || !sdOk) return;
 
+    if (path.length() > 0) {
+        Serial.printf("[audio] playing: %s\n", path.c_str());
+        audioPtr->connecttoFS(SD, path.c_str());
+        playing = true;
+        return;
+    }
+
+    // No real path known for this track (placeholder/mock data) -- fall
+    // back to whatever's first on the card, so DAC output is still real.
     String trackPath;
     File root = SD.open("/");
     bool found = findFirstAudioFile(root, "", trackPath);
@@ -66,7 +68,7 @@ void playSomething() {
         return;
     }
 
-    Serial.printf("[audio] playing: %s\n", trackPath.c_str());
+    Serial.printf("[audio] playing (fallback, no track path known): %s\n", trackPath.c_str());
     audioPtr->connecttoFS(SD, trackPath.c_str());
     playing = true;
 }

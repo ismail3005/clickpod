@@ -10,6 +10,7 @@
 #include "input/AnoInput.h"
 #include "power/Battery.h"
 #include "state/AppState.h"
+#include "ui/Library.h"
 #include "ui/UI.h"
 
 // Bring-up sequence (docs/SPEC.md section 4):
@@ -105,6 +106,7 @@ void setup() {
     AnoInput::begin();
 
     bool sdOk = initSd();
+    if (sdOk) Library::scanFromSd(); // replaces the placeholder library if it finds any real tracks
 
     // Non-fatal if the gauge doesn't ACK (e.g. bench-testing with the
     // battery disconnected) -- the UI just keeps showing its placeholder

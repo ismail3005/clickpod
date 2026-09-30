@@ -25,24 +25,22 @@ Full spec: `docs/SPEC.md`. Repo: `github.com/ismail3005/clickpod`.
 Hardware bring-up steps 1-6 are **hardware-confirmed** on the rebuilt
 physical board: PSRAM, SD, DAC/I2S playback, ILI9341 display, Bluetooth
 A2DP source, ANO encoder+buttons. Step 7 (MAX17048 battery/fuel gauge) is
-now **wired (physically) and implemented (firmware)** — `src/power/
+now **fully wired (physically) and implemented (firmware)** — `src/power/
 Battery.*`, polls cell % over I2C every 2s, synced into `state.battery`
-each loop from `main.cpp`. **User is about to flash this for the first
-time** — not yet hardware-confirmed, checkbox in README stays unchecked
-until it's been seen working. If it comes back with issues: check I2C
-wiring first (SDA=GPIO21, SCL=GPIO27, VIN=3.3V — see spec 3.1), then
-`Adafruit_MAX1704X`/`Adafruit_BusIO` library API (written from general
-knowledge, not verified against the actual installed header — see "Build/
-flash reminder" below).
+each loop from `main.cpp`. Not yet explicitly confirmed sane on-screen
+(checkbox in README stays unchecked until then), but the hardware side
+is done and the firmware has been flashed successfully. **Open safety
+item**: the TP4056+boost module's `OUT+`/`OUT-` was at one point wired to
+the 3.3V rail instead of the ESP32's 5V pin (wrong per spec 3.1, risks
+overvolting the 3.3V rail) -- confirm this got fixed to 5V before trusting
+a battery-powered run; currently powered via the ESP32's own USB for
+flashing/dev, which is unaffected either way.
 
-The real UI/UX layer (spec section 6) has been built and is on
-`src/ui/` + `src/state/AppState.h` + `src/audio/AudioBridge.*`, pushed to
-branch `claude/great-lovelace-ww4xy9` (tracks PR #1). **Not yet flashed/
-hardware-tested** — only syntax/link-checked against stub headers in a
-sandboxed session with no `pio run` available (same for the battery
-module above). First flash will likely surface the usual bring-up issues
-(pin/timing/rendering bugs) — that's expected, not a sign something is
-fundamentally wrong.
+The real UI/UX layer (spec section 6) is built, flashed, and has been
+through a few rounds of real-hardware fixes already (see the gotcha list
+below) -- no longer "not yet hardware-tested." Current known gap: real
+library scanning exists (`Library::scanFromSd()`) but Bluetooth
+connection status is still a UI-internal mock, not the real A2DP link.
 
 ## How the UI got built: browser simulator first, then ported to firmware
 
@@ -108,18 +106,48 @@ src/ui/InputRouter.*     ANO events -> state transitions (handleTap/handleLongPr
                          handleDoubleTap/rotate/togglePower) — also ported 1:1
 src/ui/Screens.*         TFT_eSPI rendering for every screen
 src/ui/UI.*              boot sequence, playback clock, redraw dispatch
-src/ui/Util.*            shared fmtTime()
+src/ui/Util.*            shared fmtTime(), hasAudioExtension()
 ```
 
-## Known placeholders / intentionally-not-real-yet (flagged with TODO comments at their definitions too)
+## Real library scanning (Library::scanFromSd())
 
-- **`src/ui/Library.h`**: mock library data, not a real SD scan. Real FLAC
-  metadata parsing is the still-open risk in spec section 10 (Vorbis
-  comments, PICTURE block, STREAMINFO support depth in
-  `ESP32-audioI2S` — never actually verified). Selecting a mock track
-  still plays **real** audio via `AudioBridge` (whatever file it finds
-  first on the card), so DAC output is real, just not guaranteed to
-  match the on-screen metadata yet.
+No longer mock-only. Walks the SD card root at boot (`main.cpp`, right
+after `initSd()` succeeds) and replaces `Library::ALBUMS`/`PLAYLISTS`:
+each top-level folder is an Artist (its subfolders are Albums, their
+audio files are Tracks) UNLESS its name matches
+`isPlaylistFolderName()` in `Library.cpp` (currently hardcodes just
+`"funky times"`, case-insensitive) — those become ONE named Playlist
+instead, walking the same Artist/Album/track structure underneath but
+not contributing separate Music entries. This exists specifically
+because the user's card has a `funky times/Artist/Album/track.flac`
+playlist folder that duplicates albums *also* downloaded separately at
+SD root — without the exclusion, Music would show every one of those
+albums twice. **To add more playlist folders later, just add their
+names to `isPlaylistFolderName()`.**
+
+Track titles come from filenames (stripped extension only, no prefix
+cleanup); durations are unknown (`durSec = 0`) since getting a real
+duration means opening/decoding each file, not done during the bulk
+scan — `UI.cpp`'s playback clock already guards against treating
+`durSec == 0` as "track over" (was auto-skipping immediately before this
+fix). Each scanned `Track` carries a real `path` (e.g.
+`/Artist/Album/01 Song.flac`); `AudioBridge::playSomething(path)` plays
+that exact file when given one, falling back to "first playable file
+found" only for tracks with no known path (placeholder/mock data).
+
+The original mock Artist/Album/Playlist data (`MOCK_ALBUMS` etc. in
+`Library.cpp`) is kept as a fallback for bench-testing with no SD card
+inserted, or a card scanFromSd() finds nothing on.
+
+**Not yet built:** real FLAC metadata (tags, STREAMINFO duration) --
+spec section 10 remains open; this scan is the "filename-based fallback"
+approach the spec already flagged as acceptable if tag parsing turns out
+to be too much. Also not built: scanning at any scale beyond what's
+currently on the card has not been tested — large libraries may need a
+lazier approach (load per-album on demand) instead of holding everything
+in RAM at once.
+
+## Known placeholders / intentionally-not-real-yet (flagged with TODO comments at their definitions too)
 - **`state.btOn` / `state.btConnectedTo`**: driven by the UI's own mock
   `Library::BT_DEVICES` list, not the real `BluetoothSource` A2DP link.
   Those are still separate/isolated (see `kTestWiredPlayback` above).
@@ -203,11 +231,35 @@ source (`Artifact` tool, `action:"read"`) rather than reconstructing the
 layout from memory/description — memory of "bigger icon tiles" doesn't
 preserve exact flex-direction.
 
-**Known, not yet fixed:** screen refresh feels slow -- full `fillRect` +
-per-character SPI text draw on every button press, no sprite buffering
-or DMA in `Screens.cpp`. Real limitation, not a bug; TFT_eSPI supports
-sprite-based partial redraws, worth doing once functional gaps are
-closed, not before.
+**Known, not yet fixed:** screen refresh feels slow on button presses --
+full `fillRect` + per-character SPI text draw per press, no sprite
+buffering or DMA in `Screens.cpp`. Real limitation, not a bug; TFT_eSPI
+supports sprite-based partial redraws, worth doing once functional gaps
+are closed, not before.
+
+**Second real hardware bug (found, fixed): full-screen flicker during
+playback.** `tickPlaybackClock()` (UI.cpp) set `state.dirty = true` on
+every 500ms position tick, so `drawNowPlaying()` -- which starts with a
+full-body `fillRect` -- ran once a second even with no button pressed,
+producing a visible flicker the whole time something played. Fixed with
+a second, lighter flag: `state.progressDirty`, set instead of `dirty` on
+ticks that don't change track. `Screens::render()` checks it only when
+`dirty` is false and calls a new `drawNowPlayingProgress()` that redraws
+just the progress-bar/time strip (a small `fillRect`, not the whole
+body). `drawNowPlaying()` calls the same function for its own progress
+section, so there's one source of truth for that layout. **Lesson**:
+anywhere state changes on a timer/clock (not just on input), check
+whether it's setting the heavy full-redraw flag when a lighter one would
+do -- this class of bug won't show up in a stub-header sandbox check
+since nothing there can reveal visible flicker.
+
+**Real library scanning is live**: `Library::scanFromSd()` walks the SD
+card at boot; see the dedicated section above. The user's card has a
+`funky times/Artist/Album/track.flac` playlist folder that duplicates
+albums also downloaded separately at SD root -- `isPlaylistFolderName()`
+in `Library.cpp` hardcodes "funky times" to exclude it from Music
+(it becomes its own Playlist instead). Add more names there if more
+playlist folders show up.
 
 ## Working style this project has used (carry forward)
 

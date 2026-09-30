@@ -190,6 +190,33 @@ void drawMenu() {
     }
 }
 
+// Redraws just the progress bar + elapsed/remaining time strip, without
+// touching the rest of the screen. Used for the once-a-second position
+// tick (see UI.cpp's tickPlaybackClock/state.progressDirty) so playback
+// doesn't full-screen-flicker every second -- only drawNowPlaying() (art,
+// title, play state, etc. -- things that only change on a real track/mode
+// change) does the full-body fillRect.
+void drawNowPlayingProgress() {
+    const Palette &p = pal();
+    NowPlaying &n = state.now;
+    if (!n.hasTrack) return;
+
+    int16_t progY = kBodyY + kBodyH - 34;
+    float pct = n.durSec ? min(1.0f, n.posSec / (float)n.durSec) : 0;
+    int16_t barW = kScreenW - 40;
+
+    // Clear just this strip (bar + time labels), not the whole body.
+    tftPtr->fillRect(20, progY, barW, 16, p.bg);
+    tftPtr->drawRect(20, progY, barW, 4, p.border);
+    tftPtr->fillRect(20, progY, (int16_t)(barW * pct), 4, 0x2D9F);
+    tftPtr->setTextColor(p.muted, p.bg);
+    tftPtr->setCursor(20, progY + 8);
+    tftPtr->print(fmtTime(n.posSec));
+    String remain = "-" + fmtTime(n.durSec - n.posSec);
+    tftPtr->setCursor(kScreenW - 20 - (int)remain.length() * 6, progY + 8);
+    tftPtr->print(remain);
+}
+
 void drawNowPlaying() {
     const Palette &p = pal();
     tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
@@ -224,17 +251,7 @@ void drawNowPlaying() {
     tftPtr->setCursor(kScreenW / 2 - (int)n.album.length() * 3, metaY + 23);
     tftPtr->print(n.album);
 
-    int16_t progY = kBodyY + kBodyH - 34;
-    float pct = n.durSec ? min(1.0f, n.posSec / (float)n.durSec) : 0;
-    int16_t barW = kScreenW - 40;
-    tftPtr->drawRect(20, progY, barW, 4, p.border);
-    tftPtr->fillRect(20, progY, (int16_t)(barW * pct), 4, 0x2D9F);
-    tftPtr->setTextColor(p.muted, p.bg);
-    tftPtr->setCursor(20, progY + 8);
-    tftPtr->print(fmtTime(n.posSec));
-    String remain = "-" + fmtTime(n.durSec - n.posSec);
-    tftPtr->setCursor(kScreenW - 20 - (int)remain.length() * 6, progY + 8);
-    tftPtr->print(remain);
+    drawNowPlayingProgress();
 
     int16_t bottomY = kBodyY + kBodyH - 14;
     tftPtr->setTextColor(p.fg, p.bg);
@@ -331,7 +348,13 @@ void drawQueue() {
 void begin(TFT_eSPI &tft) { tftPtr = &tft; }
 
 void render() {
-    if (!state.dirty || !tftPtr) return;
+    if (!tftPtr) return;
+
+    if (!state.dirty) {
+        if (state.progressDirty && state.mode == AppMode::NOW_PLAYING) drawNowPlayingProgress();
+        state.progressDirty = false;
+        return;
+    }
 
     if (state.mode == AppMode::BOOT) {
         drawStatusbar();
@@ -356,6 +379,7 @@ void render() {
     }
 
     state.dirty = false;
+    state.progressDirty = false; // a full redraw already covers the progress bar too
 }
 
 } // namespace Screens

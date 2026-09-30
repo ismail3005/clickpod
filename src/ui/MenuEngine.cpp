@@ -12,7 +12,7 @@ namespace MenuEngine {
 namespace {
 
 Track trackObj(const NowPlaying &n) {
-    return Track{n.artist, n.album, n.title, n.durSec, n.art};
+    return Track{n.artist, n.album, n.title, n.durSec, n.art, n.path};
 }
 
 void setNowPlaying(const Track &t) {
@@ -25,7 +25,8 @@ void setNowPlaying(const Track &t) {
     state.now.durSec = t.durSec;
     state.now.posSec = 0;
     state.now.playing = true;
-    AudioBridge::playSomething();
+    state.now.path = t.path;
+    AudioBridge::playSomething(t.path);
 }
 
 } // namespace
@@ -102,7 +103,7 @@ void buildTrackList(const LibraryAlbum &album) {
         it.label = t.title;
         it.sub = fmtTime(t.durSec);
         it.isTrack = true;
-        it.trackData = Track{album.artist, album.album, t.title, t.durSec, album.art};
+        it.trackData = Track{album.artist, album.album, t.title, t.durSec, album.art, t.path};
         LibraryAlbum copy = album;
         size_t idx = i;
         it.action = [copy, idx]() { playAlbumFrom(copy, idx); };
@@ -171,7 +172,7 @@ void buildSettings() {
 void playAlbumFrom(const LibraryAlbum &album, size_t index) {
     std::vector<Track> list;
     list.reserve(album.tracks.size());
-    for (auto &t : album.tracks) list.push_back(Track{album.artist, album.album, t.title, t.durSec, album.art});
+    for (auto &t : album.tracks) list.push_back(Track{album.artist, album.album, t.title, t.durSec, album.art, t.path});
     playQueueFrom(std::move(list), index);
 }
 
