@@ -29,12 +29,10 @@ now **fully wired (physically) and implemented (firmware)** — `src/power/
 Battery.*`, polls cell % over I2C every 2s, synced into `state.battery`
 each loop from `main.cpp`. Not yet explicitly confirmed sane on-screen
 (checkbox in README stays unchecked until then), but the hardware side
-is done and the firmware has been flashed successfully. **Open safety
-item**: the TP4056+boost module's `OUT+`/`OUT-` was at one point wired to
-the 3.3V rail instead of the ESP32's 5V pin (wrong per spec 3.1, risks
-overvolting the 3.3V rail) -- confirm this got fixed to 5V before trusting
-a battery-powered run; currently powered via the ESP32's own USB for
-flashing/dev, which is unaffected either way.
+is done and the firmware has been flashed successfully. The earlier
+miswiring (TP4056+boost `OUT+`/`OUT-` on the 3.3V rail instead of the
+ESP32's 5V pin, risking overvolting the 3.3V rail) **has been fixed** --
+confirmed by the user, no longer an open item.
 
 The real UI/UX layer (spec section 6) is built, flashed, and has been
 through a few rounds of real-hardware fixes already (see the gotcha list

@@ -52,17 +52,14 @@ Following the bring-up order from spec section 4:
       hardware-order-dependent (not fixed by the board's SWn silkscreen
       labels) -- confirm/refix in `Pins.h` after any rewiring.
 - [ ] 7. MAX17048 battery monitoring — wiring fully done (spec section
-      3.1: battery, TP4056+boost, and the MAX17048's I2C header all
-      connected) and firmware implemented and flashed
-      (`src/power/Battery.*`, polls cell % every 2s over I2C,
-      SDA=GPIO21/SCL=GPIO27, wired into the UI's status bar via
-      `main.cpp`'s `syncBatteryToUi()`). Checkbox stays unchecked until an
-      actual on-screen reading has been confirmed sane, but the hardware
-      side is done. **Note:** the TP4056+boost module's `OUT+`/`OUT-` was
-      at one point wired to the 3.3V rail instead of the ESP32's 5V pin --
-      that's wrong per spec 3.1 (risks overvolting anything on the 3.3V
-      rail) and needs to be on 5V before running off battery power; check
-      this got fixed before trusting a battery-powered run.
+      3.1: battery, TP4056+boost's `OUT+`/`OUT-` correctly on the ESP32's
+      5V pin -- an earlier miswiring to the 3.3V rail has been fixed --
+      and the MAX17048's I2C header all connected) and firmware
+      implemented and flashed (`src/power/Battery.*`, polls cell % every
+      2s over I2C, SDA=GPIO21/SCL=GPIO27, wired into the UI's status bar
+      via `main.cpp`'s `syncBatteryToUi()`). Checkbox stays unchecked
+      until an actual on-screen reading has been confirmed sane, but the
+      hardware side is done.
 
 Open technical risk to validate early (spec section 10): how deep
 `ESP32-audioI2S`'s FLAC metadata support goes (Vorbis comments, PICTURE
