@@ -125,6 +125,10 @@ src/ui/AlbumArt.*        decodes embedded FLAC cover art (via FlacMeta + TJpg_De
 src/ui/Screens.*         TFT_eSPI rendering for every screen
 src/ui/UI.*              boot sequence, playback clock, redraw dispatch
 src/ui/Util.*            shared fmtTime(), hasAudioExtension()
+scripts/patch_audioI2S.py  build-time patch for ESP32-audioI2S's FLAC maxFrameSize
+                         limitation, wired in via platformio.ini's extra_scripts --
+                         see the "real options for the two FLAC decode limitations"
+                         section below for the full writeup
 ```
 
 ## Real library scanning (Library::scanFromSd())
@@ -1094,18 +1098,63 @@ ascending:
    reasons to a plain text file on the card (e.g. `/clickpod_failed.txt`),
    so the user can just open that file to get an exact list of what
    needs re-encoding. Low effort, low risk, doesn't touch playback itself.
-3. **Patch `ESP32-audioI2S`'s FLAC frame buffer size.** The
-   `maxFrameSize too large` check is very likely a fixed-size internal
-   buffer in the library's own source (not investigated yet -- would need
-   to actually read `Audio.cpp`'s FLAC decode path on GitHub, not just
-   its public header the way `setAudioPlayPosition` etc. were verified).
-   If it's "just" a compile-time buffer size, bumping it (forking the
-   pinned 3.0.12 tag, pointing `platformio.ini`'s `lib_deps` at the fork)
-   could fix SOME of the maxFrameSize failures for a RAM cost, without
-   needing 24-bit support at all. Wouldn't help the 24-bit-specific
-   failures (that's a separate, harder validation check, not a buffer
-   size). Medium effort, real but bounded risk -- a wrong buffer-size
-   guess is a build/runtime issue to debug, not a device-bricking one.
+3. **DONE (build-time patch, not a fork) -- `ESP32-audioI2S`'s FLAC frame
+   buffer size.** Investigated by actually cloning the real pinned 3.0.12
+   tag and reading `Audio.cpp`'s FLAC decode path directly (not the public
+   header this project usually checks against -- this needed the real
+   implementation). Confirmed: `read_FLAC_Header()` reads the file's real
+   max frame size from its own STREAMINFO block (`m_flacMaxFrameSize`,
+   declared `uint16_t` in `Audio.h` -- can never exceed 65535) and rejects
+   the file if it exceeds the decoder's current input-buffer threshold
+   (`InBuff.getMaxBlockSize()`, bumped from a generic 1600-byte MP3/AAC
+   default to 16384 for FLAC specifically in `initializeDecoder()` -- but
+   16384 still isn't always enough; the user's "TOOL - Schism.flac" needed
+   18989). The library already grows this same buffer for every other
+   codec via `InBuff.changeMaxBlockSize()`, and even has a commented-out
+   call to do exactly this sitting right in `read_FLAC_Header()` --
+   `//        InBuff.changeMaxBlockSize(m_flacMaxFrameSize);` -- just
+   placed AFTER the function's early `return -1`, so original code could
+   never actually reach it. The real backing buffer is PSRAM and hundreds
+   of KB (`inputBufferSize: 638965 bytes` in the user's own serial log) --
+   `m_maxBlockSize` is just a threshold the decode loop checks against,
+   not a hard memory ceiling, so growing it to fit one specific file's
+   real (and type-bounded, so inherently safe) frame size is safe.
+
+   Couldn't fork the library under the user's GitHub account to apply this
+   properly (session's GitHub access is scoped to `ismail3005/clickpod`
+   only; both `mcp__github__fork_repository` and `add_repo` with push
+   access to the external repo were refused -- forking/widening repo
+   access needs the user's own explicit action, not something to grant
+   from inside a coding session). Vendoring the whole ~10K-line library
+   into this repo to change a few lines was also ruled out -- that means
+   hand-maintaining a permanent fork instead of tracking the clean
+   upstream tag.
+
+   Went with a **build-time patch script** instead --
+   `scripts/patch_audioI2S.py`, wired in via `platformio.ini`'s new
+   `extra_scripts = pre:scripts/patch_audioI2S.py`. Runs before every
+   compile: finds the downloaded library's `Audio.cpp` under
+   `$PROJECT_LIBDEPS_DIR`, and if the original (exact-string-matched, not
+   guessed) too-large check is present and unpatched, replaces it with a
+   version that calls `InBuff.changeMaxBlockSize(m_flacMaxFrameSize)` to
+   grow the buffer to fit instead of refusing the file -- only when
+   `m_flacMaxFrameSize` is nonzero and the unpatched fallback (refuse +
+   log, same as before) still applies otherwise. Idempotent (a marker
+   comment makes a second run a safe no-op) and fails safe if the
+   library's source ever doesn't match what's expected (logs a warning,
+   leaves the file untouched, rather than corrupting it blind). The exact
+   find-and-replace was tested against a real clone of the pinned 3.0.12
+   tag in this sandbox (confirmed the original text matches byte-for-byte
+   and the patched result is syntactically valid), but the actual BUILD
+   (does PlatformIO's `extra_scripts` hook fire as expected, does the
+   patched code compile and behave correctly on real hardware) is **NOT
+   verified** -- no `pio run` available here, same standing caveat as
+   everything else in this project done this way. First real build after
+   this is what confirms it.
+
+   Does NOT help the 24-bit-samples limitation -- separate, intentional
+   hard requirement in the same library (`bps != 8 && bps != 16`), not a
+   buffer-size issue this patch touches.
 4. **Patch in real 24-bit support.** The hardest, highest-risk option --
    modifying the decoder's internal PCM handling to accept and downmix/
    truncate 24-bit samples to 16-bit (or pass them through if the I2S
@@ -1123,10 +1172,15 @@ ascending:
    builds, possible new incompatibilities elsewhere) -- biggest lift of
    all these options, only worth it if 1-4 turn out insufficient.
 
-**Recommended order if/when this comes up again**: 1 (or 2 first, to make
-1 easy) is the practical near-term answer; 3 is worth a real look if
-option 1 still leaves too many files broken; 4/5 only if those don't get
-far enough.
+**Status**: option 3 is done (see above) -- pending real-hardware
+confirmation on the next flash. If it works, that should fix every
+maxFrameSize failure without touching a single file. What's left after
+that flash: the 24-bit limitation still needs option 1 (re-encode) if the
+user wants those specific files playable -- option 3 doesn't touch it.
+Option 2 (failed-files log on the SD card) is still worth doing
+regardless, to make finding which files are 24-bit easy. 4/5 stay
+lowest-priority, only relevant if 24-bit support itself is ever wanted
+without re-encoding.
 
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
