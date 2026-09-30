@@ -34,7 +34,16 @@ bool tjpgCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap
 
 void begin(TFT_eSPI &tft) {
     tftPtr = &tft;
-    artBuf = (uint16_t *)malloc((size_t)kSize * kSize * sizeof(uint16_t));
+    // ps_malloc(), not malloc() -- this buffer (~17KB: kSize*kSize*2 bytes)
+    // sat in scarce internal RAM for the whole session for no reason. It's
+    // pure pixel data (TJpg_Decoder's callback writes into it, TFT_eSPI's
+    // plain pushImage() just reads it back over SPI -- no DMA requirement
+    // on the source buffer itself), so PSRAM is exactly where this
+    // belongs. ps_malloc() is a real Arduino-ESP32 core function (PSRAM-
+    // backed malloc, falls back to regular RAM if PSRAM isn't available)
+    // -- reclaims real internal-heap headroom for WiFi/BT (see RadioLock.h)
+    // at zero cost, since nothing about this buffer needs to be internal.
+    artBuf = (uint16_t *)ps_malloc((size_t)kSize * kSize * sizeof(uint16_t));
     TJpgDec.setSwapBytes(true);
     TJpgDec.setCallback(tjpgCallback);
 }

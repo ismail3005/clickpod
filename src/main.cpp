@@ -141,6 +141,33 @@ void setup() {
     Persist::load();
 
     verifyPsram();
+
+    // User's explicit call: don't leave the 4MB of PSRAM this board has
+    // sitting unused while internal RAM stays the scarce, crash-prone
+    // resource (see CLAUDE.md's whole radio-heap-guard saga). Three of
+    // this round's fixes explicitly move specific large/transient
+    // buffers to PSRAM via ps_malloc() (AlbumArt's cached art buffer,
+    // FlacMeta's embedded-picture read buffer) -- this is the broader
+    // systemic complement: any plain malloc()/new allocation of 4KB or
+    // more (a std::vector<Track> growing for a big opened playlist, a
+    // large lyrics text buffer, anything else not explicitly handled)
+    // now prefers PSRAM automatically instead of needing every call site
+    // hunted down by hand. heap_caps_malloc_extmem_enable() is a real,
+    // long-standing Arduino-ESP32 core function built for exactly this.
+    // Safe for WiFi/BT/I2S's own DMA-capable buffers specifically because
+    // this threshold only affects plain, capability-unspecified malloc()/
+    // new calls -- code that explicitly requests MALLOC_CAP_DMA/INTERNAL
+    // (which any well-behaved driver needing DMA-safe memory does) is
+    // unaffected and still gets internal RAM regardless of this setting.
+    // Residual honest caveat: that's the documented contract of the
+    // capability-tag system, not something independently verified against
+    // ESP32-A2DP/ESP32-audioI2S's internal allocation calls in this
+    // sandbox -- if audio or Bluetooth output gets audibly glitchy/
+    // corrupted after this (as opposed to just failing to start, which
+    // the existing heap guards already handle safely), that's the first
+    // thing to suspect and this call is the one to revert.
+    heap_caps_malloc_extmem_enable(4096);
+
     initDisplay();
     AnoInput::begin();
 

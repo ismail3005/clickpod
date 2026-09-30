@@ -12,6 +12,7 @@
 #include "AlbumArt.h"
 #include "Library.h"
 #include "Screens.h"
+#include "UI.h"
 #include "Util.h"
 
 namespace MenuEngine {
@@ -21,31 +22,99 @@ Track trackObj(const NowPlaying &n) {
     return Track{n.artist, n.album, n.title, n.durSec, n.art, n.path};
 }
 
+// Strips a leading LRC-style "[mm:ss]"/"[mm:ss.xx]"/"[hh:mm:ss.xx]"
+// timestamp tag off the front of `line` (in place), if there is one --
+// some taggers/rippers store LYRICS/UNSYNCEDLYRICS tags in LRC format
+// even though the field name says "unsynced," which was showing up
+// on-screen as a literal "[00:08]" stuck in front of every line (user
+// report: "in front of the lyrics is the timestamp"). Handles more than
+// one leading tag on the same line too (LRC allows several timestamps
+// sharing one lyric). A leading bracket with no colon inside (e.g. a
+// genuine "[Chorus]"/"[instrumental intro]" section marker) is left
+// alone -- only things that actually parse as a clock get stripped.
+// Returns true (via outSec) if at least one real timestamp was found and
+// parsed, so the caller can tell "genuinely unsynced" apart from "really
+// has per-line timing" and use the real numbers instead of guessing.
+bool stripLeadingTimestamp(String &line, uint16_t &outSec) {
+    bool found = false;
+    while (line.startsWith("[")) {
+        int close = line.indexOf(']');
+        if (close < 0) break;
+        String tag = line.substring(1, close);
+        int firstColon = tag.indexOf(':');
+        if (firstColon < 0) break; // not a timestamp -- leave this (and any further) bracket alone
+        int secondColon = tag.indexOf(':', firstColon + 1);
+        int mm, ss;
+        if (secondColon < 0) {
+            mm = tag.substring(0, firstColon).toInt();
+            ss = tag.substring(firstColon + 1).toInt(); // toInt() stops at the '.' -- fractional seconds ignored, fine at our 1s resolution
+        } else {
+            // hh:mm:ss(.xx) -- fold hh into minutes
+            int hh = tag.substring(0, firstColon).toInt();
+            mm = hh * 60 + tag.substring(firstColon + 1, secondColon).toInt();
+            ss = tag.substring(secondColon + 1).toInt();
+        }
+        if (!found) {
+            outSec = (uint16_t)(mm * 60 + ss);
+            found = true;
+        }
+        line = line.substring(close + 1);
+    }
+    line.trim();
+    return found;
+}
+
 // Splits a lyrics blob (as stored in a LYRICS/UNSYNCEDLYRICS Vorbis
-// comment -- plain text, NOT time-synced, hence "unsynced") into lines
-// for the Lyrics screen. There's no real per-line timing data in the tag,
-// so lines are spread evenly across the track's real duration (line i at
-// i/(n-1) of durSec) -- an approximation, not real sync, but it means the
-// highlighted line actually advances over the course of the song instead
-// of sitting on the last line the whole time (every line tied at atSec=0
-// before this). Real per-line timestamps would need a synced lyrics
-// format (e.g. LRC), which isn't what FLAC's Vorbis comment tags carry.
+// comment) into lines for the Lyrics screen. If the tag turns out to
+// actually carry real LRC-style per-line timestamps (see
+// stripLeadingTimestamp() above), those real seconds are used directly --
+// genuine sync, not an approximation. Otherwise (plain "unsynced" text,
+// no timestamps at all -- the common case the field name implies) lines
+// are spread evenly across the track's real duration (line i at i/(n-1)
+// of durSec) as a best-effort approximation, so the highlighted line at
+// least advances over the course of the song instead of sitting on the
+// last line the whole time.
 std::vector<LyricLine> splitLyricsIntoLines(const String &text, uint16_t durSec) {
     std::vector<String> raw;
+    std::vector<uint16_t> realSec;
+    std::vector<bool> hasReal;
     int start = 0;
     for (int i = 0; i <= text.length(); i++) {
         if (i == text.length() || text[i] == '\n') {
             String line = text.substring(start, i);
             if (line.endsWith("\r")) line = line.substring(0, line.length() - 1);
-            if (line.length() > 0) raw.push_back(line);
+            uint16_t sec = 0;
+            bool found = stripLeadingTimestamp(line, sec);
+            if (line.length() > 0) {
+                raw.push_back(line);
+                realSec.push_back(sec);
+                hasReal.push_back(found);
+            }
             start = i + 1;
         }
     }
 
+    // Real sync if the clear majority of lines carried a parsed
+    // timestamp -- a handful of untimed lines (e.g. one bare section
+    // marker some taggers leave without a tag) shouldn't disqualify an
+    // otherwise fully-timed file.
+    size_t realCount = 0;
+    for (bool h : hasReal) {
+        if (h) realCount++;
+    }
+    bool mostlyTimed = !raw.empty() && realCount * 4 >= raw.size() * 3; // >=75%
+
     std::vector<LyricLine> lines;
     size_t n = raw.size();
     for (size_t i = 0; i < n; i++) {
-        uint16_t atSec = (n > 1 && durSec > 0) ? (uint16_t)((uint32_t)i * durSec / (n - 1)) : 0;
+        uint16_t atSec;
+        if (mostlyTimed) {
+            // A rare untimed line in an otherwise-timed file just holds
+            // the previous line's timestamp rather than snapping to 0.
+            atSec = hasReal[i] ? realSec[i] : (lines.empty() ? (uint16_t)0 : lines.back().atSec);
+        } else {
+            atSec = (n > 1 && durSec > 0) ? (uint16_t)((uint32_t)i * durSec / (n - 1)) : 0;
+        }
         lines.push_back(LyricLine{atSec, raw[i]});
     }
     return lines;
@@ -58,11 +127,27 @@ void setNowPlaying(Track t) {
     // present, fills in a real duration (durSec stays 0/unknown if this
     // fails, which UI.cpp's playback clock already guards against), and
     // picks up real embedded lyrics if the file has them.
+    //
+    // knownUnsupported: set below if STREAMINFO says this file is 24-bit
+    // -- ESP32-audioI2S 3.0.12's FLAC decoder hard-requires 8 or 16-bit
+    // samples (a real, separate limitation from the maxFrameSize-too-
+    // large one), so a 24-bit file is guaranteed to fail. Detected here
+    // because reading STREAMINFO already opens the file anyway -- no
+    // extra I/O cost -- and skipped further down without even attempting
+    // AudioBridge::playSomething(), rather than burning the time to open/
+    // partially-decode a file already known to fail.
+    bool knownUnsupported = false;
     if (t.path.length() > 0) {
         FlacMeta::StreamInfo si;
         if (FlacMeta::readStreamInfo(t.path, si)) {
             float dur = FlacMeta::durationSec(si);
             if (dur > 0 && dur < 65536) t.durSec = (uint16_t)dur;
+            if (si.bitsPerSample != 0 && si.bitsPerSample != 8 && si.bitsPerSample != 16) {
+                knownUnsupported = true;
+                Serial.printf("[audio] \"%s\" is %u-bit FLAC -- this decoder only supports 8/16-bit, "
+                              "skipping without attempting playback\n",
+                              t.title.c_str(), (unsigned)si.bitsPerSample);
+            }
         }
 
         FlacMeta::Tags tags;
@@ -93,10 +178,19 @@ void setNowPlaying(Track t) {
     // See AppState.h's NowPlaying comment -- UI.cpp's tickPlaybackClock()
     // uses these to notice and skip a track that fails to actually start
     // decoding (some real files can't play at all, e.g. a FLAC frame too
-    // large for the decoder's fixed buffer) instead of silently stalling.
-    state.now.startedAtMs = millis();
+    // large for the decoder's fixed buffer, or -- see knownUnsupported
+    // above -- 24-bit samples) instead of silently stalling.
     state.now.playbackConfirmed = false;
-    AudioBridge::playSomething(t.path);
+    if (knownUnsupported) {
+        // Don't even try -- backdate startedAtMs so UI.cpp's existing
+        // grace-period check (unmodified) treats this as already-expired
+        // on the very next tick, reusing the same non-recursive skip path
+        // as a generic decode failure instead of a special-cased one.
+        state.now.startedAtMs = millis() - UI::kPlaybackStartGraceMs;
+    } else {
+        state.now.startedAtMs = millis();
+        AudioBridge::playSomething(t.path);
+    }
 }
 
 } // namespace

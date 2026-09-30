@@ -100,8 +100,15 @@ bool readStreamInfo(const String &path, StreamInfo &out) {
         // STREAMINFO bit layout (see FLAC spec): after 18 bytes of block-
         // size/frame-size fields, an 8-byte packed field holds
         // sample_rate(20) | channels-1(3) | bits_per_sample-1(5) |
-        // total_samples(36).
+        // total_samples(36), starting at byte 10 (bit 63) through byte 17
+        // (bit 0). sample_rate takes bits 63-44 (data[10],data[11], and
+        // the top nibble of data[12]); channels-1 is the next 3 bits
+        // (data[12]'s bits 3-1); bits_per_sample-1 is the following 5
+        // bits, split across data[12]'s bit 0 and data[13]'s top nibble;
+        // total_samples is the remaining 36 bits.
         out.sampleRate = ((uint32_t)data[10] << 12) | ((uint32_t)data[11] << 4) | (data[12] >> 4);
+        uint8_t bitsPerSampleMinus1 = ((data[12] & 0x01) << 4) | (data[13] >> 4);
+        out.bitsPerSample = bitsPerSampleMinus1 + 1;
         uint64_t totalSamples = ((uint64_t)(data[13] & 0x0F) << 32) | ((uint64_t)data[14] << 24) |
                                  ((uint64_t)data[15] << 16) | ((uint64_t)data[16] << 8) | data[17];
         out.totalSamples = (uint32_t)totalSamples;
@@ -134,7 +141,16 @@ bool readPicture(const String &path, uint8_t *&outData, size_t &outLen, String &
         uint32_t dataLen = readBE32(f);
         if (dataLen == 0 || dataLen > 2 * 1024 * 1024) return false; // sanity cap: 2MB embedded art would be unusual
 
-        uint8_t *buf = (uint8_t *)malloc(dataLen);
+        // ps_malloc(), not malloc() -- embedded cover art is routinely tens
+        // to hundreds of KB (capped at 2MB above), and this buffer only
+        // lives for the brief window between reading it here and
+        // AlbumArt::loadForTrack() decoding + freeing it right after. A
+        // transient spike that size in internal RAM, on top of whatever
+        // else is using it during active playback, is exactly the kind of
+        // thing that's been pushing internal heap dangerously low (see
+        // CLAUDE.md's radio-heap-guard writeups) -- pure JPEG byte data,
+        // no DMA requirement, PSRAM is the right place for it.
+        uint8_t *buf = (uint8_t *)ps_malloc(dataLen);
         if (!buf) return false;
         size_t got = f.read(buf, dataLen);
         if (got != dataLen) { free(buf); return false; }

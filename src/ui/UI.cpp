@@ -12,15 +12,13 @@ namespace {
 
 constexpr uint32_t kBootMs = 1100;   // matches the simulator's boot->MENU timeout
 constexpr uint32_t kClockMs = 500;   // matches the simulator's playback-clock setInterval
-// How long to give a real track to actually start producing audio before
-// treating it as a decode failure and skipping it -- see AppState.h's
-// NowPlaying::playbackConfirmed comment. Not independently measured on
+// kPlaybackStartGraceMs itself now lives in UI.h (public) -- MenuEngine.cpp
+// needs it too, see the comment there. Not independently measured on
 // hardware; sized generously (normal playback should start in well under
 // a second) specifically to avoid a false-positive skip on a legitimately
 // slow-starting file. If a real file that DOES eventually play gets
 // skipped, raise this; if a failed file takes noticeably longer than this
 // to get skipped, it can come down.
-constexpr uint32_t kPlaybackStartGraceMs = 3000;
 
 uint32_t bootAt = 0;
 uint32_t lastClockMs = 0;
@@ -68,6 +66,23 @@ void tickPlaybackClock() {
     // would auto-skip to the next track within the first tick of starting.
     if (state.now.durSec > 0 && state.now.posSec >= state.now.durSec) {
         MenuEngine::playNextInQueue(); // sets state.dirty itself -- new track needs a full redraw
+    } else if (state.mode == AppMode::LYRICS) {
+        // "Lyrics don't track" -- the active-line highlight is entirely
+        // position-driven (drawLyrics() picks it from state.now.posSec
+        // each time it draws), but the Lyrics screen was never actually
+        // being redrawn on an ordinary position tick: only progressDirty
+        // got set below, and Screens::render() only acts on progressDirty
+        // for AppMode::NOW_PLAYING, not LYRICS -- so posSec was updating
+        // correctly the whole time, the screen just never repainted to
+        // show it. Uses the heavier `dirty` flag (full redraw) rather
+        // than a lighter partial one like Now Playing's progress bar --
+        // every visible lyric line's Y position shifts together whenever
+        // the active line changes (it's a centered scrolling view), so a
+        // true partial redraw isn't as simple here. Real tradeoff, lower
+        // impact than Now Playing's flicker was (this screen isn't where
+        // most playback time is spent) -- candidate for the same
+        // partial-redraw treatment later if it's noticeable in practice.
+        state.dirty = true;
     } else {
         // Just the position moved -- progressDirty triggers the cheap
         // partial redraw instead of a full-screen flicker every tick.

@@ -24,6 +24,16 @@ namespace FlacMeta {
 struct StreamInfo {
     uint32_t sampleRate = 0;
     uint32_t totalSamples = 0;
+    // 0 = not parsed/unknown. ESP32-audioI2S 3.0.12's FLAC decoder hard-
+    // requires 8 or 16 -- a real file with 24-bit samples (common for
+    // "hi-res" FLAC rips) gets rejected with "bits per sample must be 8
+    // or 16, is 24" and the file just won't play, a separate, distinct
+    // limitation from the maxFrameSize one. Checking this BEFORE even
+    // attempting playback (MenuEngine::setNowPlaying()) lets that case
+    // get skipped with a specific, useful log message instead of waiting
+    // out the generic isRunning()-based failure-detection grace period
+    // and a vaguer message.
+    uint8_t bitsPerSample = 0;
 };
 bool readStreamInfo(const String &path, StreamInfo &out);
 inline float durationSec(const StreamInfo &si) {

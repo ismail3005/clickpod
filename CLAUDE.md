@@ -908,6 +908,143 @@ is known to have lyrics embedded under a different tag name, that name
 can be added to the `key ==` checks in `parseVorbisComment()` -- not
 done blind without knowing what name to add.
 
+## Tenth real hardware bug (found, fixed): second FLAC limitation -- 24-bit samples unsupported, now detected and skipped immediately
+
+The auto-skip fix (ninth bug, above) is working as intended -- user
+confirmed "some of them it works" after a failure, meaning the generic
+isRunning()-based detection correctly caught and skipped a failing file.
+The new file that triggered it exposed a SEPARATE, distinct
+`ESP32-audioI2S` 3.0.12 limitation from the earlier `maxFrameSize too
+large` one: `read_FLAC_Header(): bits per sample must be 8 or 16, is 24`
+-- a hard requirement baked into the library itself (explicit in its own
+error text), not a bug in this codebase. 24-bit FLAC ("hi-res" rips) is
+just not decodable by this pinned library version at all; the only real
+workaround is re-encoding affected files to 16-bit FLAC before copying
+them to the card (a practical, lossless-for-portable-listening step the
+user would do outside this codebase, not something fixable here).
+
+Since STREAMINFO already gets opened/read for every real track anyway
+(`MenuEngine::setNowPlaying()`'s existing duration lookup), this is now
+detected proactively instead of waiting for the generic 3-second grace-
+period failure: `FlacMeta::StreamInfo` gained `bitsPerSample` (parsed
+from the same packed bit-field STREAMINFO already decodes duration from
+-- see the expanded bit-layout comment in `FlacMeta.cpp`). If it's
+anything other than 8 or 16, `setNowPlaying()` skips calling
+`AudioBridge::playSomething()` entirely (no point opening/partially-
+decoding a file already known to fail) and logs a specific, useful
+message naming the real reason instead of the generic "never started
+playing" one. To reuse the already-tested, non-recursive skip mechanism
+in `UI.cpp`'s `tickPlaybackClock()` rather than adding a second,
+parallel skip path, it backdates `NowPlaying::startedAtMs` by exactly
+`UI::kPlaybackStartGraceMs` (moved from `UI.cpp`-local to public in
+`UI.h` so `MenuEngine.cpp` can reference the same constant) -- the very
+next tick sees the grace period already elapsed and skips it through the
+same code path as a generic decode failure, just effectively instantly
+instead of after a 3-second wait.
+
+**If more FLAC limitations of this pinned library version turn up**
+(this makes two: frame size, now bit depth), the same pattern applies --
+check what STREAMINFO/the error message reveals, see if it's cheaply
+detectable up front from data already being read, and skip proactively
+with a specific message rather than relying solely on the generic
+grace-period fallback every time.
+
+## Eleventh real hardware bug (found, fixed): Lyrics screen never actually redrew during playback
+
+User reported "lyrics dont track" even after the approximate-sync fix
+above. Root cause: `state.now.posSec` WAS updating correctly every tick
+(the real-seek-sync fix from earlier), but the Lyrics screen itself was
+never being repainted to show it. `UI.cpp`'s `tickPlaybackClock()` only
+ever set the lighter `state.progressDirty` flag on an ordinary position
+tick, and `Screens::render()` only acts on `progressDirty` for
+`AppMode::NOW_PLAYING` (that's literally what it was built for -- the
+Now Playing progress bar). Sitting on the Lyrics screen, nothing ever
+set `state.dirty`, so `drawLyrics()` only ran on the rare actual mode/
+selection change that happened to also touch `dirty` -- the active-line
+highlight was frozen from the moment you opened Lyrics until you left
+and came back.
+
+Fixed in `tickPlaybackClock()`: when `state.mode == AppMode::LYRICS`,
+use the heavier `state.dirty` (full redraw) instead of `progressDirty`
+on a position tick. Not the same lighter partial-redraw treatment Now
+Playing's progress bar got -- every visible lyric line's Y position
+shifts together whenever the active line changes (it's a centered
+scrolling view, not an independent strip), so a true partial redraw
+isn't as simple here. Real tradeoff (a full-body redraw every ~500ms
+while sitting on this specific screen), flagged rather than silently
+accepted -- lower-impact than Now Playing's flicker was since it's a
+screen people dip into, not sit on for most of playback. Candidate for
+the same partial-redraw treatment later if it's noticeable in practice.
+
+## Lyrics timestamp stripped from on-screen text, real LRC sync used when present
+
+Separately, the user reported a literal timestamp showing up "in front
+of the lyrics" on screen. Cause: some taggers/rippers write LYRICS/
+UNSYNCEDLYRICS Vorbis comments in LRC format (`[00:08]Some line`) even
+though the field name implies plain unsynced text -- `splitLyricsIntoLines()`
+was just splitting on newlines with no awareness of that markup, so it
+rendered verbatim, tag and all.
+
+Fixed with a proper fix, not just a strip: `MenuEngine.cpp` gained
+`stripLeadingTimestamp()`, which parses and removes a leading
+`[mm:ss]`/`[mm:ss.xx]`/`[hh:mm:ss.xx]` tag (handles more than one on the
+same line, which LRC allows) and returns the parsed seconds. A genuine
+bracketed section marker with no colon inside (e.g. `[Chorus]`, or the
+hand-written mock demo lyric's `[instrumental intro]`) is left alone --
+only things that actually parse as a clock get stripped, so this can't
+eat real lyric text that happens to start with a bracket.
+`splitLyricsIntoLines()` now checks whether the clear majority (>=75%,
+tolerating one bare/untagged line) of a file's lines carried a real
+parsed timestamp: if so, it uses those REAL seconds directly instead of
+the even-spread approximation -- genuine per-line sync for any file
+whose tag actually has it, not just the visual fix of removing the
+visible tag text. Falls back to the existing even-spread approximation
+exactly as before for files with genuinely plain, untimed text.
+
+## PSRAM pushed harder -- user's explicit call ("don't hesitate to use the sram... i paid extra for on this wrover")
+
+Three concrete moves, on top of everything the radio-heap-guard work
+above already established about internal RAM being the genuinely scarce
+resource on this board (PSRAM: 4MB, essentially unused before this):
+
+1. **`AlbumArt.cpp`'s cached art buffer** (`artBuf`, ~17KB:
+   `kSize*kSize*sizeof(uint16_t)`, allocated once in `begin()` and held
+   for the entire session) -- `ps_malloc()` instead of `malloc()`. Pure
+   pixel data (TJpg_Decoder's callback writes it, `TFT_eSPI::pushImage()`
+   just reads it back over plain SPI -- no DMA requirement on the source
+   buffer), so there was no reason this was ever in internal RAM.
+2. **`FlacMeta.cpp`'s `readPicture()` read buffer** (the raw embedded
+   JPEG bytes, up to 2MB capped, typically tens-to-hundreds of KB for a
+   real cover image) -- `ps_malloc()` instead of `malloc()`. Transient
+   (freed right after `AlbumArt::loadForTrack()` decodes it), but a
+   transient spike that size in internal RAM, layered on top of whatever
+   else is active during playback, is exactly the kind of thing that's
+   been pushing internal heap dangerously low (user's own log: 6712
+   bytes free during active playback, right when `TimeSync` correctly
+   declined to sync rather than risk the crash the heap guard exists to
+   prevent -- that decline was the guard working as intended, not a bug).
+3. **`main.cpp`'s `setup()`**: `heap_caps_malloc_extmem_enable(4096)`,
+   right after `verifyPsram()`. A real, long-standing Arduino-ESP32 core
+   function -- any plain, capability-unspecified `malloc()`/`new` of 4KB
+   or more now prefers PSRAM automatically, as a systemic complement to
+   hunting down every individual large-allocation call site by hand (a
+   `std::vector<Track>` growing for a big opened playlist/album, a large
+   lyrics text buffer, anything else not explicitly handled above).
+   **Why this is safe for WiFi/BT/I2S's own DMA-capable buffers
+   specifically**: the threshold only affects calls that don't specify a
+   capability. Code that explicitly requests `MALLOC_CAP_DMA`/
+   `MALLOC_CAP_INTERNAL` (which any well-behaved driver needing DMA-safe
+   memory does) bypasses this threshold entirely and still gets internal
+   RAM regardless. **Honest residual caveat**: that's the documented
+   contract of ESP-IDF's capability-tag allocator, not something
+   independently verified against `ESP32-A2DP`/`ESP32-audioI2S`'s actual
+   internal allocation calls in this sandbox (no IDF/library source
+   available here to check). The existing heap guards (`RadioLock.h`)
+   already protect against WiFi/BT failing to START under low memory --
+   if audio or Bluetooth output instead gets audibly glitchy/corrupted
+   (a different symptom, not just a refusal-to-start) after this change,
+   that's the first thing to suspect, and this one call is what to revert.
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time
