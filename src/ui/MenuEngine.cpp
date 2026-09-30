@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "../audio/AudioBridge.h"
+#include "../bt/BluetoothSource.h"
 #include "../state/AppState.h"
 #include "Library.h"
 #include "Util.h"
@@ -241,10 +242,12 @@ void playFromQueueIndex(int idx) {
 
 // Called at render time, not baked into a menu item once -- a plain string
 // sub-label would go stale the moment BT state changes on a different
-// screen, which is exactly the bug the simulator hit first.
+// screen, which is exactly the bug the simulator hit first. state.btOn/
+// btConnectedTo are synced from the real BluetoothSource each loop()
+// iteration (main.cpp's syncBluetoothToUi()), not a mock device list.
 String btStatusLabel() {
     if (!state.btOn) return "Off";
-    return state.btConnectedTo.length() ? "Connected: " + state.btConnectedTo : "On";
+    return state.btConnectedTo.length() ? "Connected: " + state.btConnectedTo : "Connecting...";
 }
 
 void enterBluetooth() {
@@ -256,30 +259,31 @@ void enterBluetooth() {
     if (state.mode != AppMode::BT) {
         state.btReturn = MenuReturn{true, state.mode, state.menuStack};
     }
-    state.btOn = true;
     state.mode = AppMode::BT;
 
-    std::vector<MenuItem> items;
-    for (auto &d : Library::BT_DEVICES) {
-        MenuItem it;
-        it.label = d.name;
-        it.sub = (state.btConnectedTo == d.name) ? "Connected" : (d.paired ? "Paired" : "New");
-        String name = d.name;
-        it.action = [name]() {
-            state.btConnectedTo = name;
-            Serial.printf("[ui] connected to %s\n", name.c_str());
+    // ESP32-A2DP source mode connects to ONE hardcoded target sink by
+    // name (see BluetoothSource.h) -- it doesn't enumerate discoverable
+    // devices to pick from like a phone's Bluetooth settings, so this is
+    // a single real row for that target, not a device picker.
+    std::vector<MenuItem> items(2);
+    items[0].label = BluetoothSource::kTargetDeviceName;
+    items[0].subFn = btStatusLabel;
+    items[0].action = []() {
+        if (!state.btOn) {
+            BluetoothSource::begin(BluetoothSource::kTargetDeviceName);
+            state.btOn = true;
+            Serial.println(F("[ui] Bluetooth on, connecting..."));
             state.dirty = true;
-        };
-        items.push_back(std::move(it));
-    }
-    MenuItem off;
-    off.label = "Turn Bluetooth Off";
-    off.action = []() {
+        }
+    };
+
+    items[1].label = "Turn Bluetooth Off";
+    items[1].action = []() {
+        BluetoothSource::end();
         state.btOn = false;
         state.btConnectedTo = "";
         exitBluetooth();
     };
-    items.push_back(std::move(off));
 
     state.menuStack.clear();
     pushMenu("Bluetooth", std::move(items));

@@ -16,7 +16,6 @@ namespace Library {
 
 extern std::vector<LibraryAlbum> ALBUMS;
 extern std::vector<Playlist> PLAYLISTS;
-extern std::vector<BtDevice> BT_DEVICES;
 
 // keyed on keyFor(track) ("artist|album|title"), same as the simulator
 extern std::map<String, std::vector<LyricLine>> LYRICS;

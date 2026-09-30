@@ -377,7 +377,15 @@ MP3/ID3v2), so flagging explicitly:
    index number, echoing the drag-handle convention from touch-based
    reorderable lists.
 8. **Bluetooth menu** — list of paired/available devices, connect/disconnect,
-   pairing mode trigger
+   pairing mode trigger. **AMENDED (real hardware constraint)**: the
+   `ESP32-A2DP` library's source mode connects to ONE hardcoded target
+   sink by name (see section 7) -- it doesn't enumerate discoverable
+   devices the way a phone's Bluetooth settings does, so there's no real
+   "list of paired/available devices" to show. The screen instead shows a
+   single row for the configured target device with its real connection
+   status (Off / Connecting... / Connected), plus a Turn Bluetooth Off
+   row. Firmware: `src/bt/BluetoothSource.h`'s `kTargetDeviceName`,
+   wired into the UI via `MenuEngine::enterBluetooth()`.
 9. **Settings menu** — general device settings (exact contents TBD/flexible,
    at minimum should include something like Bluetooth management, maybe
    display brightness, sort preferences)

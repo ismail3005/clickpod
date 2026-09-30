@@ -6,6 +6,7 @@
 namespace {
 
 BluetoothA2DPSource a2dpSource;
+bool running = false;
 
 constexpr float kSampleRate = 44100.0f;
 constexpr float kToneHz = 440.0f;
@@ -33,11 +34,22 @@ int32_t provideTestTone(uint8_t *data, int32_t byteCount) {
 } // namespace
 
 void BluetoothSource::begin(const char *targetDeviceName) {
-    Serial.println(F("[bringup] Starting Bluetooth A2DP source..."));
+    Serial.println(F("[bt] Starting Bluetooth A2DP source..."));
     a2dpSource.set_data_callback(provideTestTone);
     a2dpSource.start(targetDeviceName);
-    Serial.printf("[bringup] A2DP source scanning for \"%s\" -- put it in "
+    running = true;
+    Serial.printf("[bt] A2DP source scanning for \"%s\" -- put it in "
                   "pairing/discoverable mode; you should hear a 440Hz tone "
                   "once connected.\n",
                   targetDeviceName);
 }
+
+void BluetoothSource::end() {
+    if (!running) return;
+    a2dpSource.end();
+    running = false;
+    Serial.println(F("[bt] A2DP source stopped"));
+}
+
+bool BluetoothSource::isConnected() { return running && a2dpSource.is_connected(); }
+bool BluetoothSource::isRunning() { return running; }

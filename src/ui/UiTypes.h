@@ -34,11 +34,6 @@ struct Playlist {
     std::vector<Track> tracks; // full track objects, so "Add to Playlist" can push an arbitrary track in
 };
 
-struct BtDevice {
-    String name;
-    bool paired = false;
-};
-
 struct LyricLine {
     uint16_t atSec;
     String text;

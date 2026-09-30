@@ -88,19 +88,26 @@ FLAC metadata parsing exists (spec section 10 is still open) -- the
 mock placeholder set is kept as a fallback for bench-testing with no SD
 card inserted.
 
-**Bluetooth connection status** shown in the UI
-  (`state.btOn`/`state.btConnectedTo` in `src/state/AppState.h`) is a
-  UI-internal placeholder driven by the UI's own mock device list, not a
-  reading from the real A2DP link (`src/bt/BluetoothSource.*`, still an
-  isolated bring-up test path per `kTestWiredPlayback`, not merged into
-  normal playback). Wiring it up is follow-up work.
+**Bluetooth** is also no longer a placeholder. The Bluetooth screen is a
+real on/off toggle wired to `src/bt/BluetoothSource.*`
+(`MenuEngine::enterBluetooth()`), showing the real connection status
+(Off / Connecting... / Connected) synced from the actual A2DP link each
+loop iteration (`main.cpp`'s `syncBluetoothToUi()`). It's a single row
+for one configured target device (`BluetoothSource::kTargetDeviceName`),
+not a multi-device picker -- the underlying `ESP32-A2DP` source library
+connects to one named sink, it doesn't enumerate discoverable devices
+the way a phone's Bluetooth settings does (see spec section 8's
+amendment). Turning it on still only streams a 440Hz test tone, not real
+decoded audio -- routing `ESP32-audioI2S`'s output into the A2DP source
+instead of the I2S DAC is separate, not-yet-done work.
 
-Battery % (`state.battery`) is **no longer** a placeholder -- see step 7
+Battery % (`state.battery`) is also no longer a placeholder -- see step 7
 above, now synced from the real MAX17048 each loop iteration.
 
-This hasn't been build-tested on real hardware yet (only syntax-checked
-against stub headers, no `pio run` available in this environment) --
-expect the usual bring-up shakeout on first flash.
+This has been flashed and run on real hardware through several rounds of
+fixes -- see `CLAUDE.md`'s gotcha list for what's been found/fixed so
+far (a menu-layout bug, a full-screen playback flicker, an O(n^2)
+memory crash opening a large playlist, and boot-time SD scan tuning).
 
 ## Build
 

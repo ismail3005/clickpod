@@ -36,9 +36,12 @@ confirmed by the user, no longer an open item.
 
 The real UI/UX layer (spec section 6) is built, flashed, and has been
 through a few rounds of real-hardware fixes already (see the gotcha list
-below) -- no longer "not yet hardware-tested." Current known gap: real
-library scanning exists (`Library::scanFromSd()`) but Bluetooth
-connection status is still a UI-internal mock, not the real A2DP link.
+below) -- no longer "not yet hardware-tested." Both remaining
+placeholders are gone now: real library scanning
+(`Library::scanFromSd()`) and a real Bluetooth on/off toggle wired to
+the actual A2DP link (see the dedicated section below) -- BT still only
+streams a test tone, not real audio, but the UI no longer shows fake
+data anywhere.
 
 ## How the UI got built: browser simulator first, then ported to firmware
 
@@ -84,9 +87,11 @@ src/main.cpp             entry point; steps 1-7 bring-up + wires up UI::begin()/
 src/config/Pins.h        pin assignments (see gotchas below — reconfirm after any rewire)
 src/state/AppState.h/.cpp  full app state singleton (`extern AppState state;`)
 src/input/AnoInput.*     ANO encoder + button tap/long-press/double-tap/isHeld (step 6)
-src/bt/BluetoothSource.* isolated A2DP source test tone (step 5) — NOT merged into
-                         normal playback; kTestWiredPlayback in main.cpp picks
-                         wired-vs-BT test mode, they're still separate paths
+src/bt/BluetoothSource.* real on/off-toggleable A2DP source (step 5), wired into
+                         the UI's Bluetooth screen (MenuEngine::enterBluetooth())
+                         — still only streams a 440Hz test tone, not real decoded
+                         audio (that needs routing ESP32-audioI2S's output into
+                         the A2DP callback instead of the I2S DAC — not done)
 src/power/Battery.*      MAX17048 fuel gauge polling over I2C (step 7) —
                          Battery::update() throttles to one poll/2s internally;
                          main.cpp's syncBatteryToUi() pushes it into state.battery
@@ -96,7 +101,8 @@ src/audio/AudioBridge.*  bridges UI "play this track" intent to real ESP32-audio
 src/ui/UiTypes.h         shared shapes: Track, Menu, MenuItem (mirrors the simulator's
                          JS object shapes 1:1 — cross-check against simulator source
                          if unsure what a field means)
-src/ui/Library.*         mock Artist/Album/Track/Playlist/BT-device/lyrics data
+src/ui/Library.*         real SD-scanned Artist/Album/Track/Playlist data
+                         (Library::scanFromSd()), mock data kept as a fallback
 src/ui/MenuEngine.*      menu-stack build/navigate (buildMainMenu, enterBluetooth,
                          openTrackMenu, playQueueFrom, ...) — ported function-for-
                          function from the simulator's JS of the same names
@@ -145,11 +151,48 @@ currently on the card has not been tested — large libraries may need a
 lazier approach (load per-album on demand) instead of holding everything
 in RAM at once.
 
-## Known placeholders / intentionally-not-real-yet (flagged with TODO comments at their definitions too)
-- **`state.btOn` / `state.btConnectedTo`**: driven by the UI's own mock
-  `Library::BT_DEVICES` list, not the real `BluetoothSource` A2DP link.
-  Those are still separate/isolated (see `kTestWiredPlayback` above).
-  Merging them is real follow-up work, not yet scoped.
+**Boot time**: a real 425-track playlist scan measured at ~21.7s at
+20MHz SD SPI clock (confirmed clean, no errors), then bumped to 25MHz.
+This is dominated by FAT directory-lookup latency (many small file
+opens), not raw SPI throughput, so clock bumps alone won't cut it
+dramatically. **Deliberately NOT done**: moving the scan onto a
+background FreeRTOS task so the UI is interactive immediately at boot.
+Considered and rejected for now -- TFT_eSPI and SD share the same
+physical SPI bus, and this codebase's existing comments already note
+that's only proven safe for *sequential* access from one task (see
+`initDisplay()`'s comment in `main.cpp`), not true concurrent access
+from two FreeRTOS tasks/cores. Getting that wrong risks trading a
+deterministic ~22s boot delay for an intermittent, much-harder-to-debug
+SPI corruption/hang -- not a trade worth making blind, without the
+ability to test on real hardware directly. If boot speed still isn't
+good enough after confirming 25MHz is reliable, the safer next step is
+probably deferring the scan to first Music/Playlists access instead of
+at boot (still single-threaded, no concurrency risk, just moves *when*
+the same blocking work happens) -- not attempted yet either.
+
+## Real Bluetooth toggle (BluetoothSource + MenuEngine::enterBluetooth())
+
+No longer a placeholder device list. `src/bt/BluetoothSource.h` exposes
+`begin()`/`end()`/`isConnected()`/`isRunning()`; `state.btOn`/
+`btConnectedTo` are synced from the real A2DP state each loop iteration
+(`main.cpp`'s `syncBluetoothToUi()`, mirrors `syncBatteryToUi()`'s
+pattern). The Bluetooth screen (`MenuEngine::enterBluetooth()`) is ONE
+row for `BluetoothSource::kTargetDeviceName` (currently `"ULT WEAR"`)
+with its real status, not a multi-device picker -- `ESP32-A2DP`'s source
+mode connects to one hardcoded target by name, it doesn't enumerate
+discoverable devices (spec section 8 amended to document this). Tapping
+that row calls `BluetoothSource::begin()`; "Turn Bluetooth Off" calls
+`BluetoothSource::end()`. The old `kTestWiredPlayback` compile-time
+branch in `main.cpp` is gone -- wired output (`AudioBridge`) is always
+available now, and BT is purely a runtime UI toggle on top of it.
+
+**Still not real**: BT only streams a 440Hz test tone
+(`BluetoothSource.cpp`'s `provideTestTone()`), not actual decoded audio.
+Making it stream real music means routing `ESP32-audioI2S`'s PCM output
+into the A2DP source's data callback instead of out to the I2S DAC --
+a real dual-output audio pipeline change, not done, not trivial (the two
+libraries currently have no shared hook point for this). Scope it
+properly before attempting -- don't half-wire it.
 
 ## Hardware gotchas worth knowing before touching wiring/pins again
 

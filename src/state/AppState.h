@@ -62,12 +62,10 @@ struct AppState {
     // main.cpp's syncBatteryToUi()) once Battery::begin() succeeds; stays
     // at this default otherwise (gauge not wired/not responding).
     int battery = 82;
-    // TODO: btOn/btConnectedTo are placeholders driven by the UI's own mock
-    // BT_DEVICES list (Library::BT_DEVICES), not the real BluetoothSource
-    // A2DP link -- that's still a separate, isolated bring-up path
-    // (kTestWiredPlayback in main.cpp). Wiring them together is follow-up
-    // work once BT output is merged into normal playback instead of being
-    // its own test mode.
+    // Synced from the real BluetoothSource/A2DP link each loop() iteration
+    // (main.cpp's syncBluetoothToUi()) -- not a mock device list anymore.
+    // BT still only streams a test tone, not real decoded audio -- see
+    // BluetoothSource.h.
     bool btOn = false;
     String btConnectedTo; // empty = not connected
 

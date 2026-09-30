@@ -26,28 +26,19 @@
 // (menus, now playing, lyrics, queue, Bluetooth screen -- docs/SPEC.md
 // section 6) is ported from the browser simulator into src/ui/, src/state/,
 // and src/audio/ -- see UI::begin()/UI::update() below. It navigates a
-// placeholder mock library (src/ui/Library.h) since real FLAC metadata
-// parsing is still an open risk (spec section 10); selecting a track plays
-// real audio via AudioBridge (whatever file it finds first on the card),
-// so DAC output is real even though the on-screen metadata isn't matched
-// to the specific file yet.
+// real SD-scanned library (src/ui/Library.h -- falls back to a small
+// placeholder set if scanning finds nothing); selecting a track plays real
+// audio via AudioBridge.
 //
 // Step 5: per spec section 7, wired (I2S) and Bluetooth are mutually
-// exclusive output paths, manually switched by the user -- never run both
-// at once. kTestWiredPlayback below picks which one this build exercises;
-// SD/display/ANO/UI stay active either way since none of those conflict
-// with the choice of audio output. AudioBridge (the UI's real-playback
-// hook) is only wired up in the wired path -- BT bring-up still runs its
-// own isolated test tone via BluetoothSource, so selecting a track from
-// the UI in that mode won't produce sound, only navigate.
-constexpr bool kTestWiredPlayback = true;
-// In A2DP SOURCE mode this is the name of the target SINK device to scan
-// for and auto-connect to (e.g. your headphones/speaker) -- NOT the
-// ESP32's own advertised name. Source actively seeks out a known sink by
-// name, the reverse of how a peripheral you'd pair to from a phone's
-// Bluetooth settings works. Put your headphones/speaker's exact BT name
-// here and make sure they're in pairing/discoverable mode when this runs.
-constexpr const char *kBtDeviceName = "ULT WEAR";
+// exclusive OUTPUTS, but both can be "on" at the UI level now -- wired
+// playback (AudioBridge) is always available, and Bluetooth is a real
+// on/off toggle the user drives from the Bluetooth screen
+// (MenuEngine::enterBluetooth()/exitBluetooth() call BluetoothSource::
+// begin()/end() directly), not a boot-time branch anymore. BT still only
+// streams a 440Hz test tone (see BluetoothSource.h) -- routing real
+// decoded audio into the A2DP source instead of out to the I2S DAC is
+// separate, not-yet-done work.
 //
 // TFT_eSPI's pin/driver config lives in platformio.ini's build_flags (not
 // the library's User_Setup.h, which would get clobbered on reinstall).
@@ -73,11 +64,19 @@ static bool initSd() {
     // fine for the original bring-up test (play one file) but painfully
     // slow and tight once Library::scanFromSd() is walking hundreds of
     // files with up to ~5 directories open at once (a playlist-folder
-    // scan nests SD root -> playlist -> artist -> album -> file). 20MHz
-    // is a safe step up from 4MHz for typical breadboard/jumper SD
-    // wiring (this board's TFT already runs its SPI bus at 40MHz, but
-    // that's a much shorter/cleaner trace); raise further if reliable.
-    if (!SD.begin(PIN_SD_CS, SPI, 20000000, "/sd", 10)) {
+    // scan nests SD root -> playlist -> artist -> album -> file). Bumped
+    // from 4MHz first to 20MHz, now to 25MHz -- confirmed reliable at
+    // 20MHz on this board's wiring (a 425-track scan completed clean, no
+    // corruption/retry errors in the serial log), so pushing a bit
+    // further. A real library scan is dominated by FAT directory-lookup
+    // latency (many small file opens) more than raw SPI throughput, so
+    // this alone won't cut scan time dramatically -- if boot speed still
+    // isn't good enough, the bigger win is scanning off the blocking
+    // boot path entirely, which needs care around the fact that TFT_eSPI
+    // and SD share this physical SPI bus (see CLAUDE.md for why that
+    // hasn't been done yet). Drop back to 20MHz if this causes SD
+    // errors.
+    if (!SD.begin(PIN_SD_CS, SPI, 25000000, "/sd", 10)) {
         Serial.println(F("[bringup] FAIL: SD.begin() failed. Check wiring/CS pin and "
                           "that the card is FAT32-formatted."));
         return false;
@@ -142,11 +141,7 @@ void setup() {
     // a single subsystem" approach as SD/BT above.
     Battery::begin();
 
-    if (kTestWiredPlayback) {
-        if (sdOk) AudioBridge::begin(audio);
-    } else {
-        BluetoothSource::begin(kBtDeviceName); // UI still runs for navigation; no AudioBridge wiring in this mode
-    }
+    if (sdOk) AudioBridge::begin(audio); // wired output; Bluetooth is a separate on/off toggle driven from the UI
 }
 
 // Pushes the fuel gauge's latest reading into the UI's state, only marking
@@ -162,11 +157,28 @@ static void syncBatteryToUi() {
     }
 }
 
+// Same reasoning as syncBatteryToUi(): the actual A2DP connection can
+// change asynchronously (connecting takes a moment after begin(), and can
+// drop), so this polls the real BluetoothSource state each loop()
+// iteration and only marks the UI dirty when something actually changed,
+// rather than the UI ever touching BluetoothSource directly.
+static void syncBluetoothToUi() {
+    bool running = BluetoothSource::isRunning();
+    bool connected = running && BluetoothSource::isConnected();
+    String connectedTo = connected ? String(BluetoothSource::kTargetDeviceName) : String("");
+    if (running != state.btOn || connectedTo != state.btConnectedTo) {
+        state.btOn = running;
+        state.btConnectedTo = connectedTo;
+        state.dirty = true;
+    }
+}
+
 void loop() {
-    if (kTestWiredPlayback) audio.loop(); // pumps I2S streaming; must run every iteration
+    audio.loop(); // pumps I2S streaming; must run every iteration
     AnoInput::update();
     Battery::update();
     syncBatteryToUi();
+    syncBluetoothToUi();
     UI::update();
 }
 

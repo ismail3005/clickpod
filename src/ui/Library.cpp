@@ -145,12 +145,6 @@ std::vector<Playlist> PLAYLISTS = {
     {"Rainy Afternoon", {trackAt(0, 2), trackAt(2, 3), trackAt(3, 1)}},
 };
 
-std::vector<BtDevice> BT_DEVICES = {
-    {"Kitchen Speaker", true},
-    {"Workshop Buds", true},
-    {"Unknown Receiver", false},
-};
-
 std::map<String, std::vector<LyricLine>> LYRICS = {
     {"Coral Static|Nightbus Radio|Nightbus Radio", {
         {0, "[instrumental intro]"},
