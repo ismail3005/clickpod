@@ -32,11 +32,12 @@ int32_t provideTestTone(uint8_t *data, int32_t byteCount) {
 
 } // namespace
 
-void BluetoothSource::begin(const char *deviceName) {
+void BluetoothSource::begin(const char *targetDeviceName) {
     Serial.println(F("[bringup] Starting Bluetooth A2DP source..."));
     a2dpSource.set_data_callback(provideTestTone);
-    a2dpSource.start(deviceName);
-    Serial.printf("[bringup] A2DP source started as \"%s\" -- pair a BT "
-                  "speaker/headphones to it; you should hear a 440Hz tone.\n",
-                  deviceName);
+    a2dpSource.start(targetDeviceName);
+    Serial.printf("[bringup] A2DP source scanning for \"%s\" -- put it in "
+                  "pairing/discoverable mode; you should hear a 440Hz tone "
+                  "once connected.\n",
+                  targetDeviceName);
 }

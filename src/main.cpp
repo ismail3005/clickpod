@@ -30,7 +30,13 @@
 // one this bring-up pass exercises; SD/display/ANO stay active either way
 // since none of those conflict with the choice of audio output.
 constexpr bool kTestWiredPlayback = false;
-constexpr const char *kBtDeviceName = "clickpod";
+// In A2DP SOURCE mode this is the name of the target SINK device to scan
+// for and auto-connect to (e.g. your headphones/speaker) -- NOT the
+// ESP32's own advertised name. Source actively seeks out a known sink by
+// name, the reverse of how a peripheral you'd pair to from a phone's
+// Bluetooth settings works. Put your headphones/speaker's exact BT name
+// here and make sure they're in pairing/discoverable mode when this runs.
+constexpr const char *kBtDeviceName = "ULT WEAR";
 //
 // TFT_eSPI's pin/driver config lives in platformio.ini's build_flags (not
 // the library's User_Setup.h, which would get clobbered on reinstall).
