@@ -428,7 +428,11 @@ void buildSettings() {
     items[1].sub = String(state.brightness) + "%";
     items[1].isSlider = true;
     items[1].getInt = []() { return state.brightness; };
-    items[1].setInt = [](int v) { state.brightness = constrain(v, 10, 100); Persist::save(); };
+    items[1].setInt = [](int v) {
+        state.brightness = constrain(v, 10, 100);
+        Persist::save();
+        Screens::applyBrightness(state.brightness); // real-hardware test, see Screens.h
+    };
 
     items[2].label = "Sort tracks by";
     items[2].icon = "sort";

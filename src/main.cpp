@@ -15,6 +15,7 @@
 #include "state/AppState.h"
 #include "state/Persist.h"
 #include "ui/Library.h"
+#include "ui/Screens.h"
 #include "ui/UI.h"
 
 // Bring-up sequence (docs/SPEC.md section 4):
@@ -178,6 +179,7 @@ void setup() {
     // visual proof-of-life on screen right away instead of a black screen
     // for however long the scan takes.
     UI::begin(tft);
+    Screens::applyBrightness(state.brightness); // real-hardware test, see Screens.h
 
     if (sdOk) {
         // Visual proof that this might take a moment -- easy to mistake
