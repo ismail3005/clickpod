@@ -76,6 +76,17 @@ void playSomething(const String &path) {
     }
     lastPlaySomethingMs = now;
 
+    // Same reasoning as seekTo() -- switching tracks while the decoder is
+    // still actively running the PREVIOUS stream is the same "touching the
+    // decoder while it's live" hazard (reported by the user as LEFT/"go
+    // back a song" glitching while playing, same as scrubbing). Pause
+    // first if it's actually running; no explicit resume needed here --
+    // confirmed from the real library source (Audio::connecttoFS(), via
+    // initializeDecoder()) that a successful connect unconditionally sets
+    // the decoder back to running regardless of prior pause state, so the
+    // new stream starts playing on its own.
+    if (audioPtr->isRunning()) audioPtr->pauseResume();
+
     if (path.length() > 0) {
         Serial.printf("[audio] playing: %s\n", path.c_str());
         audioPtr->connecttoFS(SD, path.c_str());
@@ -113,7 +124,23 @@ void setVolumePercent(int pct) {
 
 bool seekTo(uint16_t sec) {
     if (!audioPtr || !playing) return false;
-    return audioPtr->setAudioPlayPosition(sec);
+    // Seeking while the decoder is actively running glitches on this
+    // library/hardware combo -- user-confirmed: the exact same scrub
+    // gesture is clean while paused, glitchy while playing. The proven-
+    // working sequence is "pause, scrub, unpause" done by hand; this
+    // reproduces that automatically around every real seek instead of
+    // relying on the user to pause first. state.now.playing (the UI's own
+    // logical flag) is never touched here -- this is a brief, invisible
+    // internal pause bracketing the relocation, not a visible pause.
+    // audioPtr->pauseResume() is a toggle (no separate pause()/resume()
+    // in this library), so only bracket it when actually running --
+    // toggling twice while already paused would incorrectly leave it
+    // playing afterward.
+    bool wasRunning = audioPtr->isRunning();
+    if (wasRunning) audioPtr->pauseResume(); // pause
+    bool ok = audioPtr->setAudioPlayPosition(sec);
+    if (wasRunning) audioPtr->pauseResume(); // resume
+    return ok;
 }
 
 uint32_t currentTimeSec() {

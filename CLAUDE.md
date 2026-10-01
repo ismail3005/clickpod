@@ -1544,6 +1544,55 @@ look at what's different about the live-playback case specifically (the
 decoder is actively mid-decode when the seek lands, vs. idle when paused)
 once the two fixes above are confirmed on hardware.
 
+## Seventeenth real hardware bug (found, fixed): seeking/switching tracks while actively playing glitches -- fixed by bracketing with an invisible pause/resume
+
+User confirmed the fourteenth bug's debounce genuinely fixed scrubbing
+WHILE PAUSED (pause, scrub through the whole track, unpause -- "goes
+through the whole thing" cleanly). But the identical scrub gesture is
+still glitchy while the track is actively playing, and separately, LEFT
+("go back a song," which does a full `setNowPlaying()`/`playSomething()`
+track switch, not a seek) is "kinda glitchy if its still playing, same as
+the scrubbing actually." That pairing is the real signal: the common
+factor isn't scrub-specific at all, it's touching the decoder (a seek OR
+a fresh `connecttoFS()`) while it's actively mid-decode of something else,
+as opposed to idle/paused.
+
+User's own suggestion, which is exactly right and is what real music
+players do: during a scrub gesture, only the ON-SCREEN position should
+move; the real backend relocation should fire exactly once, only once the
+user is actually done moving -- "one request, one movement, less
+fuckups." The debounce-then-commit design from the fourteenth bug already
+does this part (one real seek per scrub session, not per tick) -- so the
+remaining gap wasn't commit frequency, it was that even that ONE commit
+glitches if it lands while the decoder is live.
+
+**Fixed** (`src/audio/AudioBridge.cpp`): both `seekTo()` and
+`playSomething()` now bracket the real decoder-touching call with an
+invisible internal pause/resume whenever `audioPtr->isRunning()` is true
+at that moment -- i.e. every real seek or track switch now automatically
+reproduces the user's own proven-working "pause, [relocate], unpause"
+sequence, instead of relying on the user to pause by hand first.
+`state.now.playing` (the UI's own logical flag) is never touched by this
+-- purely an internal bracket around the library call, invisible on
+screen. For `seekTo()`, both the pause and the resume toggle are needed
+(same stream continues). For `playSomething()`, only the pre-pause is
+needed -- confirmed by reading the real library source
+(`Audio::connecttoFS()`, via `initializeDecoder()`) that a successful
+connect unconditionally sets the decoder back to running regardless of
+whatever pause state it was in before, so the new stream starts playing
+on its own; an explicit post-resume there would be at best redundant and
+at worst fight the new stream's own state.
+
+`AudioBridge::pauseResume()` (and the real `Audio::pauseResume()` it
+wraps) is a toggle, not separate pause()/resume() calls -- both brackets
+guard with `audioPtr->isRunning()` first so this never fires on an
+already-paused stream (which would incorrectly start it playing).
+
+**Not yet hardware-confirmed** -- same caveat as the two previous
+sessions' fork changes, no PlatformIO in this sandbox. Next real step:
+flash, then specifically try scrubbing DURING active playback (not just
+paused) and LEFT-while-playing, the two cases reported glitchy here.
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time
