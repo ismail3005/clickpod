@@ -386,6 +386,25 @@ MP3/ID3v2), so flagging explicitly:
    status (Off / Connecting... / Connected), plus a Turn Bluetooth Off
    row. Firmware: `src/bt/BluetoothSource.h`'s `kTargetDeviceName`,
    wired into the UI via `MenuEngine::enterBluetooth()`.
+   **AMENDED AGAIN (correction, not a new decision)**: the "doesn't
+   enumerate discoverable devices" premise above was wrong -- actually
+   cloned and read the real `ESP32-A2DP` source
+   (`BluetoothA2DPSource.h`) and confirmed it genuinely supports
+   discovery: `start()` with no name begins scanning,
+   `set_ssid_callback()` fires per discovered device,
+   `is_discovery_active()`/`cancel_discovery()` control the scan. The
+   capability was there all along in the dependency already in
+   `lib_deps`; this was never actually verified against the real source
+   when the original amendment above was written. A real device-picker
+   screen (back to the original, un-amended intent of this section --
+   "list of paired/available devices") is planned, not yet built -- see
+   CLAUDE.md's "Real Bluetooth toggle" section for the implementation
+   notes (callback runs on the BT stack's own context, needs the same
+   stash-for-main-loop pattern as the encoder ISR; worth remembering the
+   last-picked device for auto-reconnect on power-on, generalizing the
+   current hardcoded-target auto-resume). Until that's built, the
+   single-row behavior described above is still what's actually
+   flashed.
 9. **Settings menu** — general device settings (exact contents TBD/flexible,
    at minimum should include something like Bluetooth management, maybe
    display brightness, sort preferences)

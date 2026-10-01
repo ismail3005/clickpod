@@ -194,23 +194,56 @@ No longer a placeholder device list. `src/bt/BluetoothSource.h` exposes
 `begin()`/`end()`/`isConnected()`/`isRunning()`; `state.btOn`/
 `btConnectedTo` are synced from the real A2DP state each loop iteration
 (`main.cpp`'s `syncBluetoothToUi()`, mirrors `syncBatteryToUi()`'s
-pattern). The Bluetooth screen (`MenuEngine::enterBluetooth()`) is ONE
-row for `BluetoothSource::kTargetDeviceName` (currently `"ULT WEAR"`)
-with its real status, not a multi-device picker -- `ESP32-A2DP`'s source
-mode connects to one hardcoded target by name, it doesn't enumerate
-discoverable devices (spec section 8 amended to document this). Tapping
-that row calls `BluetoothSource::begin()`; "Turn Bluetooth Off" calls
+pattern). The Bluetooth screen (`MenuEngine::enterBluetooth()`) is
+currently ONE row for `BluetoothSource::kTargetDeviceName` (currently
+`"ULT WEAR"`) with its real status, not a device picker. Tapping that
+row calls `BluetoothSource::begin()`; "Turn Bluetooth Off" calls
 `BluetoothSource::end()`. The old `kTestWiredPlayback` compile-time
 branch in `main.cpp` is gone -- wired output (`AudioBridge`) is always
 available now, and BT is purely a runtime UI toggle on top of it.
 
-**Still not real**: BT only streams a 440Hz test tone
-(`BluetoothSource.cpp`'s `provideTestTone()`), not actual decoded audio.
-Making it stream real music means routing `ESP32-audioI2S`'s PCM output
-into the A2DP source's data callback instead of out to the I2S DAC --
-a real dual-output audio pipeline change, not done, not trivial (the two
-libraries currently have no shared hook point for this). Scope it
-properly before attempting -- don't half-wire it.
+**CORRECTED (this line was wrong)**: this section previously said
+`ESP32-A2DP`'s source mode "doesn't enumerate discoverable devices" --
+that's false, or at least outdated. Actually cloned and read the real
+library source (`BluetoothA2DPSource.h`, `pschatzmann/ESP32-A2DP`) to
+check, since the user wants a real device picker next: it genuinely
+supports discovery -- `start()` with no name begins scanning instead of
+connecting to a fixed target, `set_ssid_callback(bool(*)(const char*
+ssid, esp_bd_addr_t address, int rssi))` fires once per discovered
+device (return value presumably selects it and stops the scan -- not
+yet traced into the .cpp to confirm the exact semantics), plus
+`is_discovery_active()`/`cancel_discovery()` for scan state. This is
+capability already present in the dependency already in `lib_deps`, not
+a library swap. **Not yet built**: the picker UI itself (a device-list
+screen, same row pattern as Music/Playlists), and the plumbing to get
+scan results from the callback (which runs on the BT stack's own
+context, not the main loop -- can't touch UI state directly from it,
+needs the same stash-for-the-main-loop-to-drain pattern `AnoInput`'s
+encoder ISR already uses) into something `MenuEngine` can render and let
+the user select from. Also worth deciding: remember the last-picked
+device and auto-reconnect on power-on, generalizing the existing
+hardcoded-target auto-resume (`main.cpp`'s `BluetoothSource::begin(
+BluetoothSource::kTargetDeviceName)` at boot) -- classic A2DP has no
+persistent OS-level bonding the way phones do, so this is the closest
+practical equivalent to "stays paired." **One more thing worth noting**:
+`platformio.ini`'s `lib_deps` entry for this library
+(`https://github.com/pschatzmann/ESP32-A2DP.git`) has no tag/branch
+pinned, unlike `ESP32-audioI2S`'s explicit `#3.0.12` -- it floats on
+whatever the default branch's HEAD is at whatever moment `pio run` last
+re-resolved it, which is worth pinning to a specific tag/commit once the
+picker work starts, so a future rebuild can't silently pick up an
+unrelated upstream change.
+
+**Still not real audio either way**: whichever device gets connected
+(hardcoded today, picked from a list once this is built), BT only
+streams a 440Hz test tone (`BluetoothSource.cpp`'s `provideTestTone()`),
+not actual decoded audio -- a SEPARATE, still entirely untouched gap
+from the device-picker work above. Making it stream real music means
+routing `ESP32-audioI2S`'s PCM output into the A2DP source's data
+callback instead of out to the I2S DAC -- a real dual-output audio
+pipeline change, not done, not trivial (the two libraries currently have
+no shared hook point for this). Scope it properly before attempting --
+don't half-wire it.
 
 ## Hardware gotchas worth knowing before touching wiring/pins again
 
@@ -235,6 +268,32 @@ properly before attempting -- don't half-wire it.
   battery ports, solder-to-pad bridge to TP4056 B+/B-, B+/B- is
   bidirectional (not charge-only) — see spec section 3.1 for the full
   writeup once you're back on this.
+- **The ILI9341 display module's backlight (BL) pin is currently wired
+  directly to the 3.3V rail** -- confirmed by the user, not previously
+  written down anywhere in this repo (came up mid-session, got lost when
+  that context aged out -- re-confirm facts like this get written here
+  the moment they're mentioned, don't rely on remembering a verbal
+  mention across a long session). This means the backlight is always
+  full brightness with no software control -- `state.brightness`
+  (Settings slider, persisted via `Persist.*`) is purely a stored number
+  right now, not wired to any real dimming; no backlight PWM pin exists
+  in `Pins.h` at all. Relevant for the planned "sleep/AOD" feature (long-
+  press CENTER -> keep playing + dim + show clock + ignore input) --
+  real brightness control needs rewiring BL off 3.3V to a GPIO first.
+  **Pin budget is tight before attempting this**: every clean GPIO is
+  already allocated (see the full pin table in `Pins.h`); the only
+  genuinely free pins (GPIO36/37/38) are input-only and can't drive a
+  PWM output. Real options: GPIO0 (free, but the boot-mode strapping pin
+  -- commonly used for a status LED/PWM output on other ESP32 projects
+  after boot, but needs confirming the backlight circuit doesn't present
+  enough load to interfere with the boot-mode read during reset before
+  trusting it), or freeing up a currently-used pin (bigger ripple
+  effect). Also unconfirmed: whether this board's BL pin is the raw LED
+  line (would need a transistor/MOSFET as a low-side switch, since
+  ESP32 GPIOs aren't rated to source a typical backlight LED's full
+  current directly) or already buffered on the breakout board (could
+  maybe drive straight from a GPIO) -- user needs to check the physical
+  board before wiring this.
 
 ## Build/flash reminder
 
