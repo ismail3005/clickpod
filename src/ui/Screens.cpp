@@ -4,6 +4,7 @@
 #include "Library.h"
 #include "MenuEngine.h"
 #include "Util.h"
+#include "../config/Pins.h"
 #include "../net/TimeSync.h"
 #include "../state/AppState.h"
 
@@ -452,28 +453,37 @@ void drawQueue() {
 
 void begin(TFT_eSPI &tft) { tftPtr = &tft; }
 
-// ILI9341 commands, verified against the real datasheet's command table
-// (0x51 WRDISBV, 0x53 WRCTRLD) -- the exact WRCTRLD bit layout (BCTRL/DD/BL)
-// couldn't be independently re-confirmed this round (network-blocked from
-// the datasheet PDF in this sandbox), so 0x2C (BCTRL+DD+BL all on, the
-// commonly-documented "just turn brightness control on" value) is used
-// from general knowledge of this very common controller, not guessed
-// blind -- flagging the difference in confidence honestly, same as this
-// project's usual practice. writecommand()/writedata() themselves ARE
-// independently verified public TFT_eSPI methods (WebFetch against the
-// real header this round). Entirely safe to try: these are brightness-
-// specific registers, separate from pixel-data commands, so if this
-// module's backlight bypasses the controller (external transistor off
-// the BL pin instead), this is a silent no-op -- can't corrupt the
-// display or damage anything either way.
+// ILI9341 commands (0x51 WRDISBV, 0x53 WRCTRLD) -- CONFIRMED on real
+// hardware to be a no-op on this specific Waveshare module: its backlight
+// bypasses the controller's internal PWM driver, going straight to an
+// external transistor off the BL pin instead (see CLAUDE.md's backlight-
+// hardware section). Left in anyway, harmless, in case a future board
+// swap ever uses a module that DOES route brightness through the
+// controller -- real dimming now happens via the LEDC PWM write below.
+constexpr uint8_t kBacklightLedcChannel = 0;
+constexpr uint32_t kBacklightPwmFreqHz = 5000;
+constexpr uint8_t kBacklightPwmResolutionBits = 8;
+bool backlightPwmReady = false;
+
 void applyBrightness(int percent) {
-    if (!tftPtr) return;
     percent = constrain(percent, 0, 100);
     uint8_t level = map(percent, 0, 100, 0, 255);
-    tftPtr->writecommand(0x53); // WRCTRLD
-    tftPtr->writedata(0x2C);    // BCTRL + DD + BL on
-    tftPtr->writecommand(0x51); // WRDISBV
-    tftPtr->writedata(level);
+
+    if (tftPtr) {
+        tftPtr->writecommand(0x53); // WRCTRLD
+        tftPtr->writedata(0x2C);    // BCTRL + DD + BL on
+        tftPtr->writecommand(0x51); // WRDISBV
+        tftPtr->writedata(level);
+    }
+
+    // Real backlight control -- PIN_TFT_BL (GPIO0), see Pins.h for the
+    // full writeup on why this pin and why no external pull-up resistor.
+    if (!backlightPwmReady) {
+        ledcSetup(kBacklightLedcChannel, kBacklightPwmFreqHz, kBacklightPwmResolutionBits);
+        ledcAttachPin(PIN_TFT_BL, kBacklightLedcChannel);
+        backlightPwmReady = true;
+    }
+    ledcWrite(kBacklightLedcChannel, level);
 }
 
 // One-off direct draw for a blocking operation with no other visual

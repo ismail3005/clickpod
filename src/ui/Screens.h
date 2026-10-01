@@ -21,14 +21,12 @@ void render(); // draws per state.dirty/progressDirty, then clears whichever fir
 // feedback BEFORE it blocks, not after the fact.
 void showBusyMessage(const String &msg);
 
-// Sends the ILI9341's own WRDISBV/WRCTRLD brightness commands over the
-// existing SPI bus -- no new wiring, this is a real-hardware TEST of
-// whether this specific module's backlight is routed through the
-// controller's internal PWM driver, or bypassed straight to an external
-// transistor off the BL pin (see CLAUDE.md's backlight gotcha). If the
-// physical backlight visibly responds, this is sufficient on its own and
-// no GPIO rewiring is needed at all. If nothing happens, that's
-// conclusive proof of the bypass, not a guess. percent is 0-100, clamped.
+// Sets real backlight brightness via LEDC PWM on PIN_TFT_BL (GPIO0, see
+// Pins.h for the pin-choice writeup). Also still sends the ILI9341's own
+// WRDISBV/WRCTRLD commands over SPI first -- CONFIRMED a no-op on this
+// specific Waveshare module (its backlight bypasses the controller
+// entirely), kept harmlessly in case a future board swap ever uses a
+// module where it isn't. percent is 0-100, clamped.
 void applyBrightness(int percent);
 
 } // namespace Screens

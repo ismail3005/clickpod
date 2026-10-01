@@ -59,4 +59,22 @@
 #define PIN_ANO_BTN_RIGHT  34   // input-only; also RTC-capable (fine if ever needed for wake)
 #define PIN_ANO_BTN_CENTER 39   // input-only, no internal pull — needs external/onboard pull resistor; RTC-capable, valid ext0 deep-sleep wake source
 
+// LCD backlight PWM. GPIO0 is the boot-mode strapping pin (must read HIGH
+// at reset for normal SPI boot) -- used anyway, deliberately, with NO
+// external pull-up resistor: the ESP32 boot ROM enables its own weak
+// INTERNAL pull-up on GPIO0 during the strapping-sample window at reset
+// (this is why stock dev boards' BOOT buttons work with zero external
+// pull-up wired), so this relies on that internal pull-up alone
+// dominating whatever the backlight transistor's own bias presents.
+// Confirmed-safe test: the board booting cleanly into the normal splash
+// screen on first flash with this wired IS the confirmation -- a
+// competing pull-down in that circuit would show up immediately as a
+// download-mode/boot failure, not something subtle. Explicitly NOT a
+// user-facing button moved here instead (was considered, rejected: a
+// button is something the user actively presses during normal handling,
+// which creates a real, repeatable "hold this at the wrong instant ->
+// boot fails" failure mode that a static hardware fact doesn't). See
+// CLAUDE.md's backlight-hardware section for the full writeup.
+#define PIN_TFT_BL     0
+
 // Spare, unused for now: GPIO36 (input-only; candidate for a MAX17048 ALERT line later)
