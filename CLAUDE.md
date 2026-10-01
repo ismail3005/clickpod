@@ -1284,20 +1284,15 @@ last"):
    `lib_deps` points at it (pinned to a specific commit/tag on the fork,
    not its default branch) instead of running `scripts/patch_audioI2S.py`
    at all -- that script gets removed once this lands.
-3. **Real 24-bit FLAC decode support.** Previously flagged as the
-   highest-risk option (#4 in the FLAC-limitations list) and explicitly
-   NOT recommended as a first move -- user wants it attempted anyway,
-   after 1-2 above. This means actually reading `ESP32-audioI2S`'s PCM/
-   sample-handling pipeline (clone the real source the same way the
-   maxFrameSize investigation did, not guessing) to understand what
-   touching 24-bit support really requires -- likely downmixing/
-   truncating 24-bit samples to 16-bit somewhere in the decode path, or
-   extending the I2S output path to pass 24-bit through if PCM5102A/the
-   I2S driver can take it. Real risk of subtle audio corruption/
-   distortion bugs with no way to verify without hardware access --
-   budget real investigation time before touching code, same rigor as
-   the maxFrameSize fix (confirm against real source, don't guess at
-   internals).
+3. ~~Real 24-bit FLAC decode support~~ -- **DECIDED AGAINST, not doing
+   this.** Was briefly on the plan as the (explicitly flagged highest-
+   risk) option #4, but the user reconsidered and is re-encoding their
+   24-bit files to 16-bit instead (option #1 from the original FLAC-
+   limitations list) -- batch-converting locally with `ffmpeg -map 0
+   -c:v copy -sample_fmt s16 -c:a flac` (the `-map 0 -c:v copy` keeps
+   embedded cover art intact, which a bare `-sample_fmt s16` conversion
+   can otherwise drop). Lower-risk, same end result for their actual
+   library. No firmware work needed for this item at all.
 4. **Bluetooth device picker + last-device auto-reconnect.** See the
    corrected "Real Bluetooth toggle" section above -- `ESP32-A2DP`
    genuinely supports discovery (`start()`/`set_ssid_callback()`/etc.),
