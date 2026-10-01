@@ -1404,34 +1404,78 @@ last"):
    "dim text"), confirmed by the user. Not a bug, not hidden brightness
    control -- just how LCD contrast reads to the eye.
 
-   **GPIO decision**: GPIO0, directly, no external pull-up resistor.
-   Originally considered moving a user-facing button (e.g. LEFT) onto
-   GPIO0 to free up its regular GPIO for the backlight instead -- user
-   correctly rejected this as bad practice: a button is something the
-   user actively presses during normal handling (reaching into a bag,
-   fumbling for the power switch -- precisely the scenario AOD mode
-   exists to protect against), so putting ANY user-facing input on a
-   boot-strapping pin creates a real, repeatable "hold this button at
-   the wrong instant -> boot fails" failure mode, unlike a static
-   hardware fact. A pull-up resistor from GPIO0 to 3.3V was also
-   considered (belt-and-suspenders guarantee regardless of the backlight
-   circuit's own idle bias) but the user wants this "as safe as
-   possible, no pullup" -- which is still legitimate, not reckless: the
-   ESP32 boot ROM enables its own weak INTERNAL pull-up on GPIO0 during
-   the strapping-sample window at reset (this is literally why stock dev
-   boards' BOOT buttons work with zero external pull-up wired), so
-   skipping the external resistor relies on that internal pull-up alone
-   dominating whatever the backlight transistor's bias network presents.
-   Real-hardware test plan (not yet run, the actionable next step):
-   wire BL straight to GPIO0, no resistor, flash, and the board booting
-   cleanly into the normal splash screen IS the confirmation -- a
-   competing pull-down in that circuit would show up immediately as a
-   download-mode/boot failure, not something subtle. If that happens,
-   fall back to the pull-up-resistor plan discussed (and rejected for
-   now) above, not to moving a button.
-   `Screens::applyBrightness()` will be converted from the (confirmed
-   no-op) SPI commands to a real LEDC PWM channel on `PIN_TFT_BL` once
-   the pin is wired and boot-tested.
+   **GPIO decision history -- BOTH candidate strapping pins tried and
+   FAILED on real hardware, now PARKED.** Originally considered moving a
+   user-facing button (e.g. LEFT) onto a strapping pin to free up its
+   regular GPIO for the backlight instead -- user correctly rejected this
+   as bad practice: a button is something the user actively presses
+   during normal handling (reaching into a bag, fumbling for the power
+   switch -- precisely the scenario AOD mode exists to protect against),
+   so putting ANY user-facing input on a boot-strapping pin creates a
+   real, repeatable "hold this button at the wrong instant -> boot fails"
+   failure mode a static hardware fact doesn't have.
+
+   **Attempt 1: GPIO0, no external pull-up.** User wanted "as safe as
+   possible, no pullup" -- legitimate, not reckless: the ESP32 boot ROM
+   enables its own weak INTERNAL pull-up on GPIO0 during the strapping-
+   sample window (why stock dev boards' BOOT buttons work with zero
+   external pull-up). Real test: FAILED -- board dropped into download
+   mode. Diagnosed as the backlight transistor's base circuit being
+   actively biased LOW, strong enough to beat the weak internal pull-up.
+
+   **Attempt 2: a real external 10k pull-up added to GPIO0.** If the
+   circuit merely floated, a dedicated 10k pull-up to 3.3V should easily
+   dominate it. Real test: FAILED AGAIN -- still download mode. This
+   means the circuit's LOW bias is strong enough to beat even a real
+   external pull-up, not just the weak internal one -- a meaningfully
+   stronger signal than first assumed. (Side incident during this attempt:
+   a separate scare -- the board got stuck in a repeating ROM-bootloader-
+   banner reset loop after a RST press -- turned out to be a loose
+   breadboard connection from the physical rework, not a strapping issue;
+   recovered by a full power-cycle and reseating jumpers. Worth
+   remembering: breadboard contact flakiness can produce symptoms that
+   look exactly like a strapping problem.)
+
+   **Attempt 3: pivoted to GPIO12 instead, no pull-up.** Reasoning at the
+   time: if the circuit idles LOW (just demonstrated against GPIO0), that
+   should be exactly what GPIO12 (MTDI) wants (LOW at reset), for free.
+   Real test: FAILED differently -- the `pio run -t upload` step itself
+   started hanging, consistent with `VDD_SDIO` reading the wrong strap
+   value and leaving the flash chip's SPI I/O at the wrong voltage for
+   reliable communication (GPIO12 uniquely affects flash I/O during
+   upload too, not just app boot -- a nastier failure mode than GPIO0's).
+
+   **Conclusion: stop guessing at strapping pins for this signal.** Two
+   real failures on two different pins/polarities means this backlight
+   circuit's actual behavior during the ESP32's brief reset-sampling
+   window isn't reliably predictable from reasoning about pull
+   directions, and a steady-state DC read wouldn't necessarily catch a
+   timing/capacitance-related difference either (plus the above reminder
+   that some of this round's symptoms may have been breadboard flakiness,
+   not logic). **Current physical/firmware state: reverted and back in
+   sync** -- BL is back on the 3.3V rail (always full brightness, no
+   software control), `PIN_TFT_BL` is removed from `Pins.h`,
+   `Screens::applyBrightness()` is back to just the (confirmed harmless
+   no-op) SPI commands, and `AnoInput.cpp`'s LEFT pull-up is back to
+   normal (its resistor was briefly borrowed for the GPIO0 pull-up test,
+   now returned).
+
+   **Next real attempt, when picked back up, should NOT be a third
+   strapping pin.** Free up an ordinary, already-used, non-strapping GPIO
+   instead -- candidate: `PIN_TFT_RST` (GPIO4), which only gets toggled
+   once, deliberately, by firmware during `TFT_eSPI::begin()`, well after
+   the ESP32's own boot-strap sampling is over, and is a simple one-shot
+   digital pulse, not something that needs to survive an uncertain
+   passive bias fight at reset the way the backlight apparently does.
+   Move TFT_RST onto GPIO12 instead (lower-stakes there -- affects reset
+   timing, not flash I/O voltage during normal operation) and give the
+   now-vacated GPIO4 to the backlight -- a completely ordinary GPIO with
+   zero boot-strap risk either way. NOT independently verified that the
+   display module's own RST pin doesn't have its own pull resistor that
+   could cause the exact same class of problem on a different signal --
+   do the same disconnect-and-multimeter-check discipline before wiring
+   this blind, don't repeat this round's pattern of guessing and testing
+   live on hardware three times in a row.
 8. **Real Bluetooth audio** (routing `ESP32-audioI2S`'s decoded PCM into
    the A2DP source callback instead of the test tone) -- explicitly
    deprioritized by the user, do this LAST, after everything above.

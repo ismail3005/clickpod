@@ -59,24 +59,24 @@
 #define PIN_ANO_BTN_RIGHT  34   // input-only; also RTC-capable (fine if ever needed for wake)
 #define PIN_ANO_BTN_CENTER 39   // input-only, no internal pull — needs external/onboard pull resistor; RTC-capable, valid ext0 deep-sleep wake source
 
-// LCD backlight PWM. GPIO0 was tried FIRST (real-hardware test, see
-// CLAUDE.md) and REJECTED: even a dedicated external 10k pull-up to 3.3V
-// on GPIO0 couldn't force a clean boot -- the backlight transistor's base
-// circuit is actively biased LOW (a pull-down resistor, strong enough to
-// beat a real 10k pull-up, not just float), which is exactly the
-// evidence that pointed at GPIO12 instead: GPIO12 (MTDI) needs to read
-// LOW at reset (the opposite requirement from GPIO0), so a circuit that
-// idles low is naturally the right match for it, no external resistor
-// needed at all. Note DOWN used to live on GPIO12 and was moved off it
-// specifically for boot-voltage-strap risk (see PIN_ANO_BTN_DOWN above)
-// -- same pin, different signal: a passive backlight bias circuit that
-// idles at the value this pin wants is a much better fit than a
-// user-pressed button ever was here. Risk if this pin ever reads wrong
-// at reset: VDD_SDIO flips to 1.8V, which the real 3.3V flash chip
-// doesn't expect -- a boot failure, recoverable by fixing the wiring and
-// power-cycling, not permanent damage, but a different failure signature
-// than GPIO0's download-mode symptom. See CLAUDE.md's backlight-hardware
-// section for the full writeup of both attempts.
-#define PIN_TFT_BL     12
+// No backlight GPIO right now -- BL is back on the 3.3V rail (always
+// full brightness, no software control), matching physical reality.
+// Both GPIO0 and GPIO12 were tried for real on hardware and both failed
+// (GPIO0: wouldn't boot clean even with an external 10k pull-up forcing
+// it HIGH; GPIO12: upload itself started hanging, consistent with
+// VDD_SDIO reading wrong). Two failures on two different strapping-pin
+// polarities means this backlight circuit's behavior during the ESP32's
+// brief reset-sampling window just isn't reliably known from a DC
+// multimeter read or simple reasoning about pull directions -- possibly
+// a timing/capacitance interaction a steady-state reading wouldn't show,
+// possibly some of it was breadboard-contact flakiness from repeatedly
+// moving jumpers (one earlier false alarm this round WAS a loose
+// connection, not a real strap conflict). Either way: not safe to keep
+// guessing at more strapping pins. See CLAUDE.md's backlight-hardware
+// section for the full writeup. Next real attempt should free up an
+// ordinary, already-used, non-strapping GPIO instead (candidate:
+// PIN_TFT_RST (GPIO4) -- only toggled once, deliberately, by firmware
+// well after boot-strap sampling is over, lower-risk to relocate than
+// the backlight itself), not reach for GPIO0/12 again.
 
 // Spare, unused for now: GPIO36 (input-only; candidate for a MAX17048 ALERT line later)

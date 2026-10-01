@@ -4,7 +4,6 @@
 #include "Library.h"
 #include "MenuEngine.h"
 #include "Util.h"
-#include "../config/Pins.h"
 #include "../net/TimeSync.h"
 #include "../state/AppState.h"
 
@@ -459,12 +458,10 @@ void begin(TFT_eSPI &tft) { tftPtr = &tft; }
 // external transistor off the BL pin instead (see CLAUDE.md's backlight-
 // hardware section). Left in anyway, harmless, in case a future board
 // swap ever uses a module that DOES route brightness through the
-// controller -- real dimming now happens via the LEDC PWM write below.
-constexpr uint8_t kBacklightLedcChannel = 0;
-constexpr uint32_t kBacklightPwmFreqHz = 5000;
-constexpr uint8_t kBacklightPwmResolutionBits = 8;
-bool backlightPwmReady = false;
-
+// controller. No GPIO PWM drive right now -- BL is back on the 3.3V
+// rail; both GPIO0 and GPIO12 failed real-hardware testing for this
+// signal (see Pins.h), parked until a non-strapping pin is freed up
+// instead of guessing at a third strapping pin.
 void applyBrightness(int percent) {
     percent = constrain(percent, 0, 100);
     uint8_t level = map(percent, 0, 100, 0, 255);
@@ -475,15 +472,6 @@ void applyBrightness(int percent) {
         tftPtr->writecommand(0x51); // WRDISBV
         tftPtr->writedata(level);
     }
-
-    // Real backlight control -- PIN_TFT_BL (GPIO0), see Pins.h for the
-    // full writeup on why this pin and why no external pull-up resistor.
-    if (!backlightPwmReady) {
-        ledcSetup(kBacklightLedcChannel, kBacklightPwmFreqHz, kBacklightPwmResolutionBits);
-        ledcAttachPin(PIN_TFT_BL, kBacklightLedcChannel);
-        backlightPwmReady = true;
-    }
-    ledcWrite(kBacklightLedcChannel, level);
 }
 
 // One-off direct draw for a blocking operation with no other visual
