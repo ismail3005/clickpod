@@ -1339,17 +1339,46 @@ last"):
    the picker. Also: pin `ESP32-A2DP`'s `lib_deps` entry to a specific
    tag/commit while touching this file anyway -- it currently floats on
    the default branch, unlike the explicitly-pinned `ESP32-audioI2S`.
-5. **SD-card-based WiFi credentials for TimeSync**, hardcoded-phone/
-   laptop-hotspot style but kept OFF the repo per the user's explicit
-   call (a single physical SD card in their pocket vs. permanent GitHub
-   history -- their reasoning, and the right call for a repo that could
-   go public). A small text file on the card (e.g. `clickpod_wifi.txt`,
-   SSID/password pairs), read by `TimeSync` and tried alongside the
-   existing open-network scan on each sync attempt -- no on-device typing
-   UI needed, no UI exposure at all, user edits the file directly on
-   their computer. Not an SD-index-file-style binary format like
-   `/clickpod.idx` -- plain text is fine and easier for the user to hand-
-   edit.
+5. **DONE -- SD-card-based WiFi credentials for TimeSync.** Plain text
+   file, `/clickpod_wifi.txt` (SD root), kept OFF the repo per the user's
+   explicit call (a single physical SD card in their pocket vs. permanent
+   GitHub history -- their reasoning, and the right call for a repo that
+   could go public) -- not in `.gitignore` either since it's never
+   written by this codebase in the first place, only read; the user
+   creates/edits it by hand on their computer. Format: one network per
+   line, `SSID,PASSWORD` (split on the FIRST comma only, so a password
+   containing a comma still works), blank lines and `#`-prefixed lines
+   ignored. `TimeSync::loadCredentialsFromSd()` parses it.
+
+   **Concurrency design, the actual tricky part**: TimeSync's sync loop
+   runs on its own background FreeRTOS task, but this codebase's
+   established rule (SD and the TFT share one physical SPI bus, only
+   proven safe for strictly sequential single-task access, not two
+   concurrent tasks -- see the library-scan-backgrounding gotcha) means
+   that background task must never touch the SD card itself. Solved by
+   reading the credentials file exactly ONCE, synchronously, on the main
+   thread in `main.cpp`'s `setup()` (same sequential pattern as the
+   library index build, right next to it, inside the same `if (sdOk)`
+   block) -- the parsed result is a plain in-RAM `std::vector<TimeSync::
+   WifiCredential>` handed into `TimeSync::begin(credentials)`, and the
+   background task only ever reads that already-parsed vector from then
+   on, never SD directly.
+
+   **Matching logic** (`TimeSync.cpp`'s `tryOnce()`): on each scan, a
+   network matching one of the loaded credentials is preferred over an
+   open network (the user's own hotspot is a deliberate, likely more
+   reliably-present choice than whatever random open network happens to
+   be nearby) -- falls back to the original open-network-only behavior
+   if none of the known networks are in range, or if the file doesn't
+   exist/SD has nothing on it at all (empty vector, same as before this
+   feature existed, zero behavior change for a card with no credentials
+   file).
+
+   **Not yet done**: the user hasn't actually created `/clickpod_wifi.txt`
+   on their card yet or tested a real hotspot sync -- that's the next
+   real-hardware step once this flashes, to confirm the whole path
+   (parse -> prefer -> join with password -> NTP) actually works, not
+   just compiles.
 6. **Manual "Set time" UI** -- an analog clock face (hour/minute hands,
    set via encoder: tap to switch which hand is active, rotate to sweep
    it, CENTER to confirm) with a live digital readout underneath for

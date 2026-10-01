@@ -5,6 +5,7 @@
 #include <TFT_eSPI.h>
 #include <esp_bt.h>
 #include <esp_heap_caps.h>
+#include <utility>
 
 #include "audio/AudioBridge.h"
 #include "bt/BluetoothSource.h"
@@ -173,6 +174,7 @@ void setup() {
     AnoInput::begin();
 
     bool sdOk = initSd();
+    std::vector<TimeSync::WifiCredential> wifiCreds; // stays empty if no SD / no credentials file
 
     // UI::begin() draws the boot splash immediately -- do this BEFORE the
     // (potentially slow, on a large card) SD library scan below, so there's
@@ -182,6 +184,14 @@ void setup() {
     Screens::applyBrightness(state.brightness); // real-hardware test, see Screens.h
 
     if (sdOk) {
+        // Read ONCE here, synchronously, on this thread -- NOT from inside
+        // TimeSync's own background task, which must never touch the SD
+        // card itself (shared SPI bus with the TFT, only sequential access
+        // from one task is proven safe -- see TimeSync.h's big comment and
+        // CLAUDE.md). Optional file; stays an empty vector if it doesn't
+        // exist, which TimeSync::begin() handles by falling back to
+        // open-network-only scanning, same as before this feature existed.
+        wifiCreds = TimeSync::loadCredentialsFromSd();
         // Visual proof that this might take a moment -- easy to mistake
         // for a hang otherwise (this is literally what happened during
         // bring-up). Plain direct tft prints, same as the original
@@ -233,7 +243,7 @@ void setup() {
 
     // Runs entirely on its own background task -- doesn't block the rest
     // of setup() or touch anything else here. See TimeSync.h.
-    TimeSync::begin();
+    TimeSync::begin(std::move(wifiCreds));
 }
 
 // Pushes the fuel gauge's latest reading into the UI's state, only marking
