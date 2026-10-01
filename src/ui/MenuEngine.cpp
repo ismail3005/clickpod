@@ -128,69 +128,89 @@ void setNowPlaying(Track t) {
     // fails, which UI.cpp's playback clock already guards against), and
     // picks up real embedded lyrics if the file has them.
     //
-    // SECOND startup-latency fix, on top of the earlier one (moving
-    // playSomething() before tags/art): user still reported "significant
-    // delay" starting playback after that fix shipped. Root cause found
-    // auditing: FlacMeta::readStreamInfo() below used to run BEFORE
-    // AudioBridge::playSomething(), each independently opening the SAME
-    // file via two completely separate SD opens -- and this project's own
-    // boot-time measurements already established that SD directory-lookup
-    // overhead (not data volume) is the dominant per-file cost on this
-    // card (see the library-scan section). Paying that open cost twice,
-    // every single track start, was a real, measurable tax on top of
-    // whatever ESP32-audioI2S's own open+decode-start takes. Fixed by
-    // making playSomething() the ABSOLUTE first thing that happens here,
-    // unconditionally, with NOTHING gating it -- not even the cheap-
-    // looking STREAMINFO read. Everything STREAMINFO was used for
-    // (duration, the 24-bit-unsupported check) moves into the deferred
-    // metadata pass below, alongside tags/art, all AFTER playback has
-    // already started.
+    // THIRD startup-latency/correctness fix -- REVERTS part of the second
+    // one. The second fix moved FlacMeta::readStreamInfo() to AFTER
+    // AudioBridge::playSomething(), to avoid a double SD open. That
+    // introduced a real, serious bug: readStreamInfo() was now opening the
+    // SAME file a second time WHILE AudioBridge::playSomething()'s
+    // connecttoFS() already had that exact file open and actively
+    // decoding from it -- a genuine concurrent-file-access hazard. When
+    // that caused readStreamInfo() to read corrupted data, it could
+    // spuriously report a bogus bitsPerSample, falsely tripping the
+    // 24-bit-unsupported skip below -- which calls playNextInQueue() ->
+    // setNowPlaying() on the NEXT track WHILE STILL INSIDE THIS CALL. If
+    // that next track's read got corrupted the same way, it recursed,
+    // chewing through the entire queue in one synchronous burst until
+    // empty. The last setNowPlaying() in that cascade had already reset
+    // state.now.posSec to 0 at its own top; playNextInQueue()'s empty-
+    // queue branch then sets state.now.playing = false and returns.
+    // Exactly "goes back to zero and freezes" -- UI.cpp's
+    // tickPlaybackClock() bails out immediately every tick once playing
+    // is false, so nothing ever recovers.
+    //
+    // Fixed by moving ONLY the STREAMINFO read back to BEFORE
+    // playSomething() -- the 24-bit check's false-positive cascade is
+    // dangerous enough that correctness has to win over the minor latency
+    // cost of one SD open before playback starts. Tags/art reading stay
+    // deferred to AFTER playSomething() (same as the second fix) --
+    // unlike STREAMINFO, a bad tags/art read has no skip/recursion path,
+    // so it doesn't carry this same risk, and it hasn't been implicated
+    // in any reported freeze.
+    bool knownUnsupported = false;
+    if (t.path.length() > 0) {
+        FlacMeta::StreamInfo si;
+        if (FlacMeta::readStreamInfo(t.path, si)) {
+            float dur = FlacMeta::durationSec(si);
+            if (dur > 0 && dur < 65536) t.durSec = (uint16_t)dur;
+            // ESP32-audioI2S 3.0.12's FLAC decoder hard-requires 8 or
+            // 16-bit samples -- a 24-bit file is guaranteed to fail.
+            if (si.bitsPerSample != 0 && si.bitsPerSample != 8 && si.bitsPerSample != 16) {
+                knownUnsupported = true;
+                Serial.printf("[audio] \"%s\" is %u-bit FLAC -- this decoder only supports 8/16-bit, "
+                              "skipping without attempting playback\n",
+                              t.title.c_str(), (unsigned)si.bitsPerSample);
+            }
+        }
+    }
+
     state.now.hasTrack = true;
     state.now.key = Library::keyFor(t); // filename-derived for now; corrected below once tags are read
     state.now.artist = t.artist;
     state.now.album = t.album;
     state.now.title = t.title;
     state.now.art = t.art;
-    state.now.durSec = t.durSec; // 0/unknown until the deferred STREAMINFO read below finishes -- UI.cpp already guards this
+    state.now.durSec = t.durSec;
     state.now.posSec = 0;
     state.now.playing = true;
     state.now.path = t.path;
     // See AppState.h's NowPlaying comment -- UI.cpp's tickPlaybackClock()
     // uses these to notice and skip a track that fails to actually start
     // decoding (some real files can't play at all, e.g. a FLAC frame too
-    // large for the decoder's fixed buffer, or 24-bit samples -- see
-    // below) instead of silently stalling.
+    // large for the decoder's fixed buffer, or -- see knownUnsupported
+    // above -- 24-bit samples) instead of silently stalling.
     state.now.playbackConfirmed = false;
-    state.now.startedAtMs = millis();
-    if (t.path.length() > 0) {
-        AudioBridge::playSomething(t.path); // real audio starts here, as early as humanly possible -- nothing before this line touches SD
+    if (knownUnsupported) {
+        // Don't even try -- backdate startedAtMs so UI.cpp's existing
+        // grace-period check (unmodified) treats this as already-expired
+        // on the very next tick, reusing the same non-recursive skip path
+        // as a generic decode failure instead of a special-cased one.
+        // Deliberately NOT a direct playNextInQueue() call here (unlike
+        // the reverted version above) -- this just sets state and returns
+        // normally; the actual skip happens on the NEXT tick, outside
+        // this call stack entirely, so there's no recursion risk even if
+        // every remaining queued track were somehow also 24-bit.
+        state.now.startedAtMs = millis() - UI::kPlaybackStartGraceMs;
+    } else {
+        state.now.startedAtMs = millis();
+        AudioBridge::playSomething(t.path); // real audio starts here, right after the one necessary SD read
     }
 
     // Everything past this point is slower, deferred work -- real
-    // artist/title/album tags, duration, the 24-bit-unsupported check,
-    // lyrics, embedded cover art. All runs AFTER playback has already
-    // been kicked off above.
+    // artist/title/album tags, lyrics, embedded cover art. Runs after
+    // playback has already been kicked off above (still runs for a
+    // knownUnsupported file too, matching the original behavior -- it'll
+    // auto-skip on the very next tick regardless).
     if (t.path.length() > 0) {
-        FlacMeta::StreamInfo si;
-        if (FlacMeta::readStreamInfo(t.path, si)) {
-            float dur = FlacMeta::durationSec(si);
-            if (dur > 0 && dur < 65536) { t.durSec = (uint16_t)dur; state.now.durSec = t.durSec; }
-            // ESP32-audioI2S 3.0.12's FLAC decoder hard-requires 8 or
-            // 16-bit samples -- a 24-bit file is guaranteed to fail.
-            // Detected here (after the fact, not before) and skipped
-            // explicitly RIGHT NOW rather than waiting out the generic
-            // isRunning()-grace-period failure detection -- same fast-
-            // skip UX as before, just the detection point moved from
-            // "before attempting" to "immediately after," since we no
-            // longer pre-read STREAMINFO to gate the attempt at all.
-            if (si.bitsPerSample != 0 && si.bitsPerSample != 8 && si.bitsPerSample != 16) {
-                Serial.printf("[audio] \"%s\" is %u-bit FLAC -- this decoder only supports 8/16-bit, "
-                              "skipping\n", t.title.c_str(), (unsigned)si.bitsPerSample);
-                playNextInQueue(); // sets state.dirty itself; bails out of the rest of this function
-                return;
-            }
-        }
-
         FlacMeta::Tags tags;
         if (FlacMeta::readTags(t.path, tags)) {
             if (tags.hasArtist) { t.artist = tags.artist; state.now.artist = t.artist; }
