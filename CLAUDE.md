@@ -1327,6 +1327,77 @@ Before deferring ANY SD read to run concurrently with an actively-open
 decoder file handle, check what happens if that specific read returns
 corrupted-but-plausible data, not just what happens if it cleanly fails.
 
+## Fourteenth real hardware bug (found, mitigated, not fully confirmed): heap corruption crash while scrubbing a FLAC track
+
+User reported `CORRUPT HEAP: Bad tail` / `assert failed: multi_heap_free` after
+scrubbing all the way through "Alice In Chains - Rotten Apple.flac" -- a real
+crash/reboot, not the silent freeze from the thirteenth bug above (confirmed
+on the latest build, after that fix). The log showed a string of transient
+FLAC decode errors (`BITS PER SAMPLE > 16`, `BITS PER SAMPLE UNKNOWN`,
+`UNKNOWN CHANNEL ASSIGNMENT`, each followed by "syncword found" resyncing)
+right before the crash, which pointed at scrubbing/seeking rather than normal
+playback.
+
+**Investigated by actually cloning the real pinned `3.0.12` tag of
+`schreibfaul1/ESP32-audioI2S`** (not our fork -- this needed the unmodified
+upstream seek code) and reading `Audio::setAudioPlayPosition()` directly:
+
+```cpp
+bool Audio::setAudioPlayPosition(uint16_t sec) {
+    uint32_t filepos = m_audioDataStart + (m_avr_bitrate * sec / 8);
+    return setFilePos(filepos);
+}
+```
+
+This is a pure average-bitrate estimate with **no FLAC frame-boundary
+awareness at all** -- for FLAC's variable-length frames, it lands at an
+essentially arbitrary byte offset almost every time. The library does have a
+safety net (`flac_correctResumeFilePos()`, `Audio.cpp`) that scans forward
+from that estimate for the next `0xFF 0xF8` syncword before resuming, then
+calls `FLACDecoderReset()` + `InBuff.resetBuffer()` -- but FLAC's syncword is
+only 16 bits, so against compressed audio data it has a real false-positive
+rate. That's exactly what the log shows: a false "syncword" match, a garbage
+frame header decoded from it (fake 24-bit/unknown-channel readings), the
+decoder's own internal resync (`FLACFindSyncWord()`,
+`flac_decoder.cpp`) kicking in again to find the real boundary. This
+resync path only ever gets entered on a seek -- it's far less exercised than
+normal straight-through decode, and the most plausible place for a real
+library bug (this session didn't find a specific one, see below) to hide.
+
+**Ruled out**: our own fork's patch (the FLAC `maxFrameSize` buffer-size fix,
+in `read_FLAC_Header()`) is NOT re-entered on seek -- only `FLACDecoderReset()`
+runs, which never touches that function. Confirmed by grepping the real
+library source for every call site of `read_FLAC_Header()`. So this is a
+pre-existing fragility in the library's own FLAC seek support, not something
+our patch introduced.
+
+**Not fully confirmed**: this session did not find a specific
+malloc/free/buffer-overflow bug inside the resync path itself (would need
+much deeper tracing through `flac_decoder.cpp`'s subframe decode state, not
+attempted) -- the heap corruption's exact mechanism inside the library is
+still a plausible-but-unverified theory, not a proven root cause.
+
+**Mitigated** (`src/ui/InputRouter.cpp`): `kScrubIdleCommitMs` raised from
+150 to 400 -- the scrub-commit debounce (see the big comment above it,
+"commit on pause" pattern) already limits real seeks to one per pause, but
+150ms was short enough that a normal continuous scrub across a whole track
+could still fire many real seeks (and thus many resync-path re-entries) in
+one gesture. 400ms cuts that count substantially for the same scrub
+duration without changing how responsive the on-screen position feels
+(that updates instantly regardless -- only the real backend seek is
+debounced). This directly addresses "jittery/glitchy scrubbing" as a side
+effect too, since each commit's resync produces audible static/glitch.
+
+**Not done, if this recurs even at 400ms**: the only way to fully eliminate
+exposure to this code path would be to stop seeking a real FLAC file at all
+until the user's scrub gesture fully ends (e.g. requiring a longer idle
+window, or only committing on leaving NOW_PLAYING/pressing CENTER) -- a
+bigger UX change than this session made, not attempted since the debounce
+increase is a much smaller, lower-risk first step and hasn't been
+hardware-tested yet. Next real step either way: reflash and have the user
+try scrubbing through the same track (or another known-glitchy one) again,
+and report whether the crash recurs even with the longer debounce.
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time

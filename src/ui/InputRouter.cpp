@@ -35,7 +35,15 @@ uint32_t repeatLastMs = 0;
 // real seek at all -- only the brief pause at the end does -- so the UI
 // stays responsive throughout the whole scrub gesture, not just at a
 // capped rate.
-constexpr uint32_t kScrubIdleCommitMs = 150;
+// 150ms (the original value) still let a long, steady scrub across most of a
+// track fire many real seeks -- each one re-enters ESP32-audioI2S's FLAC
+// resync path (flac_correctResumeFilePos() scans forward for the next
+// 0xFF/0xF8 syncword, a false-positive-prone 16-bit match against compressed
+// audio data, then FLACDecoderReset()+InBuff.resetBuffer()), which is a
+// lightly-exercised, seek-only code path -- see CLAUDE.md's heap-corruption
+// writeup. Raised to cut how many times a single scrub gesture re-enters
+// that path, not just to feel smoother.
+constexpr uint32_t kScrubIdleCommitMs = 400;
 bool scrubSeekPending = false;
 uint16_t scrubPendingSec = 0;
 uint32_t lastScrubRotateMs = 0;
