@@ -1476,6 +1476,24 @@ last"):
    do the same disconnect-and-multimeter-check discipline before wiring
    this blind, don't repeat this round's pattern of guessing and testing
    live on hardware three times in a row.
+
+   **One more operational lesson from this round, unrelated to pin
+   choice**: right after reverting all the GPIO0/12 code and physical
+   wiring back to the known-good state, `pio run -t upload` started
+   hanging with ZERO esptool handshake output at all (not even
+   "Connecting......"), a different symptom from every earlier failure
+   this round. Root cause: a breadboard connection near all the GPIO0
+   rework (most likely the auto-reset circuit's own EN/GPIO0 lines,
+   which share that same crowded area) got physically disturbed --
+   confirmed by flashing with the board fully off the breadboard
+   (presumably a cleaner direct connection to the USB-to-serial adapter),
+   which worked immediately; board was then reseated back onto the
+   breadboard afterward with no further issue. **If a future upload ever
+   hangs with no handshake output at all** (distinct from a normal
+   "Connecting......" retry loop), suspect a disturbed physical
+   connection from recent rework before suspecting firmware or strapping
+   pins -- pull the board off the breadboard and flash it directly as a
+   fast diagnostic.
 8. **Real Bluetooth audio** (routing `ESP32-audioI2S`'s decoded PCM into
    the A2DP source callback instead of the test tone) -- explicitly
    deprioritized by the user, do this LAST, after everything above.
