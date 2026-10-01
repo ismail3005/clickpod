@@ -136,6 +136,17 @@ void setNowPlaying(Track t) {
     // extra I/O cost -- and skipped further down without even attempting
     // AudioBridge::playSomething(), rather than burning the time to open/
     // partially-decode a file already known to fail.
+    // Startup-latency fix: this used to do readStreamInfo + readTags +
+    // AlbumArt::loadForTrack (a JPEG decode) -- all blocking SD/SPI work
+    // -- BEFORE ever calling AudioBridge::playSomething(), so the actual
+    // audio start sat behind however long the embedded cover art took to
+    // decode. playSomething() only needs the path, nothing from tags or
+    // art, so there's no reason for that ordering. Now: only the cheap
+    // STREAMINFO read (duration + the 24-bit-skip check) happens first,
+    // playback starts immediately after, and the slower tags/lyrics/art
+    // work happens AFTER audio is already decoding -- the screen picks up
+    // real tags/art a beat later via the state.dirty set at the end,
+    // instead of holding up sound for it.
     bool knownUnsupported = false;
     if (t.path.length() > 0) {
         FlacMeta::StreamInfo si;
@@ -149,20 +160,6 @@ void setNowPlaying(Track t) {
                               t.title.c_str(), (unsigned)si.bitsPerSample);
             }
         }
-
-        FlacMeta::Tags tags;
-        if (FlacMeta::readTags(t.path, tags)) {
-            if (tags.hasArtist) t.artist = tags.artist;
-            if (tags.hasTitle) t.title = tags.title;
-            if (tags.hasAlbum) t.album = tags.album;
-            if (tags.hasLyrics) {
-                Library::LYRICS[Library::keyFor(t)] = splitLyricsIntoLines(tags.lyrics, t.durSec);
-            }
-        }
-
-        AlbumArt::loadForTrack(t.path); // no-op-safe if the file has no (or non-JPEG) embedded art
-    } else {
-        AlbumArt::clear(); // placeholder/mock track with no real path -- don't show the previous track's art
     }
 
     state.now.hasTrack = true;
@@ -189,8 +186,29 @@ void setNowPlaying(Track t) {
         state.now.startedAtMs = millis() - UI::kPlaybackStartGraceMs;
     } else {
         state.now.startedAtMs = millis();
-        AudioBridge::playSomething(t.path);
+        AudioBridge::playSomething(t.path); // real audio starts here, as early as possible
     }
+
+    // Slower, purely cosmetic per-track metadata -- real artist/title/album
+    // tags, lyrics, embedded cover art. Runs after playback has already
+    // been kicked off above, same as before otherwise (still runs for a
+    // knownUnsupported file too, matching the original behavior -- it'll
+    // auto-skip on the very next tick regardless).
+    if (t.path.length() > 0) {
+        FlacMeta::Tags tags;
+        if (FlacMeta::readTags(t.path, tags)) {
+            if (tags.hasArtist) { t.artist = tags.artist; state.now.artist = t.artist; }
+            if (tags.hasTitle)  { t.title = tags.title;   state.now.title = t.title; }
+            if (tags.hasAlbum)  { t.album = tags.album;   state.now.album = t.album; }
+            if (tags.hasLyrics) {
+                Library::LYRICS[Library::keyFor(t)] = splitLyricsIntoLines(tags.lyrics, t.durSec);
+            }
+        }
+        AlbumArt::loadForTrack(t.path); // no-op-safe if the file has no (or non-JPEG) embedded art
+    } else {
+        AlbumArt::clear(); // placeholder/mock track with no real path -- don't show the previous track's art
+    }
+    state.dirty = true; // picks up any tag/art updates made above
 }
 
 } // namespace
