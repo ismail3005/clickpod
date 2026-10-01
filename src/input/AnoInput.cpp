@@ -58,7 +58,20 @@ void AnoInput::begin() {
     for (uint8_t i = 0; i < kButtonCount; i++) {
         // External 10k pull-ups on every ANO line (board has none onboard),
         // so plain INPUT here, not INPUT_PULLUP.
-        pinMode(kButtonPins[i], INPUT);
+        //
+        // TEMPORARY EXCEPTION: LEFT's external pull-up was borrowed to test
+        // GPIO0 (backlight -- see Pins.h/CLAUDE.md's backlight-hardware
+        // writeup) without an extra resistor on hand. GPIO13 (LEFT) is a
+        // regular GPIO with real internal pull-up capability (unlike
+        // DOWN/RIGHT/CENTER, which are input-only pins with NO internal
+        // pull option at all -- those could never be borrowed from this
+        // way), so INPUT_PULLUP compensates in software for the missing
+        // external resistor. Safe to leave this in place permanently even
+        // after a real resistor goes back on LEFT -- redundant pull-ups in
+        // parallel don't hurt anything -- but if LEFT feels any less
+        // reliable than the other buttons, that's the first thing to
+        // check/revert.
+        pinMode(kButtonPins[i], kButtonPins[i] == PIN_ANO_BTN_LEFT ? INPUT_PULLUP : INPUT);
         debouncers[i].attach(kButtonPins[i]);
         debouncers[i].interval(kDebounceMs);
     }
