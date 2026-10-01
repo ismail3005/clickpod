@@ -1327,7 +1327,7 @@ Before deferring ANY SD read to run concurrently with an actively-open
 decoder file handle, check what happens if that specific read returns
 corrupted-but-plausible data, not just what happens if it cleanly fails.
 
-## Fourteenth real hardware bug (found, mitigated, not fully confirmed): heap corruption crash while scrubbing a FLAC track
+## Fourteenth real hardware bug (found, REAL FIX shipped as a fork commit, not yet hardware-confirmed): heap corruption crash while scrubbing a FLAC track
 
 User reported `CORRUPT HEAP: Bad tail` / `assert failed: multi_heap_free` after
 scrubbing all the way through "Alice In Chains - Rotten Apple.flac" -- a real
@@ -1371,32 +1371,49 @@ library source for every call site of `read_FLAC_Header()`. So this is a
 pre-existing fragility in the library's own FLAC seek support, not something
 our patch introduced.
 
-**Not fully confirmed**: this session did not find a specific
-malloc/free/buffer-overflow bug inside the resync path itself (would need
-much deeper tracing through `flac_decoder.cpp`'s subframe decode state, not
-attempted) -- the heap corruption's exact mechanism inside the library is
-still a plausible-but-unverified theory, not a proven root cause.
+**Real fix, not just a mitigation**: traced the exact mechanism in
+`flacDecodeFrame()` (`flac_decoder.cpp`) -- a false sync match feeds garbage
+field codes into the header parser, including a UTF-8-coded frame/sample-
+number byte count (1-7 bytes) that gets blindly trusted with no validation
+against the bytes actually remaining, which is a real out-of-bounds-read
+shape, not just "decode errors in the log." The FLAC format defines a
+frame-header CRC-8 byte for exactly this situation -- letting a decoder
+verify it has truly landed on a frame boundary before trusting it -- and
+this decoder (confirmed by grepping the whole `flac_decoder.cpp`/`Audio.cpp`
+source) never implemented that check anywhere, for either normal resync or
+seek-driven resync.
 
-**Mitigated** (`src/ui/InputRouter.cpp`): `kScrubIdleCommitMs` raised from
-150 to 400 -- the scrub-commit debounce (see the big comment above it,
-"commit on pause" pattern) already limits real seeks to one per pause, but
-150ms was short enough that a normal continuous scrub across a whole track
-could still fire many real seeks (and thus many resync-path re-entries) in
-one gesture. 400ms cuts that count substantially for the same scrub
-duration without changing how responsive the on-screen position feels
-(that updates instantly regardless -- only the real backend seek is
-debounced). This directly addresses "jittery/glitchy scrubbing" as a side
-effect too, since each commit's resync produces audible static/glitch.
+Fixed at the actual source, on the fork (`clickpod-3.0.12-flac-patch`
+branch, commit `7fbb5c7`, re-pinned in `platformio.ini`): added
+`Audio::flac_tryParseFrameHeader()`, a self-contained candidate-header
+parser (doesn't touch `flac_decoder.cpp`'s live state, so it's safe to run
+speculatively) that walks the full header -- block size/sample rate/channel
+assignment/sample size codes (rejecting any reserved value), the variable-
+length UTF-8 frame/sample number (validating every continuation byte's
+shape instead of trusting the byte count blind), any optional extra size
+bytes -- then computes the real FLAC frame-header CRC-8 (poly `0x07`,
+MSB-first, no reflection, per the format spec) and compares it against the
+byte actually on disk. `flac_correctResumeFilePos()` now keeps scanning
+forward past a false positive instead of accepting the first 2-byte
+`0xFF`/`0xF8` match it finds, which is what the original implementation
+did (and still what upstream `schreibfaul1/ESP32-audioI2S` 3.0.12 does,
+unpatched). This directly closes the "jittery/glitchy scrubbing" complaint
+too, since every false-positive accept was previously producing audible
+resync static.
 
-**Not done, if this recurs even at 400ms**: the only way to fully eliminate
-exposure to this code path would be to stop seeking a real FLAC file at all
-until the user's scrub gesture fully ends (e.g. requiring a longer idle
-window, or only committing on leaving NOW_PLAYING/pressing CENTER) -- a
-bigger UX change than this session made, not attempted since the debounce
-increase is a much smaller, lower-risk first step and hasn't been
-hardware-tested yet. Next real step either way: reflash and have the user
-try scrubbing through the same track (or another known-glitchy one) again,
-and report whether the crash recurs even with the longer debounce.
+**Still true, lower priority now**: `src/ui/InputRouter.cpp`'s
+`kScrubIdleCommitMs` was also raised 150ms -> 400ms (previous session) so
+one long scrub still fires fewer real seeks overall -- kept as a cheap
+secondary win (every real seek still costs a resync scan, even a correct
+one), not as the fix itself anymore.
+
+**Not yet hardware-confirmed**: this fork commit was written and pushed in
+this sandbox with no way to compile it here (no PlatformIO) -- same
+verification discipline as every other library-source change in this
+project. First real `pio run` + flash + a deliberate scrub-through-a-whole-
+track test on "Alice In Chains - Rotten Apple.flac" (or another file known
+to have triggered this) is the next real step, to confirm both that it
+builds clean and that the crash is actually gone, not just less likely.
 
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
