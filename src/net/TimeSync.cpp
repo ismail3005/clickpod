@@ -3,6 +3,7 @@
 #include <SD.h>
 #include <WiFi.h>
 #include <atomic>
+#include <cstring>
 #include <ctime>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -83,14 +84,22 @@ SyncResult tryOnce() {
     // Prefer a network matching one of the SD-card credentials (the
     // user's own phone/laptop hotspot -- deliberately chosen, likely more
     // reliably present than a random open network) over an open network.
+    // Also capture the chosen network's channel/BSSID from THIS scan --
+    // see the real fix below for why.
     String chosenSsid;
     String chosenPassword; // empty means open network, no password needed
+    int32_t chosenChannel = 0;
+    uint8_t chosenBssid[6] = {0};
+    bool haveChosenBssid = false;
     for (int i = 0; i < n && chosenSsid.length() == 0; i++) {
         String ssid = WiFi.SSID(i);
         for (const WifiCredential &cred : knownCredentials) {
             if (ssid == cred.ssid) {
                 chosenSsid = ssid;
                 chosenPassword = cred.password;
+                chosenChannel = WiFi.channel(i);
+                memcpy(chosenBssid, WiFi.BSSID(i), 6);
+                haveChosenBssid = true;
                 break;
             }
         }
@@ -99,6 +108,9 @@ SyncResult tryOnce() {
         for (int i = 0; i < n; i++) {
             if (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) {
                 chosenSsid = WiFi.SSID(i);
+                chosenChannel = WiFi.channel(i);
+                memcpy(chosenBssid, WiFi.BSSID(i), 6);
+                haveChosenBssid = true;
                 break;
             }
         }
@@ -110,12 +122,37 @@ SyncResult tryOnce() {
         return SyncResult::kFailed;
     }
 
-    Serial.printf("[time] joining \"%s\" for NTP (%s)...\n", chosenSsid.c_str(),
-                  chosenPassword.length() > 0 ? "known network" : "open network");
+    // Real fix for the alternating NO_AP_FOUND/AUTH_EXPIRE join failure
+    // seen against a correct, confirmed password: WiFi.begin(ssid, pass)
+    // with no channel/BSSID makes the ESP32 run ANOTHER internal scan to
+    // locate the AP before authenticating -- a second discovery pass that
+    // can behave differently (miss it, pick a stale/duplicate beacon,
+    // etc.) from the scan this function just did successfully. Passing
+    // the exact channel+BSSID already found above skips that second
+    // discovery entirely and connects directly to the known-good AP --
+    // a standard, well-documented fix for exactly this ESP32 WiFi
+    // flakiness class, not a guess. Also disabling WiFi modem sleep
+    // (`WiFi.setSleep(false)`) before connecting -- power-save mode
+    // missing beacons mid-handshake is the other common real cause of
+    // this same AUTH_EXPIRE flapping pattern; both are real, standard
+    // Arduino-ESP32 WiFi API, applied together since either alone might
+    // not be the whole story.
+    WiFi.setSleep(false);
+    Serial.printf("[time] joining \"%s\" for NTP (%s)%s...\n", chosenSsid.c_str(),
+                  chosenPassword.length() > 0 ? "known network" : "open network",
+                  haveChosenBssid ? ", direct to known channel/BSSID" : "");
     if (chosenPassword.length() > 0) {
-        WiFi.begin(chosenSsid.c_str(), chosenPassword.c_str());
+        if (haveChosenBssid) {
+            WiFi.begin(chosenSsid.c_str(), chosenPassword.c_str(), chosenChannel, chosenBssid);
+        } else {
+            WiFi.begin(chosenSsid.c_str(), chosenPassword.c_str());
+        }
     } else {
-        WiFi.begin(chosenSsid.c_str());
+        if (haveChosenBssid) {
+            WiFi.begin(chosenSsid.c_str(), nullptr, chosenChannel, chosenBssid);
+        } else {
+            WiFi.begin(chosenSsid.c_str());
+        }
     }
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < kConnectTimeoutMs) {

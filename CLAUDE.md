@@ -2074,6 +2074,34 @@ needs a real header/behavior check this sandbox can't do for WiFi
 specifically (unlike `configTime()`/`getLocalTime()`, which are
 well-trodden enough to use directly).
 
+**UPDATE, real fix applied (password confirmed correct by the user,
+ruling out typo theory) -- `TimeSync.cpp`'s `tryOnce()`:**
+
+1. `WiFi.setSleep(false)` before connecting -- WiFi modem power-save
+   missing beacons mid-handshake is a well-documented real cause of
+   exactly this `AUTH_EXPIRE` flapping on ESP32.
+2. The scan loop now also captures the chosen network's `WiFi.channel(i)`/
+   `WiFi.BSSID(i)` from the SAME scan that already found it successfully,
+   and `WiFi.begin()` is called with that explicit channel+BSSID instead
+   of just SSID+password. Without this, `WiFi.begin(ssid, pass)` makes
+   the ESP32 run a SECOND internal scan to locate the AP before
+   authenticating -- a second discovery pass that can behave differently
+   from the one this function just ran cleanly, which is the standard,
+   well-documented fix for "found it in my own scan, but `WiFi.begin()`
+   still can't join" on this chip. Both `channel()`/`BSSID()` and the
+   4-arg `WiFi.begin(ssid, pass, channel, bssid)` overload are long-
+   standing, stable Arduino-ESP32 core API (not a guess the way an
+   `esp_wifi`-level override would have been) -- this is why option was
+   taken over guessing at a lower-level auth-mode API.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: flash, and check whether the join succeeds this time (no
+more alternating `NO_AP_FOUND`/`AUTH_EXPIRE`, `[time] synced` appears).
+If it still fails the same way with a confirmed-correct password and a
+direct BSSID join, the WPA2/WPA3 mixed-mode theory becomes the leading
+suspect and the next step is checking Windows' Mobile Hotspot for a
+security-mode override, not another firmware guess.
+
 ## Real Bluetooth audio -- explicitly NOT attempted this round, scoped instead of rushed
 
 Asked this round to "get rid of the BT test tone, I want real audio now."
