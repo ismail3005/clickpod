@@ -2,6 +2,7 @@
 
 #include "../audio/AudioBridge.h"
 #include "../bt/BluetoothSource.h"
+#include "../net/TimeSync.h"
 #include "../state/AppState.h"
 #include "AlbumArt.h"
 #include "InputRouter.h"
@@ -111,6 +112,25 @@ void tickPlaybackClock() {
 // producing context" pattern AnoInput's encoder delta already uses.
 int lastDiscoveredCount = -1;
 
+// Nothing else ever sets `dirty` just because time passed -- drawStatusbar()
+// only ever ran as a side effect of some OTHER full redraw (a mode change,
+// track change, etc). That meant the statusbar clock could sit frozen at
+// whatever it showed on the last full redraw indefinitely, even well after
+// TimeSync::isSynced() flipped true in the background -- "it says synced in
+// the monitor but the UI never shows a time" was this, not a sync bug. This
+// polls the actual displayed text (cheap: one String compare) every tick and
+// only flags a redraw when it actually changed (sync completing, or a new
+// minute), same polling pattern already used for the BT device picker above.
+String lastStatusbarClock;
+
+void tickStatusbarClock() {
+    String nowText = TimeSync::currentTimeString();
+    if (nowText != lastStatusbarClock) {
+        lastStatusbarClock = nowText;
+        state.statusbarDirty = true;
+    }
+}
+
 void tickBluetoothDevicePicker() {
     bool onPicker = state.mode == AppMode::BT && !state.menuStack.empty() &&
                     state.menuStack.back().title == "Choose Device";
@@ -149,6 +169,7 @@ void update() {
     } else {
         InputRouter::update();
         tickPlaybackClock();
+        tickStatusbarClock();
         tickBluetoothDevicePicker();
     }
     Screens::render();

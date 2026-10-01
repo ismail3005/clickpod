@@ -1977,6 +1977,59 @@ just an in-session off/on toggle. This bug is fully closed out; both
 halves of the fix (same-session and cross-reboot) are hardware-confirmed
 now, not just theorized from source.
 
+## Twenty-second real hardware bug (resolved, not a firmware bug): WiFi hotspot genuinely wasn't broadcasting during the earlier failing boots
+
+Chased this across several rounds (fifteenth/eighteenth bugs above) --
+resolved by just getting a fresh log with the hotspot confirmed ON
+beforehand: `[time] scan found 15 network(s)...` now included
+`"ISMAIL-LAPTOP 6786" (secured)`, it joined it as a known network, and
+logged `[time] synced`. The whole WiFi/NTP pipeline (credentials file
+parsing -> scan -> known-network preference -> WPA join -> NTP fetch)
+works correctly end to end -- every earlier failing attempt really was
+just the hotspot not actually being on/broadcasting at boot (confirmed
+2.4GHz-only already, for the 3D printer, so the band theory from the
+twentieth bug's writeup was a red herring for this specific network).
+Nothing to fix in `TimeSync.cpp`.
+
+## Twenty-third real hardware bug (found, fixed): statusbar clock never updated on its own, even after a successful sync
+
+Same session: `[time] synced` appeared in the serial log, but the clock
+never appeared on screen. Root cause in `Screens.cpp`: `drawStatusbar()`
+(which prints `TimeSync::currentTimeString()`) is only ever called
+inside `render()`'s `if (!state.dirty) return;`-gated block -- i.e. only
+as a side effect of some OTHER full-screen redraw (a mode change, a
+track change, boot finishing, ...). Nothing anywhere ever set `state.dirty`
+purely because time passed or because `TimeSync::isSynced()` flipped
+true in the background -- so if the user just sat on one screen without
+pressing a button, the clock stayed frozen at whatever it showed during
+the last full redraw (typically still `"--:--"` from before sync
+completed), indefinitely, no matter how long ago the sync actually
+finished.
+
+Fixed with the same lightweight-dirty-flag pattern this codebase already
+uses for the progress bar and menu selection (`state.progressDirty`/
+`state.selectionDirty`): `AppState.h` gained `state.statusbarDirty`.
+`UI.cpp`'s new `tickStatusbarClock()` (called every `update()` tick,
+alongside `tickPlaybackClock()`) compares the current
+`TimeSync::currentTimeString()` against the last value it saw (a plain
+`String` compare, cheap) and only sets the flag when it actually changed
+-- sync completing, or a new minute ticking over. `Screens::render()`
+redraws just the statusbar (not the whole screen) when the flag is set
+and a full `dirty` redraw isn't already happening, skipped for `BOOT`
+(splash may not have drawn the statusbar yet) and `OFF` (that screen is
+deliberately blank). Same risk profile as the existing progress-bar/
+selection partial-redraw paths -- a small `fillRect` of just the top
+strip, not a source of the flicker class of bug those were built to
+avoid.
+
+**Not yet hardware-confirmed** -- same caveat as every change this
+session, no PlatformIO in this sandbox to compile against. Next real
+step: flash, sit on any screen (Now Playing, a menu, Lyrics) without
+touching a button, and confirm the clock in the statusbar actually
+advances/appears on its own once a sync completes or a minute ticks
+over, instead of needing an unrelated button press to reveal the
+already-correct time.
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time

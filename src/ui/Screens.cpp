@@ -505,6 +505,14 @@ void render() {
     }
     state.selectionDirty = false;
 
+    // Lightest redraw of the three -- see UI.cpp's tickStatusbarClock().
+    // Skipped for BOOT (splash hasn't necessarily drawn the statusbar yet)
+    // and OFF (that screen is deliberately blank, no statusbar at all).
+    if (state.statusbarDirty && !state.dirty && state.mode != AppMode::BOOT && state.mode != AppMode::OFF) {
+        drawStatusbar();
+    }
+    state.statusbarDirty = false;
+
     if (!state.dirty) return;
 
     if (state.mode == AppMode::BOOT) {

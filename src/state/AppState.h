@@ -114,6 +114,15 @@ struct AppState {
     // updateMenuSelection(). Falls back to a full `dirty` redraw itself
     // if the viewport needs to scroll to keep the new selection visible.
     bool selectionDirty = false;
+    // Lightest of the three: set by UI.cpp's tickStatusbarClock() whenever
+    // the statusbar's displayed clock text actually changes (sync
+    // completing, or a new minute), so the statusbar redraws on its own
+    // without waiting for an unrelated full redraw. Nothing else ever set
+    // `dirty` just because time passed, so sitting on any one screen
+    // without pressing a button meant the clock stayed frozen at whatever
+    // it showed at the last full redraw, even after a background WiFi
+    // sync completed in the background.
+    bool statusbarDirty = false;
 };
 
 extern AppState state;
