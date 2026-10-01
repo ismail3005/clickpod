@@ -33,9 +33,18 @@ bool centerDoubleTapEvent = false;
 // timing (which also has audio.loop() competing for CPU time).
 volatile int16_t encoderDelta = 0;
 volatile uint8_t encoderLastState = 0;
+volatile uint32_t lastValidTransitionUs = 0;
 
 // Standard full-step quadrature transition table: index = (old_AB<<2)|new_AB,
 // value = +1/-1 for a valid single step, 0 for bounce/invalid transitions.
+// NOTE: this table alone only rejects transitions between non-adjacent
+// states -- it does NOT reject a rapid-fire stream of individually-VALID-
+// looking steps caused by contact bounce/electrical noise right at a
+// detent boundary, which is a well-known real failure mode for DIY/budget
+// rotary encoders and matches "keeps moving on its own" exactly (not
+// necessarily a wiring fault -- can happen on solid connections too, it's
+// inherent to how these mechanical contacts bounce). Gated below with a
+// minimum-time-between-counted-transitions check.
 const int8_t kQuadTable[16] = {
     0, -1, 1, 0,
     1, 0, 0, -1,
@@ -43,13 +52,31 @@ const int8_t kQuadTable[16] = {
     0, 1, -1, 0,
 };
 
+// A human physically turning this knob cannot produce valid full-step
+// transitions faster than this even at a genuinely fast spin; contact
+// bounce/electrical chatter typically repeats on the order of
+// microseconds to a couple hundred microseconds, well under it.
+// Deliberately generous (not hardware-measured against this exact
+// encoder's real bounce characteristics) so a fast real spin is never
+// mistaken for noise -- tune down further only if legitimate fast
+// spins start feeling missed/sluggish after this.
+constexpr uint32_t kMinTransitionIntervalUs = 1000; // 1ms
+
 void IRAM_ATTR onEncoderChange() {
     uint8_t a = digitalRead(PIN_ANO_ENC_A);
     uint8_t b = digitalRead(PIN_ANO_ENC_B);
     uint8_t newState = (a << 1) | b;
     uint8_t index = (encoderLastState << 2) | newState;
-    encoderDelta += kQuadTable[index];
-    encoderLastState = newState;
+    int8_t step = kQuadTable[index];
+    encoderLastState = newState; // track real pin state every time, regardless of gating below
+
+    if (step != 0) {
+        uint32_t now = micros();
+        if (now - lastValidTransitionUs >= kMinTransitionIntervalUs) {
+            encoderDelta += step;
+            lastValidTransitionUs = now;
+        }
+    }
 }
 
 } // namespace

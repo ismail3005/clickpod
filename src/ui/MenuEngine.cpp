@@ -200,8 +200,22 @@ void setNowPlaying(Track t) {
             if (tags.hasArtist) { t.artist = tags.artist; state.now.artist = t.artist; }
             if (tags.hasTitle)  { t.title = tags.title;   state.now.title = t.title; }
             if (tags.hasAlbum)  { t.album = tags.album;   state.now.album = t.album; }
+            // BUG FIX (found auditing after a real-hardware lyrics regression):
+            // state.now.key was computed ONCE, early, from filename-derived
+            // artist/title (before this block ever runs). If the real tags
+            // above differ at all from the filename guess -- extremely
+            // common -- keyFor(t) here would return a DIFFERENT string than
+            // state.now.key already holds, since t.artist/t.title just
+            // changed. Lyrics would then get stored under a key that
+            // drawLyrics()'s state.now.key lookup can never match, silently
+            // losing lyrics for exactly the tracks whose real tags differ
+            // from their filename. Recompute state.now.key here too, from
+            // the now-tag-updated t, so both stay consistent -- whichever
+            // key this track is ultimately looked up by is the same one
+            // used to store its lyrics.
+            state.now.key = Library::keyFor(t);
             if (tags.hasLyrics) {
-                Library::LYRICS[Library::keyFor(t)] = splitLyricsIntoLines(tags.lyrics, t.durSec);
+                Library::LYRICS[state.now.key] = splitLyricsIntoLines(tags.lyrics, t.durSec);
             }
         }
         AlbumArt::loadForTrack(t.path); // no-op-safe if the file has no (or non-JPEG) embedded art
