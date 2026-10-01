@@ -43,21 +43,37 @@ inline bool radioHeapOk(const char *who) {
 // The ESP32 has ONE radio shared between WiFi (TimeSync) and classic
 // Bluetooth (BluetoothSource) -- letting both touch it at once (e.g. a
 // TimeSync scan/connect cycle running while BT is starting up) is a real,
-// documented class of crash on this chip, not a hypothetical. Strong
+// documented class of crash on this chip, not a hypothetical. Original
 // suspect for a crash seen right after TimeSync's WiFi usage was added:
 // `[bt] Starting Bluetooth A2DP source...` followed immediately by
-// `assert failed: hash_map_set hash_map.c:129` and a reboot, twice in a
-// row in the field. Not confirmed via a reproduction (no hardware access
-// here), but the timing correlation plus ESP32's known WiFi+BT
-// coexistence issues make it the leading explanation -- if this doesn't
-// fully fix it, that's the next thing to revisit.
+// `assert failed: hash_map_set hash_map.c:129` and a reboot. That
+// diagnosis turned out to be WRONG (or at least incomplete) -- see
+// CLAUDE.md's seventh/eighth hardware bug writeup -- the real cause was
+// internal-heap exhaustion right after the boot-time library scan, now
+// independently guarded by radioHeapOk() above, on both subsystems.
 //
-// Whichever subsystem is using the radio holds this for its WHOLE active
-// duration (BluetoothSource from begin() to end(), not just start/stop;
-// TimeSync for the length of one scan+connect+NTP cycle) -- the other
-// simply skips/defers its own radio use rather than risk an overlap.
-// Simple by design: this is about avoiding a crash, not maximizing radio
-// uptime for either side.
+// IMPORTANT, found later (CLAUDE.md's fifteenth bug): this lock used to be
+// held by BluetoothSource for its WHOLE connected session (begin() to
+// end()), not just the brief moment it actually touches the radio to
+// start. Since BT commonly stays on for hours, that meant TimeSync could
+// NEVER acquire the lock -- never scan, never sync -- for as long as BT was
+// on, not a brief collision window. Narrowed to cover only the actual
+// radio-touching call (a2dpSource.start()) -- BluetoothSource now releases
+// the lock right after that returns, same brief-hold pattern TimeSync
+// itself already used (one scan+connect+NTP cycle, not "for as long as
+// WiFi might ever be wanted"). This still prevents a literal same-instant
+// collision (TimeSync scanning the exact moment BT is initiating a
+// connection) without permanently starving TimeSync out whenever BT
+// happens to be on, which is what actually happened before this fix.
+// Honest residual gap: ESP32-A2DP's start() is asynchronous -- it kicks
+// off scanning/pairing on its own BT task and returns quickly, so the
+// lock window here doesn't cover BT's whole multi-second connection
+// handshake, only the initial call. Given the original "simultaneous
+// radio use crashes" theory was never actually confirmed (see above --
+// it was heap exhaustion), this is judged an acceptable tradeoff rather
+// than a proven-safe one; if a real WiFi/BT collision crash does surface
+// again, this is the first place to revisit, probably by having
+// BluetoothSource poll for a stable is_connected() before releasing.
 namespace RadioLock {
 
 inline std::atomic<bool> busy{false};

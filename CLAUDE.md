@@ -1415,6 +1415,65 @@ track test on "Alice In Chains - Rotten Apple.flac" (or another file known
 to have triggered this) is the next real step, to confirm both that it
 builds clean and that the crash is actually gone, not just less likely.
 
+## Fifteenth real hardware bug (found, fixed): TimeSync WiFi sync could never run at all while Bluetooth was on
+
+User reported WiFi NTP sync never connecting despite a correct
+`/clickpod_wifi.txt` and their hotspot being on. Root cause in
+`src/net/RadioLock.h`/`src/bt/BluetoothSource.cpp`: `BluetoothSource::
+begin()` acquired `RadioLock` and only released it in `end()` -- i.e. for
+BT's WHOLE connected session, not just the moment it actually touches the
+radio. Since BT commonly stays on for hours, `TimeSync::tryOnce()`'s
+`RadioLock::ScopedLock` could never acquire the lock for as long as BT was
+on -- every attempt just logged `[time] skipping sync -- Bluetooth is
+active` and retried in 2 minutes, forever, never actually reaching a WiFi
+scan at all. Not a brief collision window as the lock's original comment
+assumed -- a near-total, open-ended block.
+
+Worth noting: this lock was originally added to guard against a suspected
+WiFi/BT simultaneous-radio-use crash, but CLAUDE.md's own seventh/eighth
+hardware-bug writeup already established that diagnosis was wrong (it was
+internal-heap exhaustion, independently fixed by `radioHeapOk()`) -- so the
+lock's blunt "whoever's active wins, for their whole session" design was
+never actually validated as necessary in the first place, and was
+silently breaking TimeSync by design.
+
+**Fixed**: `BluetoothSource::begin()` now releases the lock immediately
+after the actual radio-touching call (`a2dpSource.start()`) returns,
+instead of holding it until `end()` -- same brief-hold pattern TimeSync
+itself already uses (one scan+connect+NTP cycle, not "for as long as
+WiFi might ever be wanted"). `end()` no longer calls `RadioLock::release()`
+(it wasn't holding the lock that far anymore; releasing there risked
+clearing `RadioLock::busy` out from under a TimeSync cycle that happened
+to be running at that exact moment).
+
+**Honest residual gap, not fully closed**: `ESP32-A2DP`'s `start()` is
+asynchronous (kicks off scanning/pairing on its own BT task and returns
+quickly), so the lock window here doesn't cover BT's whole multi-second
+connection handshake, only the initial call -- a TimeSync scan could still
+start a few seconds into that handshake. Given the original "simultaneous
+radio use crashes" theory was never actually confirmed to be the real
+cause of anything, this is judged an acceptable tradeoff for now rather
+than a provably safe one. If a real WiFi/BT collision crash surfaces
+again, this is the first place to revisit (probably by polling for a
+stable `is_connected()` before releasing, instead of releasing right after
+`start()`).
+
+**Other possible contributing causes, not ruled out, worth checking if
+this alone doesn't fix it**: (1) the ESP32's WiFi radio is 2.4GHz-only --
+if the user's phone hotspot is set to 5GHz or "5GHz preferred", the device
+can't see it in a scan at all, a common real-world phone default; (2)
+`TimeSync.cpp`'s known-network match (`ssid == cred.ssid`) is an exact,
+case-sensitive `String` comparison -- a typo or case mismatch between
+`/clickpod_wifi.txt` and the hotspot's actual broadcast name silently
+falls through to the open-network fallback (which a WPA2 hotspot will
+never match either), with no specific "credential didn't match anything
+in range" log line to point at it directly. Next real step either way:
+get the actual boot-time serial log's `[time] ...` lines (credential
+count loaded, scan result count, which SSID if any got chosen) rather than
+guessing further blind -- this session fixed the one confirmed, provably-
+real blocker (the lock) but hasn't seen a fresh log to confirm it was the
+only one.
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time
