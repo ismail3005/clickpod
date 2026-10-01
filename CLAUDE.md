@@ -1544,54 +1544,62 @@ look at what's different about the live-playback case specifically (the
 decoder is actively mid-decode when the seek lands, vs. idle when paused)
 once the two fixes above are confirmed on hardware.
 
-## Seventeenth real hardware bug (found, fixed): seeking/switching tracks while actively playing glitches -- fixed by bracketing with an invisible pause/resume
+## Seventeenth real hardware bug/decision (reverted + replaced): seeking while playing should NOT pause, even briefly -- fixed the decoder instead, and fixed perceived skip latency separately
 
-User confirmed the fourteenth bug's debounce genuinely fixed scrubbing
-WHILE PAUSED (pause, scrub through the whole track, unpause -- "goes
-through the whole thing" cleanly). But the identical scrub gesture is
-still glitchy while the track is actively playing, and separately, LEFT
-("go back a song," which does a full `setNowPlaying()`/`playSomething()`
-track switch, not a seek) is "kinda glitchy if its still playing, same as
-the scrubbing actually." That pairing is the real signal: the common
-factor isn't scrub-specific at all, it's touching the decoder (a seek OR
-a fresh `connecttoFS()`) while it's actively mid-decode of something else,
-as opposed to idle/paused.
+First attempt at this round's "scrub/skip glitchy while playing" report
+(see below for the original signal that led here) was to bracket
+`AudioBridge::seekTo()`/`playSomething()` with an invisible internal
+pause/resume around the real decoder call. **User explicitly rejected
+this**: "no i dont want my music to pause while scrubbing... i want to be
+able to scrub while its playing and then land on the bit i want and have
+it go there" -- any audible interruption during the one real commit, even
+brief, defeats the point. **Reverted** -- `seekTo()`/`playSomething()` are
+back to calling the decoder directly, no bracket.
 
-User's own suggestion, which is exactly right and is what real music
-players do: during a scrub gesture, only the ON-SCREEN position should
-move; the real backend relocation should fire exactly once, only once the
-user is actually done moving -- "one request, one movement, less
-fuckups." The debounce-then-commit design from the fourteenth bug already
-does this part (one real seek per scrub session, not per tick) -- so the
-remaining gap wasn't commit frequency, it was that even that ONE commit
-glitches if it lands while the decoder is live.
+The actual right fix for the underlying hazard (seeking/switching tracks
+while the decoder is actively live was genuinely unsafe on this library)
+is the CRC-8 frame-header verification already shipped on the fork for
+BOTH the seek-path (`flac_correctResumeFilePos()`, fourteenth bug) and
+the mid-stream resync path (`FLACFindSyncWord()`, sixteenth bug) -- that
+fixes the decoder's own resync robustness so it's safe to touch live,
+rather than avoiding ever touching it live. This is the right place for
+this fix to live; the pause-bracket was treating a decoder bug as a UI
+workaround. Still not hardware-confirmed at the time of this entry (see
+those two writeups).
 
-**Fixed** (`src/audio/AudioBridge.cpp`): both `seekTo()` and
-`playSomething()` now bracket the real decoder-touching call with an
-invisible internal pause/resume whenever `audioPtr->isRunning()` is true
-at that moment -- i.e. every real seek or track switch now automatically
-reproduces the user's own proven-working "pause, [relocate], unpause"
-sequence, instead of relying on the user to pause by hand first.
-`state.now.playing` (the UI's own logical flag) is never touched by this
--- purely an internal bracket around the library call, invisible on
-screen. For `seekTo()`, both the pause and the resume toggle are needed
-(same stream continues). For `playSomething()`, only the pre-pause is
-needed -- confirmed by reading the real library source
-(`Audio::connecttoFS()`, via `initializeDecoder()`) that a successful
-connect unconditionally sets the decoder back to running regardless of
-whatever pause state it was in before, so the new stream starts playing
-on its own; an explicit post-resume there would be at best redundant and
-at worst fight the new stream's own state.
+**Separately, real fix for "LEFT/RIGHT skip feels slow"** -- user
+clarified this one is NOT glitchy, just laggy ("button delay again").
+Root cause in `MenuEngine.cpp`'s `setNowPlaying()`: `state.dirty` was
+only ever set ONCE, at the very end of the function, AFTER the slower
+deferred work (`FlacMeta::readTags()` -- a real SD read -- and
+`AlbumArt::loadForTrack()` -- a JPEG decode). Audio itself starts early
+(the twelfth hardware bug already fixed THAT latency), but the screen
+sat on the OLD track the whole time that deferred work ran, since nothing
+ever told it to redraw sooner -- and the screen, not audio start time, is
+a user's main cue for "did my button press register," so this read as
+sluggish regardless of how fast playback itself actually started.
 
-`AudioBridge::pauseResume()` (and the real `Audio::pauseResume()` it
-wraps) is a toggle, not separate pause()/resume() calls -- both brackets
-guard with `audioPtr->isRunning()` first so this never fires on an
-already-paused stream (which would incorrectly start it playing).
+Just moving `state.dirty = true` earlier in the function wasn't enough on
+its own and would be worth remembering as a near-miss: `setNowPlaying()`
+runs entirely synchronously inside one `UI::update()` call (`InputRouter::
+update()` -> ... -> `setNowPlaying()`), and `Screens::render()` is only
+invoked once, at the very END of that same `UI::update()` call -- so
+setting the flag earlier doesn't matter if the deferred work still runs
+before the one `render()` call that would act on it. Fixed by explicitly
+calling `Screens::render()` right after the flag is set (immediately
+after kicking off `AudioBridge::playSomething()`, with the provisional
+filename-derived title already in `state.now.*`), forcing the screen to
+actually flip to the new track before the deferred tag/art work runs,
+not just scheduling it to. `state.dirty` still gets set again at the
+original spot at the end of the function, picking up real tags/art in a
+second, cheap render pass shortly after -- same "provisional now, real
+value a beat later" pattern this codebase already uses elsewhere, just
+now with two real redraws instead of one silently-delayed one.
 
-**Not yet hardware-confirmed** -- same caveat as the two previous
-sessions' fork changes, no PlatformIO in this sandbox. Next real step:
-flash, then specifically try scrubbing DURING active playback (not just
-paused) and LEFT-while-playing, the two cases reported glitchy here.
+**Not yet hardware-confirmed**, same caveat as every change this round.
+Next real step: flash, confirm scrubbing stays audibly uninterrupted
+while playing, and that LEFT/RIGHT now visually responds immediately
+even before the real tags/art catch up a moment later.
 
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 

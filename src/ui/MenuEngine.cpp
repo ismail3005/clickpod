@@ -205,6 +205,27 @@ void setNowPlaying(Track t) {
         AudioBridge::playSomething(t.path); // real audio starts here, right after the one necessary SD read
     }
 
+    // Flip the screen to the new track NOW, with the filename-derived
+    // title already set above -- not after the slower deferred tag/art
+    // work below. Just setting state.dirty here isn't enough on its own:
+    // this whole function runs synchronously inside one UI::update() call
+    // (InputRouter::update() -> ... -> setNowPlaying()), and Screens::
+    // render() is only called once, at the END of that same UI::update()
+    // -- so without an explicit render() call here, the deferred tag/art
+    // work below (a real SD read + JPEG decode) still fully blocks the
+    // frame before the screen ever gets a chance to show the flag was
+    // set, same as before this fix. Previously state.dirty was only ever
+    // set once, at the very end of this function, so the screen sat on
+    // the OLD track for however long that deferred work took, even though
+    // audio had already started -- the dominant cue a user has for "did
+    // my button press register" is the screen, not audio latency, so this
+    // read as sluggish regardless of how fast playback itself actually
+    // started. Flagged by the user as "just slow, button delay" on LEFT/
+    // RIGHT skip. state.dirty gets set again below once real tags/art
+    // arrive, to pick up any changes in a second, cheap render() call.
+    state.dirty = true;
+    Screens::render();
+
     // Everything past this point is slower, deferred work -- real
     // artist/title/album tags, lyrics, embedded cover art. Runs after
     // playback has already been kicked off above (still runs for a
