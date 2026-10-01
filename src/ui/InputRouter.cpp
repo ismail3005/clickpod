@@ -12,6 +12,21 @@ constexpr uint32_t kFastScrollRepeatMs = 120; // matches the simulator's FAST_SC
 AnoButton repeatButton = AnoButton::COUNT; // COUNT = "no button currently fast-scrolling"
 uint32_t repeatLastMs = 0;
 
+// Scrubbing (rotate() in NOW_PLAYING mode) was calling AudioBridge::seekTo()
+// -- a REAL decoder seek -- on every single encoder detent, so a fast spin
+// fired dozens of real seeks per second, each one plausibly stalling/
+// glitching the decoder (exactly the "laggy and glitchy" scrubbing the
+// user reported). Throttled to at most one real seek per
+// kScrubSeekThrottleMs -- the on-screen position still updates every tick
+// (cheap, no reason to throttle that), only the expensive real seek is
+// rate-limited. Tradeoff: if the user stops rotating in the middle of a
+// throttle window, the real decoder position can lag the displayed
+// position by up to kScrubSeekThrottleMs -- acceptable for a scrub
+// preview (not noticeable at this timescale), not worth a catch-up
+// mechanism's added complexity for it.
+constexpr uint32_t kScrubSeekThrottleMs = 150;
+uint32_t lastScrubSeekMs = 0;
+
 void startHoldRepeat(AnoButton b, int dir) {
     repeatButton = b;
     repeatLastMs = millis();
@@ -44,8 +59,20 @@ void rotate(int dir) {
         // Actually seeks the real decoder (confirmed against ESP32-
         // audioI2S 3.0.12's real header, not guessed) -- without this,
         // only the on-screen position moved, the audio itself didn't.
-        if (state.now.path.length() > 0) AudioBridge::seekTo((uint16_t)state.now.posSec);
-        state.dirty = true;
+        // Throttled (see kScrubSeekThrottleMs above) -- a fast spin should
+        // not fire a real decoder seek on every single detent.
+        if (state.now.path.length() > 0) {
+            uint32_t now = millis();
+            if (now - lastScrubSeekMs >= kScrubSeekThrottleMs) {
+                AudioBridge::seekTo((uint16_t)state.now.posSec);
+                lastScrubSeekMs = now;
+            }
+        }
+        // progressDirty (light redraw: just the position/time strip), not
+        // the full state.dirty -- scrubbing only changes the displayed
+        // position, nothing else on this screen, so there's no reason to
+        // pay for a full-body fillRect+text redraw on every single tick.
+        state.progressDirty = true;
     } else if (state.mode == AppMode::QUEUE) {
         MenuEngine::moveQueueSelection(dir > 0 ? 1 : -1);
     }
