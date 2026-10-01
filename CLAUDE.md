@@ -125,11 +125,14 @@ src/ui/AlbumArt.*        decodes embedded FLAC cover art (via FlacMeta + TJpg_De
 src/ui/Screens.*         TFT_eSPI rendering for every screen
 src/ui/UI.*              boot sequence, playback clock, redraw dispatch
 src/ui/Util.*            shared fmtTime(), hasAudioExtension()
-scripts/patch_audioI2S.py  build-time patch for ESP32-audioI2S's FLAC maxFrameSize
-                         limitation, wired in via platformio.ini's extra_scripts --
-                         see the "real options for the two FLAC decode limitations"
-                         section below for the full writeup
 ```
+
+ESP32-audioI2S's FLAC maxFrameSize fix no longer lives in this repo at
+all -- it's a real commit on the user's own fork
+(`github.com/ismail3005/esp32-audioi2s`, `clickpod-3.0.12-flac-patch`
+branch), pinned by commit SHA in `platformio.ini`'s `lib_deps`. See the
+"real options for the two FLAC decode limitations" section below for the
+full writeup of how this evolved from a build-time patch script to this.
 
 ## Real library scanning (Library::scanFromSd())
 
@@ -1157,8 +1160,9 @@ ascending:
    reasons to a plain text file on the card (e.g. `/clickpod_failed.txt`),
    so the user can just open that file to get an exact list of what
    needs re-encoding. Low effort, low risk, doesn't touch playback itself.
-3. **DONE (build-time patch, not a fork) -- `ESP32-audioI2S`'s FLAC frame
-   buffer size.** Investigated by actually cloning the real pinned 3.0.12
+3. **DONE, and CONFIRMED on real hardware -- `ESP32-audioI2S`'s FLAC frame
+   buffer size, now a real fork commit, not a build-time patch script.**
+   Investigated by actually cloning the real pinned 3.0.12
    tag and reading `Audio.cpp`'s FLAC decode path directly (not the public
    header this project usually checks against -- this needed the real
    implementation). Confirmed: `read_FLAC_Header()` reads the file's real
@@ -1179,37 +1183,42 @@ ascending:
    not a hard memory ceiling, so growing it to fit one specific file's
    real (and type-bounded, so inherently safe) frame size is safe.
 
-   Couldn't fork the library under the user's GitHub account to apply this
-   properly (session's GitHub access is scoped to `ismail3005/clickpod`
-   only; both `mcp__github__fork_repository` and `add_repo` with push
-   access to the external repo were refused -- forking/widening repo
-   access needs the user's own explicit action, not something to grant
-   from inside a coding session). Vendoring the whole ~10K-line library
-   into this repo to change a few lines was also ruled out -- that means
-   hand-maintaining a permanent fork instead of tracking the clean
-   upstream tag.
+   **Originally** couldn't fork the library under the user's GitHub
+   account from inside a session (session's GitHub access was scoped to
+   `ismail3005/clickpod` only; both `mcp__github__fork_repository` and
+   `add_repo` with push access to the external repo were refused --
+   widening repo access needs the user's own explicit action). Shipped a
+   **build-time patch script** instead first (`scripts/patch_audioI2S.py`,
+   `platformio.ini`'s `extra_scripts` hook, string-replacing the
+   downloaded library's `Audio.cpp` before every compile) as a stopgap --
+   confirmed on the next real flash to actually work (every previously-
+   failing `maxFrameSize too large!` file now plays), proving the patch
+   itself was correct even though the delivery mechanism was clunky.
 
-   Went with a **build-time patch script** instead --
-   `scripts/patch_audioI2S.py`, wired in via `platformio.ini`'s new
-   `extra_scripts = pre:scripts/patch_audioI2S.py`. Runs before every
-   compile: finds the downloaded library's `Audio.cpp` under
-   `$PROJECT_LIBDEPS_DIR`, and if the original (exact-string-matched, not
-   guessed) too-large check is present and unpatched, replaces it with a
-   version that calls `InBuff.changeMaxBlockSize(m_flacMaxFrameSize)` to
-   grow the buffer to fit instead of refusing the file -- only when
-   `m_flacMaxFrameSize` is nonzero and the unpatched fallback (refuse +
-   log, same as before) still applies otherwise. Idempotent (a marker
-   comment makes a second run a safe no-op) and fails safe if the
-   library's source ever doesn't match what's expected (logs a warning,
-   leaves the file untouched, rather than corrupting it blind). The exact
-   find-and-replace was tested against a real clone of the pinned 3.0.12
-   tag in this sandbox (confirmed the original text matches byte-for-byte
-   and the patched result is syntactically valid), but the actual BUILD
-   (does PlatformIO's `extra_scripts` hook fire as expected, does the
-   patched code compile and behave correctly on real hardware) is **NOT
-   verified** -- no `pio run` available here, same standing caveat as
-   everything else in this project done this way. First real build after
-   this is what confirms it.
+   **Now superseded**: the user forked `schreibfaul1/ESP32-audioI2S`
+   themselves on GitHub (`github.com/ismail3005/esp32-audioi2s`, note
+   GitHub's own redirect shows it canonically as
+   `ismail3005/ESP32-audioI2S`), handed over the URL, and the same patch
+   is now a real, permanent commit on a `clickpod-3.0.12-flac-patch`
+   branch there, applied directly against the real pinned `3.0.12` tag
+   (fetched from the real upstream, not the fork -- the fork's own clone
+   didn't carry upstream's tags over, confirmed via `git ls-remote
+   --tags origin` coming back empty; `git fetch upstream tag 3.0.12`
+   pulled it in directly from `schreibfaul1/ESP32-audioI2S` instead).
+   `platformio.ini`'s `lib_deps` now points at
+   `https://github.com/ismail3005/esp32-audioi2s.git#ba0fa5a0d28538ebc9cf331043564c3496579878`
+   -- pinned to that exact **commit SHA**, not a git tag: this session's
+   push credentials could push the branch fine but hit a bare `HTTP 403`
+   specifically on `git push origin <tag>` (tried both lightweight-tag-
+   then-push and re-pushing against both the original and GitHub's
+   redirected canonical-case repo URL, same 403 both times -- looks like
+   a permission scope gap for tag refs specifically, not a transient
+   error). A commit SHA pins exactly as hard as a tag would for
+   `lib_deps`' purposes, so this wasn't worth chasing further.
+   `scripts/patch_audioI2S.py` and the `extra_scripts` line are both
+   **removed** -- no longer needed now that the same change lives as a
+   real commit in a real dependency instead of being re-applied by a
+   build script every time.
 
    Does NOT help the 24-bit-samples limitation -- separate, intentional
    hard requirement in the same library (`bps != 8 && bps != 16`), not a
@@ -1241,6 +1250,34 @@ regardless, to make finding which files are 24-bit easy. 4/5 stay
 lowest-priority, only relevant if 24-bit support itself is ever wanted
 without re-encoding.
 
+## Twelfth real hardware bug (found, fixed): track-start latency -- audio sat behind a JPEG decode
+
+User reported pressing CENTER/RIGHT to start a track felt slow -- view
+switched quickly but sound took "a sec" to actually begin. Root cause in
+`MenuEngine.cpp`'s `setNowPlaying()`: it ran THREE blocking SD/SPI
+operations -- `FlacMeta::readStreamInfo()`, `FlacMeta::readTags()`, and
+`AlbumArt::loadForTrack()` (which includes a JPEG decode of the embedded
+cover art) -- all before ever calling `AudioBridge::playSomething()`.
+`AudioBridge::playSomething()` only needs the file path (see
+`AudioBridge.h`), nothing from tags or art, so there was no real reason
+for that ordering -- the actual decoder start was sitting behind however
+long the slowest of those three (almost certainly the JPEG decode) took.
+
+**Fixed** by reordering: only the cheap STREAMINFO read still happens
+first (needed for duration + the existing 24-bit-skip check --
+`knownUnsupported`, see the tenth hardware bug above), `
+AudioBridge::playSomething()` is now called immediately after that,
+and the slower tags/lyrics/art work moved to AFTER playback has already
+been kicked off -- `state.now.artist`/`title`/`album` get a provisional
+filename-derived value immediately (fast first redraw, sound starts),
+then get overwritten with the real tag values a beat later once
+`readTags()`/`AlbumArt::loadForTrack()` finish, with a `state.dirty =
+true` at the end of the function to pick up that second update. Net
+effect: sound starts right after the cheap duration read instead of
+after a JPEG decode; the screen's tag/art details just arrive very
+slightly later than before, which is the right tradeoff (cosmetic delay,
+not an audio-start delay).
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time
@@ -1268,22 +1305,18 @@ re-derive it from scratch or lose pieces. Rough priority order, per the
 user's own framing ("fix current bugs first, test-tone/real-BT-audio
 last"):
 
-1. **Verify the FLAC maxFrameSize patch actually works.** First real
-   flash since `scripts/patch_audioI2S.py` landed (see "Open question...
-   FLAC decode limitations" section above, option 3) -- confirm the
-   `extra_scripts` hook fires (`[clickpod patch] ... applied` in the
-   build log) and that a file which previously hit `maxFrameSize too
-   large` (e.g. the TOOL/Lateralus one) now plays instead of skipping.
-2. **Convert the build-time patch into a real fork.** User finds the
-   build-script approach "clunky and slow" (their words) and wants
-   something more proper -- the plan from earlier: user forks
-   `schreibfaul1/ESP32-audioI2S` on GitHub themselves (this session
-   couldn't get write access to do it from here -- see the "Open
-   question" section's writeup), hands over the fork URL, then the same
-   patch gets committed directly into the fork and `platformio.ini`'s
-   `lib_deps` points at it (pinned to a specific commit/tag on the fork,
-   not its default branch) instead of running `scripts/patch_audioI2S.py`
-   at all -- that script gets removed once this lands.
+1. **DONE, confirmed on real hardware.** Verified the FLAC maxFrameSize
+   patch actually works -- the build-time patch script applied, and
+   previously-failing files (the known maxFrameSize-too-large ones) now
+   play instead of being skipped. User confirmed: "faulty songs play
+   now."
+2. **DONE.** Converted the build-time patch into a real fork -- user
+   forked `schreibfaul1/ESP32-audioI2S` to
+   `github.com/ismail3005/esp32-audioi2s`, the same patch is now a real
+   commit there (`clickpod-3.0.12-flac-patch` branch), `platformio.ini`'s
+   `lib_deps` points at it pinned by commit SHA, and
+   `scripts/patch_audioI2S.py` is deleted. Full writeup in the "real
+   options for the two FLAC decode limitations" section above (option 3).
 3. ~~Real 24-bit FLAC decode support~~ -- **DECIDED AGAINST, not doing
    this.** Was briefly on the plan as the (explicitly flagged highest-
    risk) option #4, but the user reconsidered and is re-encoding their
@@ -1339,24 +1372,66 @@ last"):
    skipping tracks or changing volume. The screen-dimming half needs the
    backlight rewiring below done first; the "keep playing + lock input +
    show clock" half is pure software, no hardware dependency.
-   **Backlight hardware**: BL pin is currently hardwired to 3.3V (always
-   full brightness, see the hardware-gotchas entry above). User confirmed
-   it's a Waveshare ILI9341 module -- matches a known Waveshare board
-   design (onboard transistor, commonly labeled Q1, dedicated to
-   backlight switching -- confirmed via a real Bodmer/TFT_eSPI GitHub
-   discussion about this exact board family, not just general ILI9341
-   knowledge) -- the physical transistor the user found near the BL pin
-   (described as a standard 3-pad package, one fat pad + two smaller
-   forked pads) is very likely this same switching transistor. Good
-   news: this means the BL header pin is probably already a logic-level
-   control input (through a base resistor into that transistor), not the
-   raw LED current line -- PWM dimming from a GPIO should be safe once
-   rewired, likely without needing an extra MOSFET. Not 100% confirmed
-   against this specific board's actual schematic, just a strong match.
-   Still need: a free PWM-capable GPIO (budget is tight -- see the
-   hardware-gotchas entry; GPIO0 is the live candidate, needs boot-strap-
-   safety care) -- user is open to GPIO0, hasn't fully committed yet,
-   worth confirming at the start of whichever session tackles this.
+   **Backlight hardware, UPDATED this round**: BL pin is currently
+   hardwired to 3.3V (always full brightness, see the hardware-gotchas
+   entry above). Module is a Waveshare ILI9341 (confirmed SKU/batch
+   `260523WS18366`, Waveshare's 2.4inch LCD Display Module) -- matches a
+   known Waveshare board design with an onboard switching transistor
+   dedicated to the backlight.
+
+   **Tried the controller-brightness route first, confirmed it does
+   NOT work on this board.** `Screens::applyBrightness()` sends the
+   ILI9341's own `WRDISBV`/`WRCTRLD` (`0x51`/`0x53`) brightness commands
+   over the already-wired SPI bus -- no new wiring, applied at boot and
+   live from the Settings brightness slider, specifically so this could
+   be tested for free before committing to any GPIO work. User confirmed
+   on real hardware: no effect. This conclusively proves (not just
+   infers) that this module's backlight bypasses the controller's
+   internal PWM driver and goes straight to the external transistor off
+   the BL pin, as suspected -- real GPIO wiring is required, there's no
+   software-only path. `applyBrightness()` is left in place (harmless,
+   literally a no-op on this hardware) rather than ripped out, in case a
+   future board swap ever uses a module that *does* route brightness
+   through the controller.
+
+   Also resolved what the user remembered as "it used to dim when I held
+   CENTER" -- traced to `Screens.cpp`'s `drawOff()` (triggered by exactly
+   a CENTER long-press via `togglePower()`): `fillScreen(TFT_BLACK)` plus
+   dark-gray (`0x4208`) "hold CENTER to power on" text. An all-black
+   image transmits dramatically less light through an LCD than the
+   colorful UI even with the backlight itself never changing power --
+   this fully explains both specific memories (the "dimming" and the
+   "dim text"), confirmed by the user. Not a bug, not hidden brightness
+   control -- just how LCD contrast reads to the eye.
+
+   **GPIO decision**: GPIO0, directly, no external pull-up resistor.
+   Originally considered moving a user-facing button (e.g. LEFT) onto
+   GPIO0 to free up its regular GPIO for the backlight instead -- user
+   correctly rejected this as bad practice: a button is something the
+   user actively presses during normal handling (reaching into a bag,
+   fumbling for the power switch -- precisely the scenario AOD mode
+   exists to protect against), so putting ANY user-facing input on a
+   boot-strapping pin creates a real, repeatable "hold this button at
+   the wrong instant -> boot fails" failure mode, unlike a static
+   hardware fact. A pull-up resistor from GPIO0 to 3.3V was also
+   considered (belt-and-suspenders guarantee regardless of the backlight
+   circuit's own idle bias) but the user wants this "as safe as
+   possible, no pullup" -- which is still legitimate, not reckless: the
+   ESP32 boot ROM enables its own weak INTERNAL pull-up on GPIO0 during
+   the strapping-sample window at reset (this is literally why stock dev
+   boards' BOOT buttons work with zero external pull-up wired), so
+   skipping the external resistor relies on that internal pull-up alone
+   dominating whatever the backlight transistor's bias network presents.
+   Real-hardware test plan (not yet run, the actionable next step):
+   wire BL straight to GPIO0, no resistor, flash, and the board booting
+   cleanly into the normal splash screen IS the confirmation -- a
+   competing pull-down in that circuit would show up immediately as a
+   download-mode/boot failure, not something subtle. If that happens,
+   fall back to the pull-up-resistor plan discussed (and rejected for
+   now) above, not to moving a button.
+   `Screens::applyBrightness()` will be converted from the (confirmed
+   no-op) SPI commands to a real LEDC PWM channel on `PIN_TFT_BL` once
+   the pin is wired and boot-tested.
 8. **Real Bluetooth audio** (routing `ESP32-audioI2S`'s decoded PCM into
    the A2DP source callback instead of the test tone) -- explicitly
    deprioritized by the user, do this LAST, after everything above.
