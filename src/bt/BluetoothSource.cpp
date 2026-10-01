@@ -3,10 +3,82 @@
 #include <BluetoothA2DPSource.h>
 #include <math.h>
 #include <cstring>
+#include <nvs.h>
 
 #include "../net/RadioLock.h"
 
 namespace {
+
+// --- Bonded-address shadow, working around a real ESP32-A2DP library bug ---
+//
+// Confirmed by reading the real library source (BluetoothA2DPCommon.cpp):
+// end() unconditionally calls clean_last_connection(), which stores an
+// ALL-ZERO address into both its in-RAM last_connection member and its own
+// NVS blob (namespace "connected_bda", key "src_bda" for Source mode) --
+// every single time Bluetooth is stopped, even if it had just bonded
+// successfully moments earlier. The next start()'s internal
+// get_last_connection() then finds a validly-stored-but-zero address (NOT
+// "no address" -- nvs_get_blob succeeds, it just reads back zeros), so it
+// silently falls through to a fresh discovery scan instead of reconnecting
+// by address -- this is the real, confirmed reason a device that paired
+// fine still needs pairing mode again on every subsequent "Bluetooth On".
+// (set_last_connection()/get_last_connection()/has_last_connection()/
+// last_bda_nvs_name() are all `protected`, can't be called from here --
+// but get_last_peer_address() is public and readable, and the library's
+// NVS namespace/key names are stable implementation details read directly
+// from source, not guessed.)
+//
+// Fix: snapshot the real address ourselves (our own NVS slot, so it
+// survives a reboot too) right before every end(), then re-seed the
+// LIBRARY's own NVS blob with it right before the next begin() that wants
+// auto-reconnect -- so by the time start()'s internal get_last_connection()
+// runs, it finds a real address again instead of the zero one end() just
+// wrote.
+constexpr char kShadowNvsNamespace[] = "cpod_bt";
+constexpr char kShadowNvsKey[] = "last_bda";
+constexpr char kLibraryNvsNamespace[] = "connected_bda";
+constexpr char kLibraryNvsKey[] = "src_bda"; // BluetoothA2DPSource::last_bda_nvs_name()
+
+uint8_t shadowBda[6] = {0};
+bool shadowLoaded = false; // lazy-loaded from our own NVS once per boot
+
+bool isZeroBda(const uint8_t *bda) {
+    for (int i = 0; i < 6; i++) {
+        if (bda[i] != 0) return false;
+    }
+    return true;
+}
+
+void loadShadowOnce() {
+    if (shadowLoaded) return;
+    shadowLoaded = true;
+    nvs_handle_t h;
+    if (nvs_open(kShadowNvsNamespace, NVS_READONLY, &h) != ESP_OK) return; // never saved yet
+    size_t len = sizeof(shadowBda);
+    nvs_get_blob(h, kShadowNvsKey, shadowBda, &len);
+    nvs_close(h);
+}
+
+void saveShadow(const uint8_t *bda) {
+    memcpy(shadowBda, bda, sizeof(shadowBda));
+    shadowLoaded = true;
+    nvs_handle_t h;
+    if (nvs_open(kShadowNvsNamespace, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_blob(h, kShadowNvsKey, shadowBda, sizeof(shadowBda));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+// Writes directly into the LIBRARY's own NVS blob -- the same one
+// clean_last_connection() just zeroed -- so its next get_last_connection()
+// (called from inside start()) finds our restored real address instead.
+void reseedLibraryNvs(const uint8_t *bda) {
+    nvs_handle_t h;
+    if (nvs_open(kLibraryNvsNamespace, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_blob(h, kLibraryNvsKey, bda, 6);
+    nvs_commit(h);
+    nvs_close(h);
+}
 
 BluetoothA2DPSource a2dpSource;
 bool running = false;
@@ -88,6 +160,20 @@ void BluetoothSource::begin(const char *targetDeviceName, bool allowAutoReconnec
         return;
     }
 
+    // Re-seed the library's own "last connection" NVS blob with our shadow
+    // copy BEFORE start() -- see the shadow-save block above. end() always
+    // zeroes the library's real copy, so without this every begin() after
+    // the first would find nothing to reconnect to and fall back to a
+    // fresh discovery scan (pairing mode required) even for an
+    // already-bonded device. Skipped for an explicit device pick
+    // (allowAutoReconnect=false) -- that path wants a real scan by name.
+    if (allowAutoReconnect) {
+        loadShadowOnce();
+        if (!isZeroBda(shadowBda)) {
+            reseedLibraryNvs(shadowBda);
+        }
+    }
+
     Serial.printf("[bt] Starting Bluetooth A2DP source... (free heap: %u bytes)\n", ESP.getFreeHeap());
     a2dpSource.set_data_callback(provideTestTone);
     a2dpSource.set_ssid_callback(nullptr); // ensure a prior discovery scan's callback isn't still armed
@@ -104,6 +190,14 @@ void BluetoothSource::begin(const char *targetDeviceName, bool allowAutoReconnec
 
 void BluetoothSource::end() {
     if (!running) return;
+    // Snapshot the real bonded address BEFORE calling the library's end(),
+    // which (confirmed from source, see the shadow-save block above)
+    // unconditionally wipes its own copy to all-zero -- this is the only
+    // chance to save it before that happens.
+    const uint8_t *liveBda = reinterpret_cast<const uint8_t *>(a2dpSource.get_last_peer_address());
+    if (liveBda && !isZeroBda(liveBda)) {
+        saveShadow(liveBda);
+    }
     a2dpSource.end();
     running = false;
     // No RadioLock::release() here -- begin() no longer holds the lock

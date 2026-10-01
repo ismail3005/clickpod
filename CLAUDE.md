@@ -1890,6 +1890,80 @@ log excerpt (it started mid-session, not from a fresh boot), so this
 still isn't actually confirmed either way. Next real step: get those
 specific lines from a fresh power-on, not guess further.
 
+**UPDATE -- resolved, not a firmware bug.** A fresh full boot log showed
+the eighteenth bug's new diagnostics clearly: `[time] /clickpod_wifi.txt:
+0 bytes` and `0 raw line(s) read`. Turned out to be a real-world editing
+mistake, not a parsing bug: the user had typed the credentials into
+Notepad but never saved (no Ctrl+S) before ejecting the SD card -- the
+file on disk was genuinely 0 bytes, but reopening it in Notepad
+afterward silently restored the unsaved buffer from Notepad's own
+autosave/session-recovery, making it look full when checked on the
+computer. The diagnostics did their job (pinpointed "file is empty",
+exactly per the eighteenth bug's reasoning) -- nothing to fix in
+`TimeSync.cpp`.
+
+## Twenty-first real hardware bug (found, real root cause confirmed by reading library source, fix shipped as an app-level workaround): Bluetooth reconnect always needed pairing mode again, even right after a successful connect
+
+Same full boot log above also captured a complete BT off/on/off/on cycle
+with no device-picker involved (plain status-row toggles), and it
+conclusively answered the diagnostic question from the twentieth bug's
+writeup: the log did NOT show `"Reconnecting to %s"` on the second
+"Bluetooth On" -- it also never showed `"No last connection found,
+disabling auto reconnect"` either, which was the real clue.
+
+Traced the exact mechanism by cloning the real `ESP32-A2DP` library
+source (not guessed) and reading `BluetoothA2DPCommon.cpp`/
+`BluetoothA2DPSource.cpp` directly:
+
+- `BluetoothA2DPCommon::end()` unconditionally calls
+  `clean_last_connection()` (`end()`'s very first real action, before
+  even disconnecting) -- which calls `set_last_connection()` with an
+  all-zero address. This overwrites BOTH the in-RAM `last_connection`
+  member AND the library's own NVS blob (namespace `"connected_bda"`, key
+  `"src_bda"` for Source mode, confirmed directly from
+  `write_address()`'s real `nvs_open()`/`nvs_set_blob()` calls) --
+  **every single time Bluetooth is stopped**, even if it had just bonded
+  successfully moments earlier. This is a genuine library bug/design
+  flaw: stopping a session and permanently forgetting the bonded device
+  are conflated into one call.
+- The reason the SECOND "Bluetooth On" showed neither log line: by then
+  the NVS blob exists (created by the first successful write) and
+  contains a validly-stored but **all-zero** address. `start()`'s
+  `get_last_connection()` -> `read_address()` -> `nvs_get_blob()`
+  succeeds (it's a real, present blob, just zeros), so `start()` never
+  logs "no last connection" -- but 10 seconds later, `av_hdl_stack_evt()`
+  checks `has_last_connection()` against the now-zeroed in-RAM value,
+  which is false, so it silently falls through to a fresh discovery scan
+  (`"Starting device discovery..."`) requiring pairing mode -- exactly
+  matching the observed log, mechanism fully confirmed start to finish.
+
+**Fix, app-level, no fork needed this time** (`src/bt/BluetoothSource.cpp`):
+`set_last_connection()`/`get_last_connection()`/`has_last_connection()`/
+`last_bda_nvs_name()` are all `protected` in the library -- can't be
+called from application code -- but `get_last_peer_address()` (returns
+the live `esp_bd_addr_t*`) is public, and the library's own NVS
+namespace/key names are stable implementation details now confirmed from
+source. `BluetoothSource::end()` now reads the real bonded address via
+`get_last_peer_address()` and saves it to our OWN NVS slot
+(`"cpod_bt"`/`"last_bda"`, survives a reboot too) BEFORE calling the
+library's `end()` (which immediately zeroes its own copy, as above).
+`BluetoothSource::begin()`, when `allowAutoReconnect` is true (skipped
+for the explicit device-picker path, which wants a genuine fresh scan),
+re-seeds the LIBRARY's own NVS blob (`"connected_bda"`/`"src_bda"`)
+directly with that saved address right before calling `start()` -- so by
+the time the library's internal `get_last_connection()` runs, it finds a
+real address again instead of the zero one `end()` just wrote, and the
+10-second-later `av_hdl_stack_evt()` check correctly takes the
+`"Reconnecting to %s"` direct-address path instead of discovery.
+
+**Not yet hardware-confirmed** -- same caveat as every change this
+session, no PlatformIO in this sandbox to compile against. Next real
+step: flash, do a plain Bluetooth-off-then-on cycle (no device picker)
+on an already-bonded device, and check the log specifically for
+`"Reconnecting to %s"` on the second "on" instead of
+`"Starting device discovery..."` -- that's the one line that confirms
+this actually worked, not just compiled.
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time
