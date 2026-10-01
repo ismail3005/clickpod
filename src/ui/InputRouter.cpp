@@ -12,20 +12,33 @@ constexpr uint32_t kFastScrollRepeatMs = 120; // matches the simulator's FAST_SC
 AnoButton repeatButton = AnoButton::COUNT; // COUNT = "no button currently fast-scrolling"
 uint32_t repeatLastMs = 0;
 
-// Scrubbing (rotate() in NOW_PLAYING mode) was calling AudioBridge::seekTo()
-// -- a REAL decoder seek -- on every single encoder detent, so a fast spin
-// fired dozens of real seeks per second, each one plausibly stalling/
-// glitching the decoder (exactly the "laggy and glitchy" scrubbing the
-// user reported). Throttled to at most one real seek per
-// kScrubSeekThrottleMs -- the on-screen position still updates every tick
-// (cheap, no reason to throttle that), only the expensive real seek is
-// rate-limited. Tradeoff: if the user stops rotating in the middle of a
-// throttle window, the real decoder position can lag the displayed
-// position by up to kScrubSeekThrottleMs -- acceptable for a scrub
-// preview (not noticeable at this timescale), not worth a catch-up
-// mechanism's added complexity for it.
-constexpr uint32_t kScrubSeekThrottleMs = 150;
-uint32_t lastScrubSeekMs = 0;
+// Scrubbing (rotate() in NOW_PLAYING mode) used to call AudioBridge::
+// seekTo() -- a REAL decoder seek -- on every single encoder detent. A
+// periodic throttle (first attempt) didn't actually fix the reported
+// "still laggy as fuck" scrubbing, because the real cost isn't call
+// FREQUENCY -- it's that each individual seekTo() call plausibly blocks
+// the main loop/task for a real stretch (finding the target byte offset
+// in the file and resyncing the FLAC decoder isn't instant), and that
+// block happens on the SAME task InputRouter::update() runs on. Throttling
+// to "at most once per N ms" doesn't help when a single call can itself
+// take closer to that same N ms or more -- the UI still stalls mid-spin
+// waiting on it.
+//
+// Fixed properly with a debounced "commit on pause" pattern instead of a
+// periodic one: rotate() NEVER calls seekTo() directly anymore -- it only
+// updates the displayed position (free) and records what the real
+// decoder should eventually seek to. InputRouter::update() (called every
+// loop() iteration regardless of input) checks once per call whether
+// rotation has been idle for kScrubIdleCommitMs; only once the user
+// actually stops turning does the ONE real seek fire, landing on the
+// final position. This means a fast continuous spin never blocks on a
+// real seek at all -- only the brief pause at the end does -- so the UI
+// stays responsive throughout the whole scrub gesture, not just at a
+// capped rate.
+constexpr uint32_t kScrubIdleCommitMs = 150;
+bool scrubSeekPending = false;
+uint16_t scrubPendingSec = 0;
+uint32_t lastScrubRotateMs = 0;
 
 void startHoldRepeat(AnoButton b, int dir) {
     repeatButton = b;
@@ -56,17 +69,15 @@ void rotate(int dir) {
         // scroll wheels -- if 1s/tick feels too slow to cross a long track,
         // that's the next thing to try (not attempted here).
         state.now.posSec = constrain(state.now.posSec + dir * 1, 0.0f, (float)state.now.durSec);
-        // Actually seeks the real decoder (confirmed against ESP32-
-        // audioI2S 3.0.12's real header, not guessed) -- without this,
-        // only the on-screen position moved, the audio itself didn't.
-        // Throttled (see kScrubSeekThrottleMs above) -- a fast spin should
-        // not fire a real decoder seek on every single detent.
+        // Does NOT call AudioBridge::seekTo() directly anymore -- see the
+        // big comment above kScrubIdleCommitMs for why a periodic throttle
+        // here wasn't enough. Just records what the real decoder should
+        // eventually seek to; InputRouter::update() commits it once
+        // rotation goes idle.
         if (state.now.path.length() > 0) {
-            uint32_t now = millis();
-            if (now - lastScrubSeekMs >= kScrubSeekThrottleMs) {
-                AudioBridge::seekTo((uint16_t)state.now.posSec);
-                lastScrubSeekMs = now;
-            }
+            scrubPendingSec = (uint16_t)state.now.posSec;
+            scrubSeekPending = true;
+            lastScrubRotateMs = millis();
         }
         // progressDirty (light redraw: just the position/time strip), not
         // the full state.dirty -- scrubbing only changes the displayed
@@ -236,6 +247,23 @@ void update() {
             repeatLastMs = millis();
             MenuEngine::moveSelection(repeatButton == AnoButton::UP ? -1 : 1);
         }
+    }
+
+    // Commits a pending scrub seek once rotation has paused for
+    // kScrubIdleCommitMs -- see the big comment near kScrubIdleCommitMs's
+    // declaration. Runs every loop() iteration (cheap check, the real
+    // seek only actually fires once per scrub gesture).
+    // Known, accepted edge case: if the user skips to a DIFFERENT track
+    // within this same kScrubIdleCommitMs window right after releasing
+    // the encoder, this fires against the new track instead of being
+    // cancelled -- needs a sub-150ms button-press-right-after-scrub-
+    // release sequence to trigger, and the consequence is a single
+    // incorrect seek the user can immediately re-scrub past, not worth
+    // the added bookkeeping (tracking which track a pending seek belongs
+    // to) to close for now.
+    if (scrubSeekPending && millis() - lastScrubRotateMs >= kScrubIdleCommitMs) {
+        AudioBridge::seekTo(scrubPendingSec);
+        scrubSeekPending = false;
     }
 }
 

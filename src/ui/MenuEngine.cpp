@@ -128,73 +128,69 @@ void setNowPlaying(Track t) {
     // fails, which UI.cpp's playback clock already guards against), and
     // picks up real embedded lyrics if the file has them.
     //
-    // knownUnsupported: set below if STREAMINFO says this file is 24-bit
-    // -- ESP32-audioI2S 3.0.12's FLAC decoder hard-requires 8 or 16-bit
-    // samples (a real, separate limitation from the maxFrameSize-too-
-    // large one), so a 24-bit file is guaranteed to fail. Detected here
-    // because reading STREAMINFO already opens the file anyway -- no
-    // extra I/O cost -- and skipped further down without even attempting
-    // AudioBridge::playSomething(), rather than burning the time to open/
-    // partially-decode a file already known to fail.
-    // Startup-latency fix: this used to do readStreamInfo + readTags +
-    // AlbumArt::loadForTrack (a JPEG decode) -- all blocking SD/SPI work
-    // -- BEFORE ever calling AudioBridge::playSomething(), so the actual
-    // audio start sat behind however long the embedded cover art took to
-    // decode. playSomething() only needs the path, nothing from tags or
-    // art, so there's no reason for that ordering. Now: only the cheap
-    // STREAMINFO read (duration + the 24-bit-skip check) happens first,
-    // playback starts immediately after, and the slower tags/lyrics/art
-    // work happens AFTER audio is already decoding -- the screen picks up
-    // real tags/art a beat later via the state.dirty set at the end,
-    // instead of holding up sound for it.
-    bool knownUnsupported = false;
-    if (t.path.length() > 0) {
-        FlacMeta::StreamInfo si;
-        if (FlacMeta::readStreamInfo(t.path, si)) {
-            float dur = FlacMeta::durationSec(si);
-            if (dur > 0 && dur < 65536) t.durSec = (uint16_t)dur;
-            if (si.bitsPerSample != 0 && si.bitsPerSample != 8 && si.bitsPerSample != 16) {
-                knownUnsupported = true;
-                Serial.printf("[audio] \"%s\" is %u-bit FLAC -- this decoder only supports 8/16-bit, "
-                              "skipping without attempting playback\n",
-                              t.title.c_str(), (unsigned)si.bitsPerSample);
-            }
-        }
-    }
-
+    // SECOND startup-latency fix, on top of the earlier one (moving
+    // playSomething() before tags/art): user still reported "significant
+    // delay" starting playback after that fix shipped. Root cause found
+    // auditing: FlacMeta::readStreamInfo() below used to run BEFORE
+    // AudioBridge::playSomething(), each independently opening the SAME
+    // file via two completely separate SD opens -- and this project's own
+    // boot-time measurements already established that SD directory-lookup
+    // overhead (not data volume) is the dominant per-file cost on this
+    // card (see the library-scan section). Paying that open cost twice,
+    // every single track start, was a real, measurable tax on top of
+    // whatever ESP32-audioI2S's own open+decode-start takes. Fixed by
+    // making playSomething() the ABSOLUTE first thing that happens here,
+    // unconditionally, with NOTHING gating it -- not even the cheap-
+    // looking STREAMINFO read. Everything STREAMINFO was used for
+    // (duration, the 24-bit-unsupported check) moves into the deferred
+    // metadata pass below, alongside tags/art, all AFTER playback has
+    // already started.
     state.now.hasTrack = true;
-    state.now.key = Library::keyFor(t);
+    state.now.key = Library::keyFor(t); // filename-derived for now; corrected below once tags are read
     state.now.artist = t.artist;
     state.now.album = t.album;
     state.now.title = t.title;
     state.now.art = t.art;
-    state.now.durSec = t.durSec;
+    state.now.durSec = t.durSec; // 0/unknown until the deferred STREAMINFO read below finishes -- UI.cpp already guards this
     state.now.posSec = 0;
     state.now.playing = true;
     state.now.path = t.path;
     // See AppState.h's NowPlaying comment -- UI.cpp's tickPlaybackClock()
     // uses these to notice and skip a track that fails to actually start
     // decoding (some real files can't play at all, e.g. a FLAC frame too
-    // large for the decoder's fixed buffer, or -- see knownUnsupported
-    // above -- 24-bit samples) instead of silently stalling.
+    // large for the decoder's fixed buffer, or 24-bit samples -- see
+    // below) instead of silently stalling.
     state.now.playbackConfirmed = false;
-    if (knownUnsupported) {
-        // Don't even try -- backdate startedAtMs so UI.cpp's existing
-        // grace-period check (unmodified) treats this as already-expired
-        // on the very next tick, reusing the same non-recursive skip path
-        // as a generic decode failure instead of a special-cased one.
-        state.now.startedAtMs = millis() - UI::kPlaybackStartGraceMs;
-    } else {
-        state.now.startedAtMs = millis();
-        AudioBridge::playSomething(t.path); // real audio starts here, as early as possible
+    state.now.startedAtMs = millis();
+    if (t.path.length() > 0) {
+        AudioBridge::playSomething(t.path); // real audio starts here, as early as humanly possible -- nothing before this line touches SD
     }
 
-    // Slower, purely cosmetic per-track metadata -- real artist/title/album
-    // tags, lyrics, embedded cover art. Runs after playback has already
-    // been kicked off above, same as before otherwise (still runs for a
-    // knownUnsupported file too, matching the original behavior -- it'll
-    // auto-skip on the very next tick regardless).
+    // Everything past this point is slower, deferred work -- real
+    // artist/title/album tags, duration, the 24-bit-unsupported check,
+    // lyrics, embedded cover art. All runs AFTER playback has already
+    // been kicked off above.
     if (t.path.length() > 0) {
+        FlacMeta::StreamInfo si;
+        if (FlacMeta::readStreamInfo(t.path, si)) {
+            float dur = FlacMeta::durationSec(si);
+            if (dur > 0 && dur < 65536) { t.durSec = (uint16_t)dur; state.now.durSec = t.durSec; }
+            // ESP32-audioI2S 3.0.12's FLAC decoder hard-requires 8 or
+            // 16-bit samples -- a 24-bit file is guaranteed to fail.
+            // Detected here (after the fact, not before) and skipped
+            // explicitly RIGHT NOW rather than waiting out the generic
+            // isRunning()-grace-period failure detection -- same fast-
+            // skip UX as before, just the detection point moved from
+            // "before attempting" to "immediately after," since we no
+            // longer pre-read STREAMINFO to gate the attempt at all.
+            if (si.bitsPerSample != 0 && si.bitsPerSample != 8 && si.bitsPerSample != 16) {
+                Serial.printf("[audio] \"%s\" is %u-bit FLAC -- this decoder only supports 8/16-bit, "
+                              "skipping\n", t.title.c_str(), (unsigned)si.bitsPerSample);
+                playNextInQueue(); // sets state.dirty itself; bails out of the rest of this function
+                return;
+            }
+        }
+
         FlacMeta::Tags tags;
         if (FlacMeta::readTags(t.path, tags)) {
             if (tags.hasArtist) { t.artist = tags.artist; state.now.artist = t.artist; }
