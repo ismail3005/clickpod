@@ -1474,6 +1474,76 @@ guessing further blind -- this session fixed the one confirmed, provably-
 real blocker (the lock) but hasn't seen a fresh log to confirm it was the
 only one.
 
+## Sixteenth real hardware bug (found, fixed): crash on track transition -- a FLAC decode-error-storm/garbage-pointer crash unrelated to scrubbing, plus a real reentrancy gap in AudioBridge
+
+Confirmed the fourteenth bug's debounce (`kScrubIdleCommitMs`) genuinely
+fixed scrubbing-while-paused -- user confirmed "pausing then scrubbing and
+unpausing works great." But scrubbing *while playing* is still glitchy
+(not yet separately investigated -- see the open item below), and a
+**different** real crash hit at a track transition: `Guru Meditation
+Error: Core 1 panic'ed (LoadProhibited)`, `EXCVADDR: 0xffffd986` -- a
+classic garbage-pointer dereference, not a heap-corruption assert this
+time. Two things stood out in the log:
+
+1. The lead-up showed `[audio] playing: /funky times/Am...` truncated and
+   repeated roughly 20 times in well under a second (garbled/overlapping
+   UART output, not 20 literal distinct clean lines) before the real file
+   ("America - A Horse with No Name.flac") actually finished initializing.
+   That pattern -- `AudioBridge::playSomething()` (and therefore
+   `audio->connecttoFS()`) being invoked many times back-to-back before a
+   previous call had any chance to settle -- was a real, previously-
+   unguarded gap: `AudioBridge.cpp` had zero protection against being
+   called again mid-setup. This library isn't built to tolerate that.
+   **What actually triggered the burst of calls was not conclusively
+   identified this round** (a genuinely-bouncing button press and several
+   menu-row actions firing in quick succession are both plausible) -- but
+   regardless of the upstream trigger, calling `connecttoFS()` repeatedly,
+   unthrottled, is unsafe on its own and worth guarding against
+   unconditionally.
+2. Once decode did start on the real file, the SAME class of decode-error
+   storm as the fourteenth bug showed up again (`BITS PER SAMPLE UNKNOWN`,
+   `RESERVED CHANNEL ASSIGNMENT`, `BLOCKSIZE TOO BIG`, repeated syncword
+   resyncs) -- but this time at a **fresh track start, not a seek**. That
+   proved the CRC-8 fix from the fourteenth bug wasn't the whole story:
+   it only covered `flac_correctResumeFilePos()`, the seek-specific resync
+   function. `FLACFindSyncWord()` -- the resync path entered any time
+   `flacDecodeFrame()` hits ANY decode error mid-stream, seek or not --
+   had the exact same false-positive-prone, unverified 2-byte `0xFF`/`0xF8`
+   acceptance, just reachable without ever seeking.
+
+**Two fixes, both real, not mitigations**:
+
+1. `src/audio/AudioBridge.cpp`: `playSomething()` now ignores a call that
+   arrives within `kMinMsBetweenPlaySomething` (150ms) of the previous one,
+   logging why instead of silently dropping it. No legitimate human action
+   needs a second real track-start inside 150ms, so this is a correctness
+   guard against reentering the decoder library unsafely, not a feature
+   limitation.
+2. Fork (`clickpod-3.0.12-flac-patch`, commit `406e288`, re-pinned in
+   `platformio.ini`): added the same structural-field + CRC-8 verification
+   from the fourteenth bug's `flac_tryParseFrameHeader()` to
+   `FLACFindSyncWord()` (`flac_decoder.cpp`) -- a separate, local copy
+   (`flacTryParseFrameHeader()`/`flacFindSyncWordCrc8()`) since this path
+   works directly on an in-memory buffer slice, not a file, so it needed
+   its own implementation rather than sharing Audio.cpp's. A false 2-byte
+   match is now skipped (scan continues) instead of trusted and handed
+   back into the decoder, mid-stream resyncs included, not just seek
+   resyncs.
+
+**Not yet hardware-confirmed** -- same caveat as the fourteenth bug, no
+PlatformIO in this sandbox to compile against. Next real step: flash,
+confirm it builds, and specifically try to reproduce BOTH halves again --
+rapid track selection (to confirm the reentrancy guard holds) and a full
+playthrough to a natural track-end transition (to confirm the crash itself
+is gone, not just the seek-triggered half of it).
+
+**Still open, not investigated this round**: scrubbing while music is
+actively playing is still reported as glitchy, distinct from the
+now-confirmed-fixed pause-then-scrub-then-unpause path. Worth a closer
+look at what's different about the live-playback case specifically (the
+decoder is actively mid-decode when the seek lands, vs. idle when paused)
+once the two fixes above are confirmed on hardware.
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time
