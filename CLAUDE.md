@@ -1699,6 +1699,19 @@ of audio continuing to just play through as if nothing happened, which
 is what "literally does nothing" meant: the backend seek was firing, but
 the resumed decode was failing immediately after, every time.
 
+**UPDATE, user confirmed on real hardware after flashing this fix**: the
+freeze/no-relocate bug IS actually fixed now -- but scrubbing during
+active playback is still laggy (not glitchy/crashy anymore, just slow to
+respond). **User explicitly decided to drop this and move on** --
+parked, not resolved. If picked back up later: this is a performance/feel
+complaint now, not a correctness bug, so the next angle would be
+measuring where the real time goes in the seek path (the resync scan in
+`flac_correctResumeFilePos()` reads the file byte-by-byte via
+`audiofile.seek()+read()` per candidate, which could plausibly be slow
+on this SD card if many false-adjacent candidates get scanned before a
+CRC-8 match lands -- not confirmed, just the obvious next place to look)
+rather than guessing at another decoder correctness bug.
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time
