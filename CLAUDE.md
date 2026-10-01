@@ -1278,6 +1278,55 @@ after a JPEG decode; the screen's tag/art details just arrive very
 slightly later than before, which is the right tradeoff (cosmetic delay,
 not an audio-start delay).
 
+## Thirteenth real hardware bug (found, fixed): a latency follow-up attempt broke playback outright -- queue-destroying freeze
+
+User still reported "significant delay" starting playback after the
+twelfth bug's fix. Found a real remaining inefficiency: `FlacMeta::
+readStreamInfo()` still ran before `AudioBridge::playSomething()`, each
+independently opening the SAME file via two separate SD opens -- doubling
+the SD directory-lookup overhead this project's own boot-time
+measurements already established as the dominant per-file cost on this
+card. **Fixed by moving `readStreamInfo()` into the deferred pass too**,
+making `playSomething()` the unconditional first thing in
+`setNowPlaying()`, nothing gating it at all.
+
+**This broke playback.** User's next report: "when a song ends it
+doesn't continue playing it just goes back to zero and freezes."
+Mechanism: `readStreamInfo()` was now opening the same file a SECOND
+time WHILE `playSomething()`'s `connecttoFS()` already had that exact
+file open and actively decoding from it -- a genuine concurrent-file-
+access hazard that didn't exist when the two calls were sequential. A
+corrupted read from this race could spuriously report a bogus
+`bitsPerSample`, falsely tripping the 24-bit-unsupported skip -- which
+called `playNextInQueue()` -> `setNowPlaying()` on the next track WHILE
+STILL INSIDE the original call. If that track's read got corrupted the
+same way, it recursed, burning through the entire queue in one
+synchronous burst until empty. The last `setNowPlaying()` in that
+cascade had already reset `state.now.posSec` to 0 at its own top; the
+empty-queue branch then set `state.now.playing = false`.
+`tickPlaybackClock()` bails out immediately every tick once `playing`
+is false, so nothing ever recovered -- exactly "goes back to zero and
+freezes."
+
+**Fixed by moving ONLY the STREAMINFO read back to before
+`playSomething()`** -- correctness has to win over the latency cost of
+one SD open before playback starts, full stop; there's no safe way to
+keep the double-open fix for this specific read. Tags/art reading stay
+deferred to after `playSomething()` (unchanged from the twelfth bug's
+fix) -- unlike STREAMINFO, a bad tags/art read has no skip/recursion
+path on failure, so it doesn't carry this same risk, and hasn't been
+implicated in any reported freeze.
+
+**Lesson**: the "avoid a double SD open" optimization was sound in
+principle, but applying it to a read whose failure path can trigger
+recursive, queue-destroying skip logic was not a safe trade -- a bad
+read corrupting data is a materially different risk than a bad read
+just failing cleanly (which `readStreamInfo()`'s normal "file not
+found"-style failures already handle fine, durSec just stays 0/unknown).
+Before deferring ANY SD read to run concurrently with an actively-open
+decoder file handle, check what happens if that specific read returns
+corrupted-but-plausible data, not just what happens if it cleanly fails.
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time
