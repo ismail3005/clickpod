@@ -1641,6 +1641,64 @@ will show definitively whether the hotspot even appears in scan results,
 and if the credentials file has real content, exactly what's failing to
 parse from it, rather than guessing at formatting again.
 
+## Nineteenth real hardware bug (found, fixed): a SECOND, deeper FLAC decoder bug behind "scrubbing while playing does nothing" -- STREAMINFO values wiped on every reset
+
+User reported the sixteenth/seventeenth bugs' fixes made no difference --
+scrubbing mid-playback still produced the same decode-error storm
+(`readUint(): error in bitreader` repeated, then `UNKNOWN CHANNEL
+ASSIGNMENT` / `BITS PER SAMPLE UNKNOWN`). The new log was actually good
+evidence the CRC-8 fix WAS working, not failing: `Channels: 2`/
+`SampleRate: 44100`/`BitsPerSample: 16` were printed correctly right
+before each failure, meaning a real, CRC-8-verified frame header was
+found -- the false-positive-match bug those fixes targeted is a different
+bug from this one.
+
+Traced the real cause by reading `flacDecodeFrame()` (`flac_decoder.cpp`)
+again, closely: `FLACMetadataBlock->numChannels`/`sampleRate`/
+`bitsPerSample` are each only ever SET from a frame's own header when
+that frame's own code is non-zero (`if(!FLACMetadataBlock->bitsPerSample)
+{ if(sampleSizeCode==1) ... }`, etc.) -- this is correct per the FLAC
+spec, where a per-frame code of 0 legitimately means "same as file-level
+STREAMINFO," relying on the decoder already having that value cached
+from processing a PRIOR frame. The bug: `FLACDecoderReset()` ->
+`FLACDecoder_ClearBuffer()` `memset`s the ENTIRE `FLACMetadataBlock_t`
+struct to 0 on every reset -- and this reset runs not just on a seek, but
+on ANY resync, including the ordinary mid-stream one from
+`FLACFindSyncWord()` (the sixteenth bug's fix target). Right after a
+reset there's no "prior frame" to have cached these from, so a
+completely valid frame whose header uses the common "inherit from
+STREAMINFO" 0-codes has nothing to inherit, and the decoder incorrectly
+reports `BITS PER SAMPLE UNKNOWN`/`UNKNOWN CHANNEL ASSIGNMENT` on a file
+that's perfectly fine. This is a second, independent bug from the false-
+positive-syncword one -- fixing header validation (CRC-8) was necessary
+but not sufficient, since even a header that's 100% genuinely real still
+hits this.
+
+**Fixed** at the real source (fork, `clickpod-3.0.12-flac-patch`, commit
+`256bd3b`, re-pinned in `platformio.ini`): `FLACDecoderReset()` now saves
+`numChannels`/`sampleRate`/`bitsPerSample` before clearing
+`FLACMetadataBlock`, and restores them after -- these are real file-level
+properties that don't change mid-file, so carrying them across any reset
+(seek, loop-to-start, or ordinary resync) is correct, not just a
+workaround for the seek case specifically. Fixed centrally in
+`FLACDecoderReset()` itself rather than at each call site (an earlier,
+reverted attempt patched the seek-resume call site in `Audio.cpp`
+directly via the already-existing `FLACSetRawBlockParams()` setter, but
+that would have missed the mid-stream `FLACFindSyncWord()` reset path
+entirely -- centralizing in `FLACDecoderReset()` covers every call site
+with one change, current and future). The very first reset ever for a
+file (before STREAMINFO has been parsed at all) just preserves 0->0, a
+no-op -- `read_FLAC_Header()` unconditionally overwrites these three
+fields with the real STREAMINFO values right after, unaffected.
+
+**Not yet hardware-confirmed**, same caveat as every fork change this
+round. Next real step: flash and scrub mid-playback on a file that
+previously triggered this (any real FLAC should now do, this wasn't file-
+specific) -- expect the on-screen position to actually relocate instead
+of audio continuing to just play through as if nothing happened, which
+is what "literally does nothing" meant: the backend seek was firing, but
+the resumed decode was failing immediately after, every time.
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time
