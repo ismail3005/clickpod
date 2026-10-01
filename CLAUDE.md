@@ -1260,6 +1260,112 @@ resume, not a list of paired devices to choose from (see the spec 8
 amendment on why). If the UI ever supports configuring a different
 target device name, that choice belongs in `Persist` too.
 
+## Next session plan (as of 2026-10-01, agreed in a planning-only conversation, nothing below built yet)
+
+A lot got discussed/decided in conversation without any code written this
+round -- consolidated here as one list so a fresh session doesn't have to
+re-derive it from scratch or lose pieces. Rough priority order, per the
+user's own framing ("fix current bugs first, test-tone/real-BT-audio
+last"):
+
+1. **Verify the FLAC maxFrameSize patch actually works.** First real
+   flash since `scripts/patch_audioI2S.py` landed (see "Open question...
+   FLAC decode limitations" section above, option 3) -- confirm the
+   `extra_scripts` hook fires (`[clickpod patch] ... applied` in the
+   build log) and that a file which previously hit `maxFrameSize too
+   large` (e.g. the TOOL/Lateralus one) now plays instead of skipping.
+2. **Convert the build-time patch into a real fork.** User finds the
+   build-script approach "clunky and slow" (their words) and wants
+   something more proper -- the plan from earlier: user forks
+   `schreibfaul1/ESP32-audioI2S` on GitHub themselves (this session
+   couldn't get write access to do it from here -- see the "Open
+   question" section's writeup), hands over the fork URL, then the same
+   patch gets committed directly into the fork and `platformio.ini`'s
+   `lib_deps` points at it (pinned to a specific commit/tag on the fork,
+   not its default branch) instead of running `scripts/patch_audioI2S.py`
+   at all -- that script gets removed once this lands.
+3. **Real 24-bit FLAC decode support.** Previously flagged as the
+   highest-risk option (#4 in the FLAC-limitations list) and explicitly
+   NOT recommended as a first move -- user wants it attempted anyway,
+   after 1-2 above. This means actually reading `ESP32-audioI2S`'s PCM/
+   sample-handling pipeline (clone the real source the same way the
+   maxFrameSize investigation did, not guessing) to understand what
+   touching 24-bit support really requires -- likely downmixing/
+   truncating 24-bit samples to 16-bit somewhere in the decode path, or
+   extending the I2S output path to pass 24-bit through if PCM5102A/the
+   I2S driver can take it. Real risk of subtle audio corruption/
+   distortion bugs with no way to verify without hardware access --
+   budget real investigation time before touching code, same rigor as
+   the maxFrameSize fix (confirm against real source, don't guess at
+   internals).
+4. **Bluetooth device picker + last-device auto-reconnect.** See the
+   corrected "Real Bluetooth toggle" section above -- `ESP32-A2DP`
+   genuinely supports discovery (`start()`/`set_ssid_callback()`/etc.),
+   this was wrongly assumed not possible before. Build: a device-list
+   screen (reuses the Music/Playlists row pattern), the BT-stack-context-
+   to-main-loop handoff for scan results (same pattern as the encoder
+   ISR), and persisting the last-picked device name (`Persist.*`) so
+   `main.cpp`'s boot-time auto-resume connects to whatever was last
+   selected instead of the hardcoded `kTargetDeviceName` constant. User
+   confirmed they want the auto-reconnect behavior specifically, not just
+   the picker. Also: pin `ESP32-A2DP`'s `lib_deps` entry to a specific
+   tag/commit while touching this file anyway -- it currently floats on
+   the default branch, unlike the explicitly-pinned `ESP32-audioI2S`.
+5. **SD-card-based WiFi credentials for TimeSync**, hardcoded-phone/
+   laptop-hotspot style but kept OFF the repo per the user's explicit
+   call (a single physical SD card in their pocket vs. permanent GitHub
+   history -- their reasoning, and the right call for a repo that could
+   go public). A small text file on the card (e.g. `clickpod_wifi.txt`,
+   SSID/password pairs), read by `TimeSync` and tried alongside the
+   existing open-network scan on each sync attempt -- no on-device typing
+   UI needed, no UI exposure at all, user edits the file directly on
+   their computer. Not an SD-index-file-style binary format like
+   `/clickpod.idx` -- plain text is fine and easier for the user to hand-
+   edit.
+6. **Manual "Set time" UI** -- an analog clock face (hour/minute hands,
+   set via encoder: tap to switch which hand is active, rotate to sweep
+   it, CENTER to confirm) with a live digital readout underneath for
+   actual glanceability (user's own reasoning: analog looks nice but
+   isn't a quick read). Saves to NVS (`Persist.*`) + a `millis()`
+   timestamp, counts forward between real syncs the same way `TimeSync`
+   already does after a WiFi sync. Per this project's usual discipline,
+   worth sketching in the browser simulator first (a real little
+   animation/rendering job -- rotating hands cleanly, not static art) --
+   see the simulator-first porting note near the top of this file.
+7. **Sleep / "AOD" mode on long-press CENTER.** Currently
+   `togglePower()`'s "off" fully blanks the screen and (implicitly, since
+   nothing continues the UI loop meaningfully in that mode) doesn't
+   really continue anything. Wanted instead: keep playback running
+   exactly as-is, switch to a locked clock-face screen (reuses the
+   digital readout from item 6), dim the backlight, and have input
+   handling ignore everything except the wake gesture (CENTER long-press
+   again, matching the existing in/out toggle) -- specifically to survive
+   being tossed in a bag/pocket without accidental button presses
+   skipping tracks or changing volume. The screen-dimming half needs the
+   backlight rewiring below done first; the "keep playing + lock input +
+   show clock" half is pure software, no hardware dependency.
+   **Backlight hardware**: BL pin is currently hardwired to 3.3V (always
+   full brightness, see the hardware-gotchas entry above). User confirmed
+   it's a Waveshare ILI9341 module -- matches a known Waveshare board
+   design (onboard transistor, commonly labeled Q1, dedicated to
+   backlight switching -- confirmed via a real Bodmer/TFT_eSPI GitHub
+   discussion about this exact board family, not just general ILI9341
+   knowledge) -- the physical transistor the user found near the BL pin
+   (described as a standard 3-pad package, one fat pad + two smaller
+   forked pads) is very likely this same switching transistor. Good
+   news: this means the BL header pin is probably already a logic-level
+   control input (through a base resistor into that transistor), not the
+   raw LED current line -- PWM dimming from a GPIO should be safe once
+   rewired, likely without needing an extra MOSFET. Not 100% confirmed
+   against this specific board's actual schematic, just a strong match.
+   Still need: a free PWM-capable GPIO (budget is tight -- see the
+   hardware-gotchas entry; GPIO0 is the live candidate, needs boot-strap-
+   safety care) -- user is open to GPIO0, hasn't fully committed yet,
+   worth confirming at the start of whichever session tackles this.
+8. **Real Bluetooth audio** (routing `ESP32-audioI2S`'s decoded PCM into
+   the A2DP source callback instead of the test tone) -- explicitly
+   deprioritized by the user, do this LAST, after everything above.
+
 ## Working style this project has used (carry forward)
 
 - User is terse and direct; they'll correct behavior that doesn't match
