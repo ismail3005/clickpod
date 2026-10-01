@@ -1,6 +1,7 @@
 #include "UI.h"
 
 #include "../audio/AudioBridge.h"
+#include "../bt/BluetoothSource.h"
 #include "../state/AppState.h"
 #include "AlbumArt.h"
 #include "InputRouter.h"
@@ -102,6 +103,28 @@ void tickPlaybackClock() {
     }
 }
 
+// BluetoothSource::discoveredName() callback runs on the BT stack's own
+// task, so the device-picker screen can't just redraw reactively when a
+// new device shows up -- this polls the already-stashed count each
+// update() tick (cheap int compare) and only rebuilds the menu/redraws
+// when it actually changed, same "poll a plain counter, don't touch the
+// producing context" pattern AnoInput's encoder delta already uses.
+int lastDiscoveredCount = -1;
+
+void tickBluetoothDevicePicker() {
+    bool onPicker = state.mode == AppMode::BT && !state.menuStack.empty() &&
+                    state.menuStack.back().title == "Choose Device";
+    if (!onPicker) {
+        lastDiscoveredCount = -1; // reset so re-entering the picker always does a fresh rebuild
+        return;
+    }
+    int count = BluetoothSource::discoveredCount();
+    if (count != lastDiscoveredCount) {
+        lastDiscoveredCount = count;
+        MenuEngine::refreshBluetoothDevicesMenu();
+    }
+}
+
 } // namespace
 
 void begin(TFT_eSPI &tft) {
@@ -126,6 +149,7 @@ void update() {
     } else {
         InputRouter::update();
         tickPlaybackClock();
+        tickBluetoothDevicePicker();
     }
     Screens::render();
 }

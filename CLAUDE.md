@@ -1712,6 +1712,77 @@ on this SD card if many false-adjacent candidates get scanned before a
 CRC-8 match lands -- not confirmed, just the obvious next place to look)
 rather than guessing at another decoder correctness bug.
 
+## Bluetooth device picker + last-device auto-reconnect (built, not yet hardware-confirmed)
+
+Plan item 4 from the "Next session plan" above -- the Bluetooth screen's
+single hardcoded-target row is still there, but it's joined by a real
+"Choose device..." row that does genuine discovery, not a mock list.
+
+**`src/bt/BluetoothSource.*`**: `startDiscovery()` calls `a2dpSource.
+start()` with no name (confirmed from the real library source this
+begins a scan instead of connecting to a fixed target) and installs a
+`set_ssid_callback()` that stashes each newly-seen, not-yet-seen device
+name into a small fixed-size array (`kMaxDiscovered = 24`, plain `char[32]`
+rows, no heap allocation) and always returns `false` -- never auto-
+selects, this is pure listing. That callback runs on the BT stack's own
+task context, not the main loop (same constraint `AnoInput`'s encoder ISR
+already has), so it can't touch `MenuEngine`/`state` directly -- the main
+loop drains it via `discoveredCount()`/`discoveredName()`, a plain
+volatile-int-gated array, single producer (the callback) / single
+consumer (the main loop), append-only, same risk profile already
+accepted for the encoder delta accumulator. `connectToDiscovered(name)`
+cancels discovery and calls the existing `begin(name)` path (unchanged --
+still has the heap guard, still the brief `RadioLock` hold), so picking a
+device reuses every safety check already proven for the hardcoded-target
+path, not a new, separately-risky connect routine.
+
+**Confirmed from the real library source, not guessed**: `start()`
+checks `esp_bluedroid_get_status()` and only runs the heavy Bluedroid/
+controller init if it's still `UNINITIALIZED` -- calling it twice in one
+session (once for discovery, once for the real connect once a device's
+picked) does NOT redundantly re-init the whole BT stack. De-risks the
+scan-then-connect flow below a fair amount, though the full discovery->
+connect transition still isn't hardware-tested.
+
+**UI (`MenuEngine.cpp`)**: `enterBluetoothDevicePicker()` starts discovery
+and pushes a SECOND menu level while staying in `AppMode::BT` (no new
+`AppMode` needed -- `AppMode::BT` already renders via the same generic
+menu-stack machinery as `AppMode::MENU`, it just controls return-routing
+and the title-bar glyph, so a second stack level Just Works with zero
+`Screens.cpp` changes). `refreshBluetoothDevicesMenu()` rebuilds that
+screen's rows from whatever's been stashed so far, preserving the
+current selection across a rebuild; `UI.cpp`'s new `tickBluetoothDevice
+Picker()` polls `discoveredCount()` once per `update()` tick (cheap int
+compare) and only calls the rebuild when it actually changed, while that
+specific screen is open. `InputRouter.cpp`'s LEFT handling for
+`AppMode::BT` now pops one menu level at a time (matching the existing
+`TRACK_MENU` pattern) instead of always jumping straight out of
+Bluetooth in one press, and cancels any in-progress scan when backing out
+of the picker specifically.
+
+**Persistence (`Persist.*`/`AppState.h`)**: `state.btDeviceName` (new,
+empty by default) is set and saved the moment a device is picked, and
+`main.cpp`'s boot-time auto-resume now uses it when non-empty, falling
+back to the old hardcoded `BluetoothSource::kTargetDeviceName` otherwise
+-- this is the "stays paired" equivalent this project settled on earlier,
+since classic A2DP has no persistent OS-level bonding the way phones do.
+`syncBluetoothToUi()` (`main.cpp`) now reads the actual connected target
+via the new `BluetoothSource::currentTargetName()` getter instead of
+always assuming the hardcoded constant.
+
+**`platformio.ini`**: `ESP32-A2DP`'s `lib_deps` entry is now pinned to a
+commit SHA (`35bace5`) -- confirmed via `git tag -l` that this repo has
+no tags at all, so a SHA is the only real pin available, same situation
+`ESP32-audioI2S` was in before that one got its own fork. Previously
+floated on the default branch's HEAD.
+
+**Not yet hardware-confirmed, same caveat as every change this session**:
+no PlatformIO in this sandbox to compile against. Specifically unverified
+on real hardware: the scan-and-list UI actually populating with real
+nearby device names, picking one and having it actually connect (not just
+compile), and the boot-time auto-resume picking up a previously-chosen
+device correctly after a reboot.
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time
@@ -1760,19 +1831,13 @@ last"):
    embedded cover art intact, which a bare `-sample_fmt s16` conversion
    can otherwise drop). Lower-risk, same end result for their actual
    library. No firmware work needed for this item at all.
-4. **Bluetooth device picker + last-device auto-reconnect.** See the
-   corrected "Real Bluetooth toggle" section above -- `ESP32-A2DP`
-   genuinely supports discovery (`start()`/`set_ssid_callback()`/etc.),
-   this was wrongly assumed not possible before. Build: a device-list
-   screen (reuses the Music/Playlists row pattern), the BT-stack-context-
-   to-main-loop handoff for scan results (same pattern as the encoder
-   ISR), and persisting the last-picked device name (`Persist.*`) so
-   `main.cpp`'s boot-time auto-resume connects to whatever was last
-   selected instead of the hardcoded `kTargetDeviceName` constant. User
-   confirmed they want the auto-reconnect behavior specifically, not just
-   the picker. Also: pin `ESP32-A2DP`'s `lib_deps` entry to a specific
-   tag/commit while touching this file anyway -- it currently floats on
-   the default branch, unlike the explicitly-pinned `ESP32-audioI2S`.
+4. **DONE, not yet hardware-confirmed.** Bluetooth device picker +
+   last-device auto-reconnect -- see the dedicated section above (search
+   "Bluetooth device picker + last-device auto-reconnect"). Real
+   discovery via `BluetoothSource::startDiscovery()`, a second menu level
+   on the existing Bluetooth screen, persisted `state.btDeviceName` used
+   by boot-time auto-resume, `ESP32-A2DP`'s `lib_deps` now pinned by
+   commit SHA.
 5. **DONE -- SD-card-based WiFi credentials for TimeSync.** Plain text
    file, `/clickpod_wifi.txt` (SD root), kept OFF the repo per the user's
    explicit call (a single physical SD card in their pocket vs. permanent

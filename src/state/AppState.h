@@ -82,6 +82,12 @@ struct AppState {
     // BluetoothSource.h.
     bool btOn = false;
     String btConnectedTo; // empty = not connected
+    // User-picked target device name (from the real device-picker screen,
+    // MenuEngine::enterBluetoothDevicePicker()), persisted so boot-time
+    // auto-resume (main.cpp) reconnects to whatever was last picked instead
+    // of the hardcoded BluetoothSource::kTargetDeviceName default. Empty
+    // means "never picked one" -- falls back to that default.
+    String btDeviceName;
 
     int brightness = 70;
     String sortPref = "Artist";

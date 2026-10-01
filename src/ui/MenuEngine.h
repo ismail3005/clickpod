@@ -31,6 +31,15 @@ void playFromQueueIndex(int idx);
 
 String btStatusLabel();
 void enterBluetooth();
+// Real device-picker screen -- ESP32-A2DP's source mode genuinely
+// supports discovery. enterBluetoothDevicePicker() starts a scan and
+// pushes the list screen; refreshBluetoothDevicesMenu() rebuilds its rows
+// (called by UI.cpp whenever BluetoothSource::discoveredCount() changes
+// while that screen is open); chooseBluetoothDevice() is the row action
+// that connects to and persists the picked device.
+void enterBluetoothDevicePicker();
+void refreshBluetoothDevicesMenu();
+void chooseBluetoothDevice(const String &name);
 
 // Which line of `lines` is "active" right now (state.now.posSec), i.e.
 // the one Screens.cpp's drawLyrics() highlights. Shared between it and

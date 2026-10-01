@@ -1,6 +1,7 @@
 #include "InputRouter.h"
 
 #include "../audio/AudioBridge.h"
+#include "../bt/BluetoothSource.h"
 #include "../state/AppState.h"
 #include "MenuEngine.h"
 
@@ -118,7 +119,20 @@ void handleTap(AnoButton btn) {
             } else if (item && item->isChoice) {
                 MenuEngine::cycleChoice(*item, -1);
             } else if (state.mode == AppMode::BT) {
-                MenuEngine::exitBluetooth();
+                // BT mode can now be TWO levels deep (status screen, then
+                // the real device picker -- see MenuEngine::
+                // enterBluetoothDevicePicker()), same pop-one-level-first
+                // pattern TRACK_MENU already uses below, instead of always
+                // jumping all the way out of Bluetooth in one LEFT press.
+                // Cancel any in-progress discovery scan when backing out
+                // of the picker specifically -- no point letting it keep
+                // scanning once the user's no longer looking at the list.
+                if (state.menuStack.size() > 1) {
+                    BluetoothSource::cancelDiscovery();
+                    state.menuStack.pop_back();
+                } else {
+                    MenuEngine::exitBluetooth();
+                }
             } else if (state.mode == AppMode::TRACK_MENU) {
                 if (state.menuStack.size() > 1) state.menuStack.pop_back();
                 else MenuEngine::closeTrackMenu();

@@ -648,17 +648,21 @@ void enterBluetooth() {
     }
     state.mode = AppMode::BT;
 
-    // ESP32-A2DP source mode connects to ONE hardcoded target sink by
-    // name (see BluetoothSource.h) -- it doesn't enumerate discoverable
-    // devices to pick from like a phone's Bluetooth settings, so this is
-    // a single real row for that target, not a device picker.
-    std::vector<MenuItem> items(2);
-    items[0].label = BluetoothSource::kTargetDeviceName;
+    // Real device picker now exists (see enterBluetoothDevicePicker()
+    // below) -- ESP32-A2DP's source mode genuinely supports discovery,
+    // this screen just used to assume otherwise. This row still shows ONE
+    // target -- whatever was last picked (state.btDeviceName), or the
+    // hardcoded default if nothing's been picked yet -- plus a row to go
+    // pick a different one.
+    String targetName = state.btDeviceName.length() > 0 ? state.btDeviceName
+                                                          : String(BluetoothSource::kTargetDeviceName);
+    std::vector<MenuItem> items(3);
+    items[0].label = targetName;
     items[0].icon = "bt";
     items[0].subFn = btStatusLabel;
-    items[0].action = []() {
+    items[0].action = [targetName]() {
         if (!state.btOn) {
-            BluetoothSource::begin(BluetoothSource::kTargetDeviceName);
+            BluetoothSource::begin(targetName.c_str());
             state.btOn = true; // optimistic; syncBluetoothToUi() corrects this next loop if begin() actually declined
             Persist::save();
             Serial.println(F("[ui] Bluetooth on, connecting..."));
@@ -666,9 +670,13 @@ void enterBluetooth() {
         }
     };
 
-    items[1].label = "Turn Bluetooth Off";
+    items[1].label = "Choose device...";
     items[1].icon = "bt";
-    items[1].action = []() {
+    items[1].action = []() { enterBluetoothDevicePicker(); };
+
+    items[2].label = "Turn Bluetooth Off";
+    items[2].icon = "bt";
+    items[2].action = []() {
         BluetoothSource::end();
         state.btOn = false;
         state.btConnectedTo = "";
@@ -687,6 +695,58 @@ void exitBluetooth() {
     state.menuStack = back.stack;
     if (state.mode == AppMode::MENU && state.menuStack.empty()) buildMainMenu();
     state.dirty = true;
+}
+
+// Builds (or rebuilds) the device-list rows from whatever BluetoothSource
+// has stashed so far -- called once when entering the picker and again
+// every time UI.cpp notices the discovered count changed (discovery runs
+// on the BT stack's own task; this just re-reads the already-stashed
+// names, same pattern as every other index*()-style rebuild in this file).
+// Preserves the current selection across a rebuild (new rows just get
+// appended at the end) so a mid-scroll picker doesn't jump the cursor
+// back to the top every time a new device appears.
+void refreshBluetoothDevicesMenu() {
+    if (state.menuStack.empty() || state.menuStack.back().title != "Choose Device") return;
+    int prevSelected = state.menuStack.back().selected;
+    int count = BluetoothSource::discoveredCount();
+
+    std::vector<MenuItem> items;
+    items.reserve(count > 0 ? count : 1);
+    for (int i = 0; i < count; i++) {
+        MenuItem row;
+        row.label = BluetoothSource::discoveredName(i);
+        row.icon = "bt";
+        String name = row.label;
+        row.action = [name]() { chooseBluetoothDevice(name); };
+        items.push_back(std::move(row));
+    }
+    if (items.empty()) {
+        MenuItem row;
+        row.label = BluetoothSource::isDiscoveryActive() ? "Scanning..." : "No devices found";
+        items.push_back(std::move(row));
+    }
+
+    Menu &m = state.menuStack.back();
+    m.items = std::move(items);
+    m.selected = constrain(prevSelected, 0, (int)m.items.size() - 1);
+    state.dirty = true;
+}
+
+void enterBluetoothDevicePicker() {
+    BluetoothSource::startDiscovery();
+    std::vector<MenuItem> items(1);
+    items[0].label = "Scanning...";
+    pushMenu("Choose Device", std::move(items));
+    state.dirty = true;
+}
+
+void chooseBluetoothDevice(const String &name) {
+    BluetoothSource::connectToDiscovered(name.c_str());
+    state.btDeviceName = name;
+    state.btOn = true; // optimistic, same as the status row's own action -- syncBluetoothToUi() corrects it next loop if it declined
+    Persist::save();
+    Serial.printf("[ui] picked Bluetooth device \"%s\", connecting...\n", name.c_str());
+    enterBluetooth(); // rebuild the status screen (now showing the newly-picked target) and pop back to it
 }
 
 // Track context menu ("..." menu on a song: Play Next / Add to Queue / Add

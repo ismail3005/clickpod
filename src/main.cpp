@@ -237,7 +237,10 @@ void setup() {
     // caught by it, not just the heap case this round's fix targets.
     if (state.btOn) {
         Persist::markBtAttemptStarting();
-        BluetoothSource::begin(BluetoothSource::kTargetDeviceName);
+        const char *resumeTarget = state.btDeviceName.length() > 0
+                                        ? state.btDeviceName.c_str()
+                                        : BluetoothSource::kTargetDeviceName;
+        BluetoothSource::begin(resumeTarget);
         Persist::markBtAttemptDone();
     }
 
@@ -267,7 +270,7 @@ static void syncBatteryToUi() {
 static void syncBluetoothToUi() {
     bool running = BluetoothSource::isRunning();
     bool connected = running && BluetoothSource::isConnected();
-    String connectedTo = connected ? String(BluetoothSource::kTargetDeviceName) : String("");
+    String connectedTo = connected ? String(BluetoothSource::currentTargetName()) : String("");
     if (running != state.btOn || connectedTo != state.btConnectedTo) {
         state.btOn = running;
         state.btConnectedTo = connectedTo;

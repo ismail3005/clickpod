@@ -24,6 +24,7 @@ void load() {
     // "paired devices" list to persist yet -- if/when the UI supports
     // choosing a different target device, that name belongs here too.
     state.btOn = prefs.getBool("btOn", false);
+    state.btDeviceName = prefs.getString("btDeviceName", "").c_str();
     bool btPending = prefs.getBool("btPending", false);
     prefs.end();
 
@@ -54,6 +55,7 @@ void save() {
     prefs.putString("sortPref", state.sortPref.c_str());
     prefs.putInt("utcOffset", state.utcOffsetHours);
     prefs.putBool("btOn", state.btOn);
+    prefs.putString("btDeviceName", state.btDeviceName.c_str());
     prefs.end();
 }
 
