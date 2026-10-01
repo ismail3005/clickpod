@@ -168,7 +168,29 @@ void setup() {
     // corrupted after this (as opposed to just failing to start, which
     // the existing heap guards already handle safely), that's the first
     // thing to suspect and this call is the one to revert.
-    heap_caps_malloc_extmem_enable(4096);
+    //
+    // LOWERED from 4096 to 128 -- real logged numbers (CLAUDE.md's "we
+    // have a memory issue" writeup) showed internal heap getting tight
+    // enough that Bluetooth's OWN post-init baseline cost alone was
+    // enough to starve out every later radio operation. 4096 only ever
+    // caught genuinely large allocations (a big opened playlist's track
+    // vector, a lyrics buffer) -- it never touched the much more common
+    // small ones: every individual Track's artist/album/title/path
+    // String, each well under 4KB on its own but numerous (up to
+    // hundreds of small String buffer allocations live at once while a
+    // big playlist/album screen is open, via Library's on-SD index
+    // materializing that one screen's tracks -- see CLAUDE.md's on-SD-
+    // index writeup). Arduino's String class has no small-string
+    // optimization -- any non-empty one allocates its buffer from the
+    // heap immediately, and 128 bytes is low enough that essentially
+    // every real String buffer in this app (not just the rare huge one)
+    // now prefers PSRAM, while leaving truly tiny, latency-sensitive
+    // allocations (a handful of bytes) on internal RAM where fast access
+    // actually matters. Same safety argument as before applies unchanged:
+    // DMA-capable allocations explicitly request MALLOC_CAP_DMA/INTERNAL
+    // and bypass this threshold regardless, so WiFi/BT/I2S's own buffers
+    // are unaffected either way.
+    heap_caps_malloc_extmem_enable(128);
 
     initDisplay();
     AnoInput::begin();

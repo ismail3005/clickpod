@@ -1,13 +1,15 @@
 #pragma once
 
 #include <atomic>
+#include <esp_bt_main.h>
 #include <esp_heap_caps.h>
 
 #include <Arduino.h>
 
 // Minimum free INTERNAL (non-PSRAM) heap required before starting WiFi or
-// classic Bluetooth. Both subsystems' controller/driver buffers must come
-// from internal, DMA-capable RAM -- PSRAM doesn't count, and ESP.getFreeHeap()
+// classic Bluetooth COLD -- i.e. before Bluedroid has ever been initialized
+// this session. Both subsystems' controller/driver buffers must come from
+// internal, DMA-capable RAM -- PSRAM doesn't count, and ESP.getFreeHeap()
 // alone is misleading here because it can report plenty of headroom that's
 // actually all PSRAM while internal RAM is the thing that's actually
 // scarce. Hit in the field twice now: BT failed a semaphore/queue alloc
@@ -17,21 +19,45 @@
 // scan, which is the obvious concurrent consumer of internal heap at that
 // point in boot. This threshold is a conservative placeholder, not a
 // number backed by ESP-IDF documentation of exact WiFi/BT minimums (that
-// figure isn't reliably published and depends on config) -- tune it down
-// if the real logged numbers below it turn out comfortably safe, or up if
-// it still isn't enough headroom.
-constexpr size_t kMinInternalHeapForRadio = 60 * 1024;
+// figure isn't reliably published and depends on config).
+constexpr size_t kMinInternalHeapForRadioColdInit = 60 * 1024;
+
+// Minimum free internal heap for any BT operation ONCE Bluedroid is already
+// initialized (reconnecting, discovery, retrying) -- deliberately lower
+// than the cold-init floor above. Real field numbers (not a guess): the
+// first-ever Bluedroid init this session permanently drops free internal
+// heap from ~128KB to a STABLE ~39-40KB baseline (confirmed across many
+// consecutive log lines, not trending down further -- it's Bluedroid's own
+// resident footprint, not a leak), and BT kept running/scanning fine at
+// that level with no crash. The original single 60KB floor made this
+// permanent post-init baseline fail its OWN heap check forever after the
+// very first successful start -- every later reconnect/retry/discovery
+// this session would see ~40KB, below 60KB, and refuse unconditionally.
+// That's a real bug this threshold was causing, not a hardware limit: the
+// device's observed behavior at ~40KB was fine, the number asserting
+// otherwise is just a lower floor than the cold-init number for other, more
+// generic reasons. 25KB leaves real margin under that confirmed-OK ~40KB
+// baseline while still refusing if something else pushes it meaningfully
+// lower than what's already been seen working.
+constexpr size_t kMinInternalHeapForRadioWarm = 25 * 1024;
 
 // Logs the current internal-heap headroom and returns whether it's safe to
 // start WiFi or BT right now. Call this BEFORE touching either subsystem --
 // unlike a crash inside their own init code (which aborts the whole
 // device, unrecoverable from app code), this lets the caller skip/defer
-// instead, which is the only way to actually avoid the abort().
+// instead, which is the only way to actually avoid the abort(). Uses the
+// lower "warm" floor once Bluedroid is already initialized (see above) --
+// WiFi has no equivalent "already paid its init cost" signal available
+// here, so it always uses the conservative cold-init floor regardless;
+// that's fine, this mainly exists to un-stick repeated BT operations after
+// the first one.
 inline bool radioHeapOk(const char *who) {
     size_t freeInternal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    Serial.printf("[radio] %s: free internal heap %u bytes (need >= %u)\n",
-                  who, (unsigned)freeInternal, (unsigned)kMinInternalHeapForRadio);
-    if (freeInternal < kMinInternalHeapForRadio) {
+    bool bluedroidUp = esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED;
+    size_t minNeeded = bluedroidUp ? kMinInternalHeapForRadioWarm : kMinInternalHeapForRadioColdInit;
+    Serial.printf("[radio] %s: free internal heap %u bytes (need >= %u%s)\n", who, (unsigned)freeInternal,
+                  (unsigned)minNeeded, bluedroidUp ? ", warm" : ", cold");
+    if (freeInternal < minNeeded) {
         Serial.printf("[radio] %s: skipping -- not enough internal heap headroom, "
                       "would likely crash the device instead of just failing to start\n",
                       who);

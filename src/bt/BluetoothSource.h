@@ -26,7 +26,23 @@ constexpr const char *kTargetDeviceName = "ULT WEAR";
 // targetDeviceName is the name of the SINK device to scan for and connect
 // to (your headphones/speaker's actual BT name) -- source mode actively
 // seeks out a known target, it doesn't advertise itself to be paired with.
-void begin(const char *targetDeviceName);
+//
+// allowAutoReconnect (default true): ESP32-A2DP has real NVS-backed
+// bonding already built in (set_last_connection()/get_last_connection(),
+// confirmed by reading the real library source) -- with it enabled, a
+// connect to a device that's already bonded skips the name-based
+// discovery scan entirely and reconnects straight to the stored address,
+// which is also why it doesn't need the device back in pairing/
+// discoverable mode (that's only required to be FOUND during a scan, not
+// to accept a direct reconnect from an already-bonded peer). Previously
+// never enabled, which is why every reconnect -- even to a device that
+// had connected successfully several times before -- still required
+// pairing mode again. Pass false specifically when the user is
+// explicitly picking a device from the real picker screen (see
+// connectToDiscovered() below): that path needs a genuine scan by name,
+// not a silent reconnect to whatever was bonded before, since the user
+// may be choosing a DIFFERENT device than the last one.
+void begin(const char *targetDeviceName, bool allowAutoReconnect = true);
 
 // Stops the A2DP source and disconnects. Safe to call even if never
 // begun/already stopped.

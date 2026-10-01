@@ -1783,6 +1783,113 @@ nearby device names, picking one and having it actually connect (not just
 compile), and the boot-time auto-resume picking up a previously-chosen
 device correctly after a reboot.
 
+## Twentieth real hardware bug (found, fixed): real BT reconnect without re-pairing + a tiered heap threshold, from real post-flash numbers
+
+User flashed the device-picker round and reported two things from a real
+serial log: (1) headphones that had connected successfully several times
+still needed to go back into pairing mode every single time, and (2) "we
+have a memory issue man" -- `radioHeapOk()` logging free internal heap as
+low as 0 bytes, and a sustained ~39-40KB baseline well under the 60KB
+floor, meaning every Bluetooth operation after the first discovery scan
+kept getting silently refused.
+
+**Reconnect fix**: read the real `ESP32-A2DP` source again and confirmed
+it already has NVS-backed bonding built in --
+`set_last_connection()`/`get_last_connection()`/`last_bda_nvs_name()`
+store a bonded device's address in NVS, and `bt_app_av_sm_hdlr()`'s
+`APP_AV_STATE_IDLE` handler checks `reconnect_status == AutoReconnect &&
+has_last_connection()` -- if true, it connects DIRECTLY to the stored
+address, skipping the name-based discovery scan entirely (which is the
+only reason a device needs to be in pairing/discoverable mode in the
+first place -- that's only required to be FOUND during a fresh inquiry
+scan, not to accept a direct reconnect from an already-bonded peer).
+**`reconnect_status` defaults to `NoReconnect`** (confirmed in
+`BluetoothA2DPCommon.h` -- the library's own header comment claiming
+"per default this is on" is wrong/stale), and this codebase never
+enabled it, so every single connect -- even to a device that had paired
+successfully many times before -- always did a fresh name-scan requiring
+pairing mode. This is the same class of thing as the "doesn't enumerate
+discoverable devices" claim corrected earlier this session: the library
+supports more than this codebase assumed.
+
+Fixed: `BluetoothSource::begin()` gained an `allowAutoReconnect` parameter
+(default `true`), calling `a2dpSource.set_auto_reconnect(allowAutoReconnect)`
+before `start()`. The normal paths (status-row tap, boot auto-resume)
+use the default -- a bonded device reconnects silently, no pairing mode
+needed. The device-picker's `connectToDiscovered()` explicitly passes
+`false`: auto-reconnect's stored-address branch would otherwise IGNORE
+the picked name entirely and silently reconnect to whatever was bonded
+before, if anything -- forcing a real name-based scan here is also what
+lets the library's own success handler update its stored address to the
+newly-picked device, so the next normal `begin()` call correctly
+auto-reconnects to that device from then on.
+
+**Heap threshold fix, from real numbers, not another guess**: the
+original single `kMinInternalHeapForRadio` (60KB) assumed WiFi/BT always
+need the same conservative floor. The real log showed something
+different: the FIRST-ever Bluedroid init this session (while heap was
+still high, ~128KB) succeeded and permanently dropped free internal heap
+to a STABLE ~39-40KB baseline -- not trending down further (not a leak),
+just Bluedroid's own resident footprint for the rest of the session. BT
+kept running/scanning fine at that level, no crash -- but the ORIGINAL
+60KB floor meant every operation after that first one (reconnect,
+retry, a second discovery scan) saw ~40KB, failed the 60KB check, and
+silently refused forever. The threshold itself was the bug, not a real
+hardware limit.
+
+Split into two: `kMinInternalHeapForRadioColdInit` (60KB, unchanged --
+for before Bluedroid has ever been initialized this session, where the
+actual documented crashes happened) and `kMinInternalHeapForRadioWarm`
+(25KB -- for once it's already up, based on the confirmed-OK ~39-40KB
+observed baseline, with real margin under it). `radioHeapOk()` now
+checks `esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED` to
+pick which floor applies -- WiFi has no equivalent "already paid its
+init cost" signal available here, so it always uses the conservative
+cold-init floor regardless; this mainly un-sticks repeated BT operations
+after the first one. `esp_bt_main.h`'s `esp_bluedroid_get_status()` is
+core ESP-IDF API, not independently header-verified in this sandbox (no
+IDF headers available here), same confidence caveat as
+`esp_bt_controller_mem_release()` used earlier this session.
+
+**PSRAM pushed harder, system-wide, in response to "use the psram to
+offload pressure"**: `main.cpp`'s `heap_caps_malloc_extmem_enable()`
+threshold lowered from 4096 to 128 bytes. The 4096 threshold (set
+earlier this session) only ever caught genuinely large allocations (a
+big opened playlist's track vector, a lyrics buffer) -- it never touched
+the much more common SMALL ones: every individual `Track`'s artist/
+album/title/path `String`, each comfortably under 4KB alone but numerous
+(up to hundreds live at once while a big playlist/album screen is open,
+via the on-SD index materializing that one screen's tracks). Arduino's
+`String` has no small-string optimization -- any non-empty one
+allocates its buffer from the heap immediately -- so this is a real,
+previously-unaddressed chunk of internal RAM this change moves to PSRAM
+automatically, system-wide, instead of needing every call site hunted
+down by hand. Same safety argument as before applies unchanged:
+DMA-capable allocations explicitly request `MALLOC_CAP_DMA`/`INTERNAL`
+and bypass this threshold regardless, so WiFi/BT/I2S's own buffers are
+unaffected either way -- if audio or Bluetooth output gets audibly
+glitchy/corrupted after this (not just "fails to start," which the
+existing heap guards already handle safely), this is the thing to
+suspect and revert first.
+
+**Not yet hardware-confirmed**, same caveat as every change this
+session. Next real step: flash, confirm the headphones connect WITHOUT
+needing pairing mode this time (should just reconnect silently to
+whatever was bonded last), and check whether the heap numbers in a fresh
+log look healthier across a longer session (multiple BT operations, not
+just the first one).
+
+**Still open, not addressed this round**: the WiFi hotspot still isn't
+connecting -- user confirms the credentials file content should be
+correct on their end (named it themselves, has the password), and the
+scan list shows a plausible candidate (`"Idephics2"`, a personal-looking
+name unlike the institutional `epfl`/`eduroam` entries also in range) --
+but the diagnostic lines added for the eighteenth bug (file size, every
+raw line read from `/clickpod_wifi.txt`) weren't included in the pasted
+log excerpt (it started mid-session, not from a fresh boot), so this
+still isn't actually confirmed either way. Next real step: get those
+specific lines from a fresh power-on, not guess further.
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time

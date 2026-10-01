@@ -65,7 +65,7 @@ bool ssidCallback(const char *ssid, esp_bd_addr_t /*address*/, int /*rssi*/) {
 
 } // namespace
 
-void BluetoothSource::begin(const char *targetDeviceName) {
+void BluetoothSource::begin(const char *targetDeviceName, bool allowAutoReconnect) {
     if (running) return;
 
     // Internal-heap guard FIRST -- a real crash in the field
@@ -91,6 +91,7 @@ void BluetoothSource::begin(const char *targetDeviceName) {
     Serial.printf("[bt] Starting Bluetooth A2DP source... (free heap: %u bytes)\n", ESP.getFreeHeap());
     a2dpSource.set_data_callback(provideTestTone);
     a2dpSource.set_ssid_callback(nullptr); // ensure a prior discovery scan's callback isn't still armed
+    a2dpSource.set_auto_reconnect(allowAutoReconnect); // see BluetoothSource.h's comment on this parameter
     a2dpSource.start(targetDeviceName);
     RadioLock::release(); // see above -- don't hold this past the actual start() call
     running = true;
@@ -149,5 +150,16 @@ void BluetoothSource::connectToDiscovered(const char *name) {
     a2dpSource.cancel_discovery();
     a2dpSource.set_ssid_callback(nullptr);
     running = false; // startDiscovery() never set this true -- begin() below starts the real connection fresh
-    begin(name);
+    // allowAutoReconnect=false: the user is explicitly picking a device by
+    // name from the real scan results -- if a DIFFERENT device was
+    // already bonded before, auto-reconnect would silently ignore this
+    // name and reconnect to that old one instead (confirmed from the
+    // library source: the auto-reconnect branch bypasses the name/
+    // discovery path entirely whenever a stored last-connection exists).
+    // Forcing a real name-based scan here is what lets the library's own
+    // successful-connection handler (filter_inquiry_scan_result()) update
+    // its stored "last connection" to THIS device, so every subsequent
+    // normal begin() (status row, boot auto-resume) correctly auto-
+    // reconnects to the newly-picked device from then on.
+    begin(name, /*allowAutoReconnect=*/false);
 }
