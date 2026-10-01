@@ -193,6 +193,13 @@ void handleTap(AnoButton btn) {
 
 void handleLongPress(AnoButton btn) {
     if (btn == AnoButton::CENTER) { togglePower(); return; }
+    // AOD/locked-screen requirement: ignore every input except the CENTER
+    // long-press wake gesture while "off". handleTap()/rotate() already
+    // had this guard; this one didn't -- a RIGHT long-press while
+    // supposedly locked (e.g. tossed in a bag) would silently wake
+    // Bluetooth and jump into its menu, defeating the whole point of a
+    // locked screen protecting against pocket/bag button presses.
+    if (state.mode == AppMode::OFF) return;
     if (btn == AnoButton::RIGHT) { MenuEngine::enterBluetooth(); return; } // global
 
     if (state.mode == AppMode::MENU || state.mode == AppMode::BT) {

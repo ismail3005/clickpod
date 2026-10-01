@@ -88,12 +88,37 @@ void drawBoot() {
     tftPtr->print("booting...");
 }
 
+// AOD/locked screen's clock -- separated from drawOff() so a once-a-minute
+// tick (see UI.cpp's tickStatusbarClock(), which runs regardless of mode)
+// can refresh just this text without re-blitting the whole black screen
+// every time, same reasoning as drawStatusbar()'s own partial-redraw path.
+// Background here is already solid black from drawOff()'s one-time
+// fillScreen(), so clearing just this strip before redrawing is enough --
+// no flicker risk the way a full-body redraw would have.
+constexpr int16_t kOffClockY = kScreenH / 2 - 24;
+
+void drawOffClock() {
+    tftPtr->fillRect(0, kOffClockY - 4, kScreenW, 36, TFT_BLACK);
+    tftPtr->setTextColor(TFT_WHITE, TFT_BLACK);
+    tftPtr->setTextSize(3);
+    tftPtr->setCursor(kScreenW / 2 - 48, kOffClockY);
+    tftPtr->print(TimeSync::currentTimeString());
+}
+
 void drawOff() {
     tftPtr->fillScreen(TFT_BLACK);
+    drawOffClock();
     tftPtr->setTextColor(0x4208, TFT_BLACK);
     tftPtr->setTextSize(1);
-    tftPtr->setCursor(kScreenW / 2 - 60, kScreenH / 2 - 4);
+    tftPtr->setCursor(kScreenW / 2 - 60, kScreenH / 2 + 20);
     tftPtr->print("hold CENTER to power on");
+    // Real AOD requirement: playback keeps going while locked -- show that
+    // it's still doing so, rather than a screen that looks fully "off"
+    // while music is actually still playing behind it.
+    if (state.now.hasTrack) {
+        tftPtr->setCursor(kScreenW / 2 - 70, kScreenH / 2 + 38);
+        tftPtr->print(state.now.playing ? "playing" : "paused");
+    }
 }
 
 // Matches the simulator's .menu-grid EXACTLY: flex-direction:column, so
@@ -506,10 +531,18 @@ void render() {
     state.selectionDirty = false;
 
     // Lightest redraw of the three -- see UI.cpp's tickStatusbarClock().
-    // Skipped for BOOT (splash hasn't necessarily drawn the statusbar yet)
-    // and OFF (that screen is deliberately blank, no statusbar at all).
-    if (state.statusbarDirty && !state.dirty && state.mode != AppMode::BOOT && state.mode != AppMode::OFF) {
-        drawStatusbar();
+    // Skipped for BOOT (splash hasn't necessarily drawn the statusbar yet).
+    // OFF has no statusbar strip at all (that screen is deliberately
+    // blank elsewhere) but DOES have its own big clock (drawOffClock())
+    // that needs the same once-a-minute refresh, for the same reason --
+    // AOD's "show clock" requirement needs it to actually advance while
+    // locked, not freeze at whatever it showed when the screen locked.
+    if (state.statusbarDirty && !state.dirty) {
+        if (state.mode != AppMode::BOOT && state.mode != AppMode::OFF) {
+            drawStatusbar();
+        } else if (state.mode == AppMode::OFF) {
+            drawOffClock();
+        }
     }
     state.statusbarDirty = false;
 

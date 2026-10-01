@@ -34,7 +34,18 @@ void tickPlaybackClock() {
     if (now - lastClockMs < kClockMs) return;
     lastClockMs = now;
 
-    if (state.mode == AppMode::OFF) return;
+    // Deliberately NOT bailing out for AppMode::OFF here -- the AOD/locked
+    // screen requirement is "keep playback running exactly as-is", which
+    // includes track-end auto-advance and the decode-failure auto-skip
+    // below, not just audio continuing to physically decode. An early
+    // OFF-mode return here would freeze queue advancement the whole time
+    // the screen is locked -- the track playing when you locked the
+    // screen would just... stop, needing a wake+unwake to notice and
+    // advance. The mode-specific branches below (LYRICS, the final
+    // progressDirty branch) naturally no-op while OFF anyway, since mode
+    // can only be one value at a time -- nothing here draws to the
+    // screen, it only updates state, so there's no stray redraw risk from
+    // removing this.
     if (!state.now.playing || !state.now.hasTrack) return;
 
     // Detect a real file that failed to actually start decoding (see
