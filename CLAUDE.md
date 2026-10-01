@@ -1967,15 +1967,15 @@ this actually worked, not just compiled.
 **UPDATE, confirmed on real hardware (same-session case)**: user paired
 once, disconnected, turned Bluetooth back on, and it reconnected
 immediately with no pairing mode needed. The shadow-save/reseed fix
-works for the case it was built for. **Still unconfirmed**: whether this
-survives an actual power-off/reboot, not just an off/on toggle within
-the same running session -- the shadow is saved to our own NVS slot
-(`"cpod_bt"`/`"last_bda"`), which should persist across a reboot same as
-any other NVS write, but this hasn't been tested with a real power cycle
-yet. Next real step when convenient: pair, power the board off
-completely, power back on, and confirm it reconnects without pairing
-mode on the very first post-reboot "Bluetooth On" (manual or
-auto-resume).
+works for the case it was built for.
+
+**UPDATE, confirmed on real hardware (power-cycle case too)**: user
+confirmed BT also reconnected without pairing mode after a RST press and
+separately after a full unplug/power-cycle -- the shadow's own NVS
+persistence (`"cpod_bt"`/`"last_bda"`) genuinely survives a reboot, not
+just an in-session off/on toggle. This bug is fully closed out; both
+halves of the fix (same-session and cross-reboot) are hardware-confirmed
+now, not just theorized from source.
 
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
