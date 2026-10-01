@@ -1964,6 +1964,19 @@ on an already-bonded device, and check the log specifically for
 `"Starting device discovery..."` -- that's the one line that confirms
 this actually worked, not just compiled.
 
+**UPDATE, confirmed on real hardware (same-session case)**: user paired
+once, disconnected, turned Bluetooth back on, and it reconnected
+immediately with no pairing mode needed. The shadow-save/reseed fix
+works for the case it was built for. **Still unconfirmed**: whether this
+survives an actual power-off/reboot, not just an off/on toggle within
+the same running session -- the shadow is saved to our own NVS slot
+(`"cpod_bt"`/`"last_bda"`), which should persist across a reboot same as
+any other NVS write, but this hasn't been tested with a real power cycle
+yet. Next real step when convenient: pair, power the board off
+completely, power back on, and confirm it reconnects without pairing
+mode on the very first post-reboot "Bluetooth On" (manual or
+auto-resume).
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time
