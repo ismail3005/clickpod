@@ -1601,6 +1601,46 @@ Next real step: flash, confirm scrubbing stays audibly uninterrupted
 while playing, and that LEFT/RIGHT now visually responds immediately
 even before the real tags/art catch up a moment later.
 
+## Eighteenth real hardware bug (diagnostics added, not yet root-caused): TimeSync still ignoring the user's hotspot, picked a public open network instead
+
+Fresh log confirmed the fifteenth bug's fix (narrowed `RadioLock`) is no
+longer the blocker -- `tryOnce()` now actually reaches a WiFi scan and
+join attempt (`[time] joining "freewifi-epfl" for NTP (open network)...`).
+But it picked a public open campus network instead of the user's own
+hotspot entirely -- exactly what happens when `knownCredentials` is still
+empty, which the fifteenth bug's writeup already flagged as unconfirmed:
+the credentials-match loop never even got a chance to try the hotspot,
+so the open-network fallback grabbed whatever open network happened to
+be in range. Root cause of the empty credential list itself still not
+pinned down -- this session has no way to see the actual SD card content.
+
+`[time] NTP fetch failed` after `ASSOC_LEAVE` also shows: even the open
+network it DID pick didn't actually get usable NTP time (joined then
+immediately dropped, or joined but the NTP request itself failed) --
+a second, distinct failure layered on top of "wrong network chosen,"
+not yet investigated either.
+
+**Added real diagnostics instead of guessing further** (`TimeSync.cpp`):
+1. `loadCredentialsFromSd()` now logs the file's byte size, every raw
+   line read (length + content) before any filtering, and strips a
+   leading UTF-8 BOM (`EF BB BF`) if present -- a common artifact of
+   saving plain text as "UTF-8 with BOM" (e.g. Windows Notepad's "UTF-8"
+   option), which would otherwise corrupt the first line's SSID. The
+   final "loaded N credentials" line now also reports how many raw lines
+   were read, to distinguish "file is empty" from "file has lines but
+   none parsed."
+2. `tryOnce()` now logs every SSID actually seen in each scan (plus
+   open/secured) before deciding what to join -- directly answers
+   whether the hotspot is even visible to this 2.4GHz-only radio at all
+   (a real possible cause flagged in the fifteenth bug's writeup: many
+   phone hotspots default to 5GHz, invisible to this chip regardless of
+   credentials) versus a credentials-matching problem.
+
+**Next real step**: get a fresh boot log with these new lines -- that
+will show definitively whether the hotspot even appears in scan results,
+and if the credentials file has real content, exactly what's failing to
+parse from it, rather than guessing at formatting again.
+
 ## Settings + Bluetooth-on persistence (Persist / NVS)
 
 `src/state/Persist.*` saves brightness, dark mode, sort preference, time

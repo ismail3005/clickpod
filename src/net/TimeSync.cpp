@@ -67,6 +67,19 @@ SyncResult tryOnce() {
         return SyncResult::kFailed;
     }
 
+    // Diagnostic: log every SSID actually seen this scan, so "it ignores
+    // my hotspot" can be checked directly against real scan results
+    // instead of guessed at -- confirms whether the hotspot is even in
+    // range/visible to this 2.4GHz-only radio at all (a common real-world
+    // gap: many phone hotspots default to 5GHz, which this can never see),
+    // separately from whether knownCredentials has anything to match it.
+    Serial.printf("[time] scan found %d network(s), %u known credential(s) loaded:\n", n,
+                  (unsigned)knownCredentials.size());
+    for (int i = 0; i < n; i++) {
+        Serial.printf("[time]   \"%s\" (%s)\n", WiFi.SSID(i).c_str(),
+                      WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "open" : "secured");
+    }
+
     // Prefer a network matching one of the SD-card credentials (the
     // user's own phone/laptop hotspot -- deliberately chosen, likely more
     // reliably present than a random open network) over an open network.
@@ -157,14 +170,40 @@ void taskFn(void *) {
 
 std::vector<WifiCredential> loadCredentialsFromSd(const char *path) {
     std::vector<WifiCredential> out;
-    if (!SD.exists(path)) return out; // optional file -- no card, or user hasn't made one yet
+    if (!SD.exists(path)) {
+        Serial.printf("[time] %s does not exist on the card\n", path);
+        return out; // optional file -- no card, or user hasn't made one yet
+    }
 
     File f = SD.open(path);
-    if (!f) return out;
+    if (!f) {
+        Serial.printf("[time] %s exists but failed to open\n", path);
+        return out;
+    }
 
+    // Diagnostic logging added after a real-world report of this always
+    // loading 0 credentials despite the user having created the file --
+    // this session can't see the actual SD card content, so rather than
+    // guess at formatting again, log enough that the NEXT boot log
+    // pinpoints the real cause (empty file, wrong encoding, no comma,
+    // etc.) directly instead of just "0 loaded".
+    Serial.printf("[time] %s: %u bytes\n", path, (unsigned)f.size());
+
+    int rawLineCount = 0;
     while (f.available()) {
         String line = f.readStringUntil('\n');
+        rawLineCount++;
+        // Strip a UTF-8 BOM (EF BB BF) if present -- a common artifact of
+        // saving a plain-text file as "UTF-8 with BOM" from some editors
+        // (e.g. Windows Notepad's "UTF-8" option), which would otherwise
+        // corrupt the very first line's SSID with 3 leading junk bytes.
+        if (line.length() >= 3 && (uint8_t)line[0] == 0xEF && (uint8_t)line[1] == 0xBB &&
+            (uint8_t)line[2] == 0xBF) {
+            line = line.substring(3);
+        }
         line.trim();
+        Serial.printf("[time] line %d (%u chars): \"%s\"\n", rawLineCount, (unsigned)line.length(),
+                      line.c_str());
         if (line.length() == 0 || line.startsWith("#")) continue;
 
         int comma = line.indexOf(',');
@@ -184,7 +223,8 @@ std::vector<WifiCredential> loadCredentialsFromSd(const char *path) {
     }
     f.close();
 
-    Serial.printf("[time] loaded %u WiFi credential(s) from %s\n", (unsigned)out.size(), path);
+    Serial.printf("[time] loaded %u WiFi credential(s) from %s (%d raw line(s) read)\n", (unsigned)out.size(),
+                  path, rawLineCount);
     return out;
 }
 
