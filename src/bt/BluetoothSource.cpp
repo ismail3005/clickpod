@@ -218,6 +218,16 @@ void BluetoothSource::end() {
     if (liveBda && !isZeroBda(liveBda)) {
         saveShadow(liveBda);
     }
+    // Diagnostic logging, mirroring begin()'s -- a real-world report of
+    // the device crash-rebooting while turning Bluetooth off during an
+    // active reconnect loop has no serial log to point at a cause yet
+    // (happened running on battery, untethered). end()'s teardown
+    // (disconnect(), AVRC deinit, its own NVS writes) does real heap
+    // allocation internally, same class of risk as begin()'s own guarded
+    // start() call -- next crash with a serial monitor attached, this is
+    // the number to check first instead of guessing blind again.
+    Serial.printf("[bt] Stopping Bluetooth A2DP source... (free internal heap: %u bytes)\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     a2dpSource.end();
     running = false;
     // No RadioLock::release() here -- begin() no longer holds the lock

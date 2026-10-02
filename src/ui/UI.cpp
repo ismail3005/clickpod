@@ -71,7 +71,25 @@ void tickPlaybackClock() {
     // why scrubbing looked like it worked but didn't actually move the
     // audio: the real decoder position and the UI's posSec were two
     // unrelated numbers.
-    if (state.now.path.length() > 0) {
+    //
+    // While state.scrubPending is true (InputRouter.cpp's rotate() set it,
+    // a real seek is debounced and hasn't committed yet), skip this sync
+    // entirely -- real-world report: the bar visually moved to where the
+    // user scrubbed, then "rubberbanded" back every ~500ms while still
+    // scrubbing. Root cause: this sync ran unconditionally on its own
+    // timer regardless of a pending scrub, and kept overwriting posSec
+    // with the REAL decoder position (which hadn't moved yet, since the
+    // seek was still debounced) -- fighting rotate()'s own posSec update.
+    // Skipping it here means the bar only moves with the scrub itself
+    // while scrubbing, then picks up the real position again the instant
+    // the debounced seek commits (InputRouter::update() clears the flag
+    // right after calling AudioBridge::seekTo()) -- exactly "scrub moves
+    // the bar, release commits the seek" with no fight in between.
+    if (state.scrubPending) {
+        // still counts as a position tick for everything else below
+        // (track-end check, progress redraw) -- just not resynced from
+        // the real decoder this tick.
+    } else if (state.now.path.length() > 0) {
         state.now.posSec = (float)AudioBridge::currentTimeSec();
     } else {
         state.now.posSec += kClockMs / 1000.0f;

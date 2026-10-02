@@ -2144,6 +2144,77 @@ regardless of whether this exact join-path bug recurs.
 sync still works (should be unchanged from the known-good c8a65e1
 behavior) and no bootloop.
 
+## Twenty-fifth real hardware bug (found, fixed): scrubbing visually "rubberbanded" back during an active scrub -- the real-position sync was fighting it
+
+User correctly self-diagnosed this one: "the sync of the bar is fighting
+the scrubbing." Confirmed exactly right by reading both sides. `UI.cpp`'s
+`tickPlaybackClock()` runs every ~500ms and unconditionally syncs
+`state.now.posSec` from `AudioBridge::currentTimeSec()` (the REAL
+decoder position) whenever a real file is loaded -- with zero awareness
+of `InputRouter.cpp`'s debounced scrub-commit (`scrubSeekPending`,
+`kScrubIdleCommitMs=400`). While actively scrubbing, `rotate()` updates
+`state.now.posSec` locally every detent, but the REAL seek doesn't fire
+until rotation goes idle for 400ms -- so every ~500ms, the unconditional
+sync overwrote that local scrub position with the stale real one,
+producing exactly the described "scrub moves the bar, then it snaps
+back" loop, repeating the whole time the user kept turning (never idle
+long enough to let the real seek commit and catch the display up).
+
+**Fixed**: `AppState.h` gained `state.scrubPending`, set by `rotate()`
+the moment a scrub starts (alongside the existing `scrubSeekPending`)
+and cleared by `InputRouter::update()` right after the debounced real
+seek actually commits. `tickPlaybackClock()` now skips the real-position
+sync entirely while `state.scrubPending` is true -- the bar only moves
+with the scrub itself during scrubbing, then picks up the real decoder
+position again the instant the seek commits, matching exactly what was
+asked for ("the song keeps playing, the bar only visually moves with
+the scrubbing, then when I stop the sync picks up that new location").
+
+**Residual, not addressed this round**: the user also reported real
+audio glitches/static at the moment a long scrub finally commits, not
+just a brief silent gap. This is a SEPARATE issue from the rubberbanding
+(which was purely a display bug, now fixed) -- it's about the actual
+seek/resync mechanism itself, likely the same territory as the
+nineteenth bug's parked "scrubbing is laggy" finding (the CRC-8 fix
+already shipped prevents crashes/freezes here, confirmed on hardware,
+but doesn't claim to make every resync glitch-free). Not investigated
+further this round -- needs confirmation after the rubberbanding fix
+lands, since fixing the visual fight might also change how long/far a
+real scrub gesture tends to run before committing, which could itself
+affect how noticeable the residual glitch is.
+
+## Twenty-sixth real hardware bug (reported, diagnostics added, not yet root-caused): device crashes/reboots turning Bluetooth off during an active reconnect loop
+
+User reported a real crash-reboot while trying to turn Bluetooth off
+specifically while it was "constantly trying to scan and connect" --
+happened running on battery, untethered from a computer, so no serial
+log exists for this one yet. Given this project's established heap-
+exhaustion history (seventh/eighth/twentieth bugs -- Bluedroid's own
+resident footprint permanently drops free internal heap to a ~39-40KB
+baseline once initialized), the user's own "memory thing" guess is
+plausible: `BluetoothSource::end()`'s teardown (`a2dpSource.end()` --
+`disconnect()`, AVRC deinit, its own NVS writes) does real heap
+allocation internally, same class of risk `begin()`'s already-guarded
+`start()` call has, but `end()` itself has never had a heap guard or
+even diagnostic logging.
+
+**Not fixed blind** -- guessing at which specific internal call inside
+the library's teardown path crashed, with no log to confirm against,
+would be exactly the kind of guess this project avoids. Added the same
+diagnostic logging `begin()` already has (free internal heap right
+before the risky call) to `end()` instead, so the NEXT crash -- ideally
+reproduced with a serial monitor attached -- gives real numbers instead
+of needing another guess. If it turns out to be heap exhaustion,
+`end()` would need a `radioHeapOk()`-style guard added mirroring
+`begin()`'s -- not done yet since that's a real behavior change
+(refusing to let the user turn Bluetooth off) that shouldn't be guessed
+at without confirming the cause first, unlike `begin()` where skipping
+is clearly the safe default.
+
+**Next real step**: reproduce with `pio device monitor` attached (even
+briefly, over USB, not on battery) and capture the actual panic output
+plus the new heap log line right before it.
+
 ## Real Bluetooth audio -- DONE, not yet hardware-confirmed
 
 Was initially scoped out of an earlier round of this session (see the

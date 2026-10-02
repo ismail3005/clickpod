@@ -130,6 +130,15 @@ struct AppState {
     // attempt, same boot-crash-guard shape as the Bluetooth one. See
     // CLAUDE.md for the real bootloop this was added after.
     bool timeSyncSkipFirstAttempt = false;
+
+    // Set by InputRouter.cpp's rotate() the moment a scrub starts, cleared
+    // once the debounced real seek actually commits (InputRouter::update()).
+    // UI.cpp's tickPlaybackClock() checks this before syncing posSec from
+    // AudioBridge::currentTimeSec() -- without it, that unconditional
+    // every-500ms real-position sync fights the scrub: the real decoder
+    // hasn't moved yet (the seek is debounced), so the display kept
+    // snapping back to the stale real position mid-scrub ("rubberbanding").
+    bool scrubPending = false;
 };
 
 extern AppState state;

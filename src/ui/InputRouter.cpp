@@ -87,6 +87,13 @@ void rotate(int dir) {
             scrubPendingSec = (uint16_t)state.now.posSec;
             scrubSeekPending = true;
             lastScrubRotateMs = millis();
+            // See AppState.h's comment -- tells UI.cpp's tickPlaybackClock()
+            // to stop syncing posSec from the real decoder position while a
+            // scrub is in flight, so its periodic sync can't fight this
+            // rotate()'s own posSec update (the "rubberbanding" bug: the
+            // real decoder hasn't moved yet, the seek is debounced, so the
+            // display kept snapping back to the stale real position).
+            state.scrubPending = true;
         }
         // progressDirty (light redraw: just the position/time strip), not
         // the full state.dirty -- scrubbing only changes the displayed
@@ -293,6 +300,11 @@ void update() {
     if (scrubSeekPending && millis() - lastScrubRotateMs >= kScrubIdleCommitMs) {
         AudioBridge::seekTo(scrubPendingSec);
         scrubSeekPending = false;
+        // Real seek just committed -- let UI.cpp's tickPlaybackClock()
+        // resume syncing posSec from the real decoder position again, now
+        // that there's something real to sync FROM (see rotate()'s comment
+        // on state.scrubPending).
+        state.scrubPending = false;
     }
 }
 
