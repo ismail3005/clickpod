@@ -2258,6 +2258,104 @@ is clearly the safe default.
 briefly, over USB, not on battery) and capture the actual panic output
 plus the new heap log line right before it.
 
+**UPDATE -- ROOT CAUSE FOUND, real crash log obtained, fixed.** User got
+a monitor attached and caught the exact crash -- this wasn't a heap
+issue at all, it was `TimeSync.cpp`'s `WiFi.setSleep(false)` (added in
+the twenty-fourth bug's "fix", kept through the revert since it was
+judged low-risk): the log showed, in full:
+```
+E wifi:Error! Should enable WiFi modem sleep when both WiFi and Bluetooth are enabled!!!!!!
+abort() was called at PC 0x4022b264 on core 0
+```
+This is a real, documented ESP-IDF requirement: when classic Bluetooth
+and WiFi are both active on the shared radio (this app's normal
+operating state -- BT commonly stays connected/reconnecting while
+TimeSync's periodic sync runs), WiFi modem sleep MUST stay enabled for
+the coexistence arbiter to work; disabling it hard-aborts the whole
+device the moment both radios are live at once. The user's crash
+("trying to turn Bluetooth off" while BT was mid-reconnect-loop) lined
+up exactly: TimeSync's periodic scan ran concurrently, hit
+`WiFi.setSleep(false)`, aborted. **"Low risk because it's a simple
+no-pointer-args call" was the wrong lens -- simplicity of the call
+signature says nothing about whether it's safe to call, and this is
+exactly the kind of IDF-level behavioral requirement that needs to
+actually be known, not inferred from how simple an API looks.** Removed
+`WiFi.setSleep(false)` entirely from `TimeSync.cpp` -- never reattempt
+this without independently confirming IDF's coexistence requirements
+first, regardless of how it's framed as a "fix" for something else.
+
+This is almost certainly ALSO the real cause of the twenty-fourth bug's
+original bootloop, not the BSSID/channel `WiFi.begin()` overload that
+got blamed and reverted at the time (that revert was harmless to make
+regardless, and the overload itself was independently verified correct
+against the real header -- but this `setSleep(false)` line was present
+in that same commit and is now proven, not just suspected, to cause
+exactly this class of crash under real operating conditions).
+
+## Twenty-seventh real hardware bug/decision: Bluetooth no longer auto-resumes on boot -- user's explicit call after living through the crash loop above
+
+Same crash above exposed a real design problem independent of the
+`setSleep` bug itself: `state.btOn` persisting across reboots meant
+Bluetooth auto-resumed on EVERY boot, immediately starting an unattended
+reconnect-then-discovery loop the moment the device powered on -- a
+real, continuous radio/battery cost, and (while the device was bonded
+to headphones that could be powered off at any time, same real session)
+a real crash surface combined with TimeSync's periodic WiFi scans
+sharing the same radio. User's own framing: "bluetooth should be off by
+default... I should turn on Bluetooth manually so it's not constantly
+trying to scan and connect," with "keep remembering on/off state but
+stop hammering reconnect forever" offered as a fallback.
+
+**Implemented the user's actual stated preference, not just the
+fallback**: `main.cpp`'s `setup()` no longer calls `BluetoothSource::
+begin()` based on persisted `state.btOn` at all -- removed the whole
+boot-auto-resume block. `state.btOn`/`Persist::save()`/`load()` still
+exist and still drive the Bluetooth screen's remembered on/off display
+and the shadow-reconnect address (still used so a MANUAL "Bluetooth On"
+reconnects without needing pairing mode again, see the twenty-first
+bug) -- just no longer acted on automatically at boot. Turning Bluetooth
+on is now always an explicit user action from the Bluetooth menu.
+`Persist::markBtAttemptStarting()`/`markBtAttemptDone()` (the boot-
+crash guard from the seventh bug) are now dead code for this call site
+-- left in place rather than deleted, harmless, and the manual "Bluetooth
+On" row never needed them anyway (already safe by ordering, per
+Persist.h's existing comment).
+
+**Also added, addressing "stop hammering reconnect forever" for when
+Bluetooth IS manually turned on and nothing's in range**:
+`BluetoothSource::tick()` (new, called once per `loop()` iteration) --
+a simple application-level watchdog, since the library itself exposes
+no "give up after N attempts" knob reachable from app code for its
+reconnect-then-fallback-to-discovery sequence (confirmed by reading
+`handle_reconnect_logic()`/the GAP discovery-failed handler again --
+both effectively retry forever via the library's own 10s heartbeat once
+something is actively searching, with no public way to bound that from
+outside). Tracks how long BT has been disconnected-and-searching
+(reset to "not searching" the moment a real connection lands, so a
+LATER drop after hours of good connection gets its own fresh window,
+not one measured from the original `begin()` call); past 60 seconds of
+fruitless searching, calls `end()` itself. `main.cpp`'s existing
+`syncBluetoothToUi()` already picks this up automatically next loop
+(it already syncs `state.btOn` from `BluetoothSource::isRunning()`
+every iteration) -- no new UI-side wiring needed.
+
+**Not a new "stop searching" button** -- checked `MenuEngine::
+enterBluetooth()`'s screen first: the existing "Turn Bluetooth Off" row
+is unconditionally present (not gated behind connection state) and
+already calls `BluetoothSource::end()` unconditionally, so it already
+IS a universal stop-everything control; the crash above is what made it
+LOOK broken/missing, not an actual gap. "Choose device..." (the real
+discovery picker, already built -- see the dedicated section above) is
+already the explicit manual-scan trigger the user also asked for.
+Nothing new needed on either front.
+
+**Not yet hardware-confirmed** (the no-auto-resume and give-up-watchdog
+changes specifically -- the `setSleep` removal above IS confirmed, from
+the real crash log). Next real step: flash, confirm Bluetooth stays off
+after a power cycle until manually turned on, and confirm turning it on
+with nothing in range gives up on its own after about a minute instead
+of continuing to search.
+
 ## Real Bluetooth audio -- DONE, not yet hardware-confirmed
 
 Was initially scoped out of an earlier round of this session (see the

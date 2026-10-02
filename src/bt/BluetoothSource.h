@@ -94,4 +94,17 @@ void connectToDiscovered(const char *name);
 // different tasks. Safe to call even when not connected (no-ops).
 void feedPcm(const uint8_t *data, size_t len);
 
+// Call once per main loop() iteration while BT is on. Watches how long
+// it's been searching/reconnecting without actually landing a connection
+// and gives up (calls end() internally) past kGiveUpMs -- see the real
+// crash/complaint this was added for: "constantly trying to scan and
+// connect" is both a real battery/radio cost and, combined with
+// TimeSync's periodic WiFi scans sharing the same radio, a real crash
+// surface. The library's own retry logic (reconnect-by-address, then
+// fall back to discovery) has no exposed "give up after N attempts"
+// knob from application code -- this is a deliberately simple
+// application-level watchdog on top of it instead. No-op when not
+// running or already connected.
+void tick();
+
 } // namespace BluetoothSource

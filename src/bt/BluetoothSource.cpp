@@ -86,6 +86,16 @@ BluetoothA2DPSource a2dpSource;
 bool running = false;
 String currentTarget; // name last passed to begin(), "" if never begun
 
+// See tick()/BluetoothSource.h's comment -- 0 means "not currently
+// searching" (either never begun, or currently connected). Set to
+// millis() the moment a disconnected/searching state is first observed,
+// reset to 0 the moment a connection lands -- so the give-up window
+// always measures from the start of the CURRENT search, not from the
+// original begin() call hours earlier if it had connected and later
+// dropped.
+uint32_t searchingSinceMs = 0;
+constexpr uint32_t kGiveUpMs = 60000; // 1 minute of fruitless searching
+
 // Real audio ring buffer -- fed by AudioBridge.cpp's audio_process_i2s()
 // weak-symbol override (ESP32-audioI2S's own documented hook, literally
 // commented "record audiodata or send via BT" in its header) with every
@@ -159,6 +169,7 @@ bool ssidCallback(const char *ssid, esp_bd_addr_t /*address*/, int /*rssi*/) {
 
 void BluetoothSource::begin(const char *targetDeviceName, bool allowAutoReconnect) {
     if (running) return;
+    searchingSinceMs = 0; // fresh search window -- see tick()'s comment
 
     // Internal-heap guard FIRST -- a real crash in the field
     // (semphr_create_wrapper assert, then separately a WiFi esp_timer_create
@@ -302,4 +313,21 @@ void BluetoothSource::feedPcm(const uint8_t *data, size_t len) {
         pcmCount++;
     }
     xSemaphoreGive(pcmMutex);
+}
+
+void BluetoothSource::tick() {
+    if (!running) return;
+    if (a2dpSource.is_connected()) {
+        searchingSinceMs = 0; // connected -- not searching, reset so a LATER drop gets its own fresh window
+        return;
+    }
+    if (searchingSinceMs == 0) {
+        searchingSinceMs = millis(); // first tick observed as disconnected/searching
+        return;
+    }
+    if (millis() - searchingSinceMs >= kGiveUpMs) {
+        Serial.println(F("[bt] giving up after a minute of searching with no connection -- turning off "
+                          "(use the Bluetooth menu to try again)"));
+        end();
+    }
 }

@@ -243,28 +243,25 @@ void setup() {
 
     if (sdOk) AudioBridge::begin(audio); // wired output; Bluetooth is a separate on/off toggle driven from the UI
 
-    // Resume Bluetooth if it was on when the device last powered off
-    // (state.btOn came from Persist::load() above -- which also already
-    // refused to set it true again if the last attempt to do exactly this
-    // never confirmed it finished, i.e. crashed -- see Persist::load()'s
-    // comment and CLAUDE.md). syncBluetoothToUi() below keeps the UI's
-    // status honest either way if this declines to start (e.g. RadioLock
-    // busy -- see BluetoothSource.cpp). markBtAttemptStarting()/Done()
-    // bracket this specific call so a crash INSIDE begin() leaves the
-    // pending flag set in NVS for the next boot to detect.
-    // BluetoothSource::begin() itself checks radioHeapOk() before touching
-    // the controller (see BluetoothSource.cpp) -- markBtAttemptStarting()/
-    // Done() still bracket the call for the boot-crash guard regardless,
-    // since a crash from some OTHER cause inside begin() should still be
-    // caught by it, not just the heap case this round's fix targets.
-    if (state.btOn) {
-        Persist::markBtAttemptStarting();
-        const char *resumeTarget = state.btDeviceName.length() > 0
-                                        ? state.btDeviceName.c_str()
-                                        : BluetoothSource::kTargetDeviceName;
-        BluetoothSource::begin(resumeTarget);
-        Persist::markBtAttemptDone();
-    }
+    // Bluetooth deliberately does NOT auto-resume on boot anymore, even if
+    // it was left on last session (state.btOn is still persisted and still
+    // drives the UI's remembered on/off display -- just no longer acted on
+    // here). User's own explicit call after a real crash-reboot while BT
+    // was mid-reconnect-loop: auto-resuming on every boot meant the radio
+    // started hammering reconnect/discovery attempts immediately and
+    // unattended, which is both a real battery cost and (combined with
+    // TimeSync's periodic WiFi scans sharing the same radio) a real crash
+    // surface -- "I should turn on Bluetooth manually" instead. Turning it
+    // on from the Bluetooth menu still works exactly as before, including
+    // the shadow-reconnect fix (reconnects to the last bonded device
+    // without needing pairing mode again) and the new give-up-after-a-
+    // minute watchdog (BluetoothSource::tick(), see loop() below) so a
+    // manual "on" with nothing in range doesn't hammer forever either.
+    // The boot-crash guard (markBtAttemptStarting/Done, Persist::load())
+    // is now dead code for this specific call site but left in place --
+    // enterBluetooth()'s manual "Bluetooth On" row doesn't use it (never
+    // needed to, see Persist.h's comment), and it's harmless to keep for
+    // whenever boot auto-resume is reconsidered.
 
     // Runs entirely on its own background task -- doesn't block the rest
     // of setup() or touch anything else here. See TimeSync.h.
@@ -305,6 +302,7 @@ void loop() {
     AnoInput::update();
     Battery::update();
     syncBatteryToUi();
+    BluetoothSource::tick(); // give-up-after-a-minute-of-searching watchdog, see BluetoothSource.h
     syncBluetoothToUi();
     UI::update();
 }

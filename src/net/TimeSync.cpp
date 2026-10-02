@@ -122,18 +122,19 @@ SyncResult tryOnce() {
         return SyncResult::kFailed;
     }
 
-    // WiFi.setSleep(false): low-risk, well-established standalone call
-    // (no pointer/buffer args, doesn't touch scan state) -- WiFi modem
-    // power-save missing beacons mid-handshake is a documented real
-    // cause of auth flakiness on ESP32. Kept from the reverted join fix
-    // below. The channel/BSSID-targeted WiFi.begin() overload that
-    // shipped alongside it did NOT get kept -- see CLAUDE.md: that
-    // change is the prime suspect for a real bootloop hit in the field
-    // (it's the only change between the last known-good flash and the
-    // one that bootlooped), and the plain two-arg begin() below is
-    // confirmed working again on the known-good revision. Not reattempted
-    // blind a second time without a way to verify it on real hardware.
-    WiFi.setSleep(false);
+    // WiFi.setSleep(false) was here and is GONE -- confirmed, from a real
+    // crash log, to be the actual cause of a bootloop: "E wifi:Error!
+    // Should enable WiFi modem sleep when both WiFi and Bluetooth are
+    // enabled!!!!!!" followed by abort(). This is a real ESP-IDF
+    // coexistence requirement, not a vague risk -- when classic BT and
+    // WiFi are both active on the shared radio (this app's normal case:
+    // BT commonly stays connected/reconnecting while TimeSync's periodic
+    // WiFi sync runs), disabling WiFi modem sleep breaks the coexistence
+    // arbiter and the IDF WiFi driver hard-aborts the device. Previously
+    // judged "low risk" since it's a simple no-pointer-args call -- wrong
+    // call to make without actually knowing this IDF requirement existed;
+    // simplicity isn't the same as safety. Never reattempt this without
+    // independently confirming IDF's coexistence requirements first.
     Serial.printf("[time] joining \"%s\" for NTP (%s)...\n", chosenSsid.c_str(),
                   chosenPassword.length() > 0 ? "known network" : "open network");
     // Boot-crash guard around the actual join call -- see the top of
