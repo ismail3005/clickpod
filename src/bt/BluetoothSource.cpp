@@ -169,6 +169,23 @@ constexpr int kMaxDiscovered = 24;
 char discoveredNames[kMaxDiscovered][32];
 volatile int discoveredCountVal = 0;
 
+// Real AVRCP passthrough key codes (ESP_AVRC_PT_CMD_*) -- used directly
+// by the library's own BluetoothA2DPSink.cpp (execute_avrc_command()),
+// not guessed: PLAY=0x44, PAUSE=0x46, FORWARD(next)=0x4B,
+// BACKWARD(previous)=0x4C, standard AVRCP 1.x operation IDs.
+volatile BluetoothSource::TransportCmd pendingTransportCmd = BluetoothSource::TransportCmd::None;
+
+void passthruCallback(uint8_t keyCode, bool isReleased) {
+    if (isReleased) return; // act once, on press -- not on both press and release
+    switch (keyCode) {
+        case ESP_AVRC_PT_CMD_PLAY: pendingTransportCmd = BluetoothSource::TransportCmd::Play; break;
+        case ESP_AVRC_PT_CMD_PAUSE: pendingTransportCmd = BluetoothSource::TransportCmd::Pause; break;
+        case ESP_AVRC_PT_CMD_FORWARD: pendingTransportCmd = BluetoothSource::TransportCmd::Next; break;
+        case ESP_AVRC_PT_CMD_BACKWARD: pendingTransportCmd = BluetoothSource::TransportCmd::Previous; break;
+        default: break;
+    }
+}
+
 bool ssidCallback(const char *ssid, esp_bd_addr_t /*address*/, int /*rssi*/) {
     if (!ssid || ssid[0] == '\0') return false;
     int count = discoveredCountVal; // snapshot -- only this task ever increments it
@@ -229,6 +246,7 @@ void BluetoothSource::begin(const char *targetDeviceName, bool allowAutoReconnec
     Serial.printf("[bt] Starting Bluetooth A2DP source... (free heap: %u bytes)\n", ESP.getFreeHeap());
     a2dpSource.set_data_callback(providePcm);
     a2dpSource.set_ssid_callback(nullptr); // ensure a prior discovery scan's callback isn't still armed
+    a2dpSource.set_avrc_passthru_command_callback(passthruCallback);
     // max_retries=0 is the real crash fix, not just the "stop hammering
     // forever" UX one -- see the real crash log this was traced to:
     // end() was called while the library's own heartbeat-driven
@@ -295,6 +313,12 @@ void BluetoothSource::setVolume(uint8_t volume0to127) {
 }
 
 uint8_t BluetoothSource::getVolume() { return (uint8_t)a2dpSource.get_volume(); }
+
+BluetoothSource::TransportCmd BluetoothSource::drainTransportCommand() {
+    TransportCmd cmd = pendingTransportCmd;
+    pendingTransportCmd = TransportCmd::None;
+    return cmd;
+}
 
 bool BluetoothSource::isConnected() { return running && a2dpSource.is_connected(); }
 bool BluetoothSource::isRunning() { return running; }

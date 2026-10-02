@@ -1,5 +1,7 @@
 #include "Screens.h"
 
+#include <math.h>
+
 #include "AlbumArt.h"
 #include "Library.h"
 #include "MenuEngine.h"
@@ -609,6 +611,75 @@ void drawQueue() {
     }
 }
 
+// Manual "Set Time" screen (AppMode::SET_TIME) -- a real analog clock
+// face (plain lines from the center, Arduino-trig, same simple-
+// primitives style this file already uses for the hand-drawn glyphs --
+// no curve library needed) plus a live digital readout underneath for
+// actual glanceability (CLAUDE.md's plan item 6: "analog looks nice but
+// isn't a quick read"). The active hand (state.setTimeEditingMinute --
+// toggled by a RIGHT tap, see InputRouter.cpp) is drawn thicker/in the
+// accent color so it's clear which one rotate() is currently sweeping.
+void drawSetTime() {
+    const Palette &p = pal();
+    tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
+    tftPtr->setTextColor(p.fg, p.bg);
+    tftPtr->setCursor(10, kBodyY + 8);
+    tftPtr->print("Set Time - RIGHT: switch hand, CENTER: save");
+
+    int cx = kScreenW / 2;
+    int cy = kBodyY + 26 + 70;
+    int radius = 64;
+
+    tftPtr->drawCircle(cx, cy, radius, p.fg);
+    // Hour tick marks every 30 degrees (12 of them) -- small fixed-length
+    // radial lines, cheap and legible at this size without text labels.
+    for (int i = 0; i < 12; i++) {
+        float a = i * (2 * PI / 12) - PI / 2;
+        int x1 = cx + (int)((radius - 8) * cosf(a));
+        int y1 = cy + (int)((radius - 8) * sinf(a));
+        int x2 = cx + (int)(radius * cosf(a));
+        int y2 = cy + (int)(radius * sinf(a));
+        tftPtr->drawLine(x1, y1, x2, y2, p.muted);
+    }
+
+    // Hour hand: 12-hour face (so it reads as a normal clock), shorter.
+    float hourAngle = ((state.setTimeHour % 12) + state.setTimeMinute / 60.0f) * (2 * PI / 12) - PI / 2;
+    int hourLen = radius * 55 / 100;
+    bool editingHour = !state.setTimeEditingMinute;
+    uint16_t hourColor = editingHour ? p.accent : p.fg;
+    int hx = cx + (int)(hourLen * cosf(hourAngle));
+    int hy = cy + (int)(hourLen * sinf(hourAngle));
+    tftPtr->drawLine(cx, cy, hx, hy, hourColor);
+    if (editingHour) {
+        tftPtr->drawLine(cx + 1, cy, hx + 1, hy, hourColor); // thicker: active hand
+        tftPtr->drawLine(cx, cy + 1, hx, hy + 1, hourColor);
+    }
+
+    // Minute hand: longer, full 0-59 sweep.
+    float minAngle = state.setTimeMinute * (2 * PI / 60) - PI / 2;
+    int minLen = radius * 85 / 100;
+    bool editingMinute = state.setTimeEditingMinute;
+    uint16_t minColor = editingMinute ? p.accent : p.fg;
+    int mx = cx + (int)(minLen * cosf(minAngle));
+    int my = cy + (int)(minLen * sinf(minAngle));
+    tftPtr->drawLine(cx, cy, mx, my, minColor);
+    if (editingMinute) {
+        tftPtr->drawLine(cx + 1, cy, mx + 1, my, minColor);
+        tftPtr->drawLine(cx, cy + 1, mx, my + 1, minColor);
+    }
+
+    tftPtr->fillCircle(cx, cy, 2, p.fg);
+
+    // Digital readout below the face -- the actual glanceable value.
+    char buf[6];
+    snprintf(buf, sizeof(buf), "%02d:%02d", state.setTimeHour, state.setTimeMinute);
+    tftPtr->setTextColor(p.fg, p.bg);
+    tftPtr->setTextSize(2);
+    tftPtr->setCursor(cx - 30, cy + radius + 14);
+    tftPtr->print(buf);
+    tftPtr->setTextSize(1);
+}
+
 } // namespace
 
 void begin(TFT_eSPI &tft) { tftPtr = &tft; }
@@ -704,6 +775,9 @@ void render() {
     } else if (state.mode == AppMode::QUEUE) {
         drawStatusbar();
         drawQueue();
+    } else if (state.mode == AppMode::SET_TIME) {
+        drawStatusbar();
+        drawSetTime();
     }
 
     state.dirty = false;

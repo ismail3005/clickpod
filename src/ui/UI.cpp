@@ -59,6 +59,7 @@ void tickPlaybackClock() {
             Serial.printf("[audio] \"%s\" never started playing -- skipping (see CLAUDE.md: some "
                           "real files fail to decode, e.g. a FLAC frame too large for this library)\n",
                           state.now.title.c_str());
+            Library::logFailedFile(state.now.path, "never started playing (decode failure)");
             MenuEngine::playNextInQueue(); // sets state.dirty itself
             return;
         }

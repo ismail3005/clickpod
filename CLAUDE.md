@@ -3157,6 +3157,112 @@ source device, treating that as a probably-separate, probably-much-
 harder problem rather than assuming it rides along with transport
 controls for free.
 
+## "Ooga booga" round -- fast pass through most of the deferred list, user's explicit call to move fast near a session limit
+
+User asked to push the WiFi retry interval to match the normal 6h
+resync cadence and then work through the deferred list quickly rather
+than carefully one item at a time. All of the below is real code, not
+stubs -- same verification discipline as the rest of this file (real
+library APIs confirmed from source where a third-party library was
+involved), just written faster and documented more tersely. None of it
+is hardware-confirmed.
+
+- **WiFi retry unified**: `kSkippedRetryDelayMs` is now literally
+  `kResyncIntervalMs` (6h) instead of a separate, shorter constant --
+  no reason a skipped attempt should retry faster than one that
+  actually ran and failed normally.
+- **Headphone transport controls (play/pause/skip) -- real AVRCP
+  passthrough, confirmed from the real `ESP32-A2DP` source.**
+  `BluetoothA2DPSource::set_avrc_passthru_command_callback(void(*)(uint8_t
+  key, bool isReleased))` is real, public API -- registered in
+  `BluetoothSource::begin()` alongside the data/volume callbacks.
+  `ESP_AVRC_PT_CMD_PLAY`/`PAUSE`/`FORWARD`/`BACKWARD` are the library's
+  own real key-code constants (confirmed used directly in its own
+  `BluetoothA2DPSink.cpp`). Same stash-for-main-loop pattern as every
+  other BT-task callback in this file (can't touch `state`/`MenuEngine`
+  from that task) -- `BluetoothSource::drainTransportCommand()`, polled
+  by a new `main.cpp::handleBtTransportCommands()` every `loop()`
+  iteration, dispatches to the exact same functions the on-screen UI
+  already uses (`AudioBridge::pauseResume()`, `MenuEngine::
+  playNextInQueue()`/`skipPrevious()`). Play/Pause are real distinct
+  AVRCP commands, not a toggle -- each only acts if playback isn't
+  already in the requested state, matching real remote-button semantics.
+- **Failed-files log on SD** (`/clickpod_failed.txt`, `Library::
+  logFailedFile()`) -- option 2 from the FLAC-limitations writeup,
+  finally done. Called from both real skip sites (the proactive 24-bit
+  skip in `MenuEngine::setNowPlaying()`, the generic grace-period skip
+  in `UI.cpp`'s `tickPlaybackClock()`) so finding which files need
+  re-encoding no longer means catching the message live in the serial
+  monitor.
+- **Create new playlist from the device** -- scoped pragmatically, not
+  as originally imagined. An EMPTY playlist would be invisible anyway
+  (`Library::indexPlaylists()` skips empty `extraPlaylistTracks`
+  entries), so "+ New Playlist" lives inside the existing "Add to
+  Playlist" submenu (`openTrackMenu()`) and creates a new playlist
+  SEEDED with whatever track you were adding -- non-empty from
+  creation, shows up immediately. Auto-named ("New Playlist N" via
+  `Library::nextNewPlaylistName()`) -- real custom naming needs a
+  letter-picker screen this device has no component for (no keyboard),
+  which is genuine UX design surface belonging in the simulator first,
+  not improvised here under time pressure.
+- **Manual "Set Time" UI (plan item 6) -- analog clock face + digital
+  readout, built directly in firmware, not simulator-first.** New
+  `AppMode::SET_TIME` (`Settings` gained a "Set Time" row ->
+  `MenuEngine::enterSetTime()`). Encoder-driven since there's no
+  keyboard: RIGHT tap switches the active hand (`state.
+  setTimeEditingMinute`), rotating sweeps it (`MenuEngine::
+  adjustSetTime()`, wraps within its own range -- hour 0-23, minute
+  0-59, doesn't spill into the other hand), CENTER confirms (`
+  confirmSetTime()` -> `TimeSync::setManualTime()`), LEFT cancels
+  without saving. `Screens::drawSetTime()` draws a real analog face
+  (plain radial lines from Arduino trig, same simple-primitives style as
+  this file's existing hand-drawn glyphs -- no curve library) with the
+  active hand in the accent color and thicker, plus a live `HH:MM`
+  digital readout underneath (the plan's own reasoning: "analog looks
+  nice but isn't a quick read").
+
+  `TimeSync::setManualTime(hour, minute)`/`currentTimeString()`: a
+  SEPARATE fallback path from the real NTP-synced one (not reusing
+  `syncedEpochUtc`) -- counts forward from `millis()` the same way a
+  real sync does, anchored to the entered time instead of an NTP-
+  fetched one, and `currentTimeString()` always prefers a real sync
+  over this when one exists. Deliberately HOUR:MINUTE only, no date --
+  nothing in this app's UI (statusbar, AOD screen) ever displays a date,
+  so there was no real consumer to justify a date-entry UI. **Not
+  persisted across reboot** -- there's no RTC either way, so a manual
+  set resetting on power-cycle is an honest, already-accepted limitation
+  of this whole "no RTC" design, not a new gap this feature introduces.
+
+  **Deliberately skipped the simulator-first step** this project
+  normally follows for new UX -- explicit user instruction to move fast
+  near a session limit rather than round-trip through the browser
+  simulator first. Flagging the gap honestly rather than silently
+  skipping it: if this UX needs iteration, port it to the simulator and
+  amend `docs/SPEC.md` before changing it further, per the usual
+  discipline.
+- **AOD screen dimming**: NOT touched this round, and there was nothing
+  new to do -- the "AOD" section above already covers this; its
+  software half (lock input, keep playing, show a live clock) is
+  complete, and screen DIMMING is blocked on backlight hardware
+  (GPIO rewiring) that needs the user's physical access, not firmware.
+- **ULT WEAR EQ/ANC/transparency**: deliberately NOT attempted --
+  the deferred-list writeup above's strong suspicion (headphone-side-
+  only via Sony's proprietary protocol, no standard A2DP/AVRCP hook for
+  this) was never actually verified against source, and guessing at a
+  reverse-engineered vendor protocol blind is a different risk class
+  from everything else in this round (which all traced real, confirmed
+  library APIs first). Left as the one deferred item still untouched --
+  worth real research before attempting, not a "move fast" candidate.
+
+**Not yet hardware-confirmed, same caveat as every change this
+session** -- no PlatformIO in this sandbox. Next real step covers all
+of the above: flash, and test each independently (headphone play/pause/
+skip buttons; check `/clickpod_failed.txt` appears after a known-bad
+file skips; create a playlist via a track's "..." menu and confirm it
+shows up under Playlists; open Settings -> Set Time, confirm the clock
+face and readout track the encoder/buttons correctly and the statusbar
+reflects the saved time after confirming).
+
 ## Next session plan (as of 2026-10-01, agreed in a planning-only conversation, nothing below built yet)
 
 A lot got discussed/decided in conversation without any code written this

@@ -18,6 +18,15 @@ std::atomic<bool> synced{false};
 std::atomic<time_t> syncedEpochUtc{0}; // written by the background task, read from the main/UI task
 std::atomic<uint32_t> syncMillisAt{0};
 
+// Manual "Set Time" fallback -- see TimeSync.h's big comment on
+// setManualTime(). Separate from the NTP-synced fields above (not
+// reusing syncedEpochUtc) specifically so a later real sync can replace
+// this outright rather than needing to reconcile a fabricated epoch
+// with a real one -- currentTimeString() just checks `synced` first.
+std::atomic<bool> manualTimeSet{false};
+std::atomic<int> manualBaseMinutes{0}; // hour*60+minute at the moment it was set
+std::atomic<uint32_t> manualSetMillisAt{0};
+
 // Set once by begin(), read-only from then on inside the background task
 // -- never touched by more than one task, so no locking needed. The SD
 // read that PRODUCES this vector happens before this task ever starts
@@ -35,20 +44,15 @@ constexpr uint32_t kResyncIntervalMs = 6UL * 60 * 60 * 1000; // 6 hours -- corre
 // permanent condition, and hammering WiFi scans over it would just waste
 // battery for no benefit.
 //
-// WAS 2 minutes -- real-world report of WiFi "trying to sync a lot more
-// often than expected." Root cause: this fast path was designed for a
-// one-off transient skip at BOOT (low heap right after the library
-// scan), back before Bluetooth commonly stayed on for an entire
-// listening session. Now that real BT usage is normal (RadioLock skips
-// EVERY TimeSync attempt for as long as BT is connected -- see
-// RadioLock.h), a multi-hour BT session meant TimeSync retried every 2
-// minutes continuously, for hours -- clearly visible, clearly wasteful,
-// and exactly what was reported. Raised to 30 minutes -- still recovers
-// much faster than the full 6h cycle from a genuinely transient low-heap
-// moment at boot, but doesn't hammer a WiFi scan every couple minutes
-// for the entire time Bluetooth happens to be on, which is now the
-// common case this needs to coexist with gracefully.
-constexpr uint32_t kSkippedRetryDelayMs = 30UL * 60 * 1000; // 30 minutes
+// WAS 2 minutes, then 30 -- user's explicit call: push this to the same
+// cadence the normal 6h resync already uses, since that interval was
+// already accepted project-wide as drift-tolerable (millis()'s only
+// correction mechanism IS this periodic resync; 6h was never flagged as
+// too infrequent on its own). No reason for a SKIPPED attempt (low heap
+// or BT active) to retry any faster than an attempt that actually ran
+// and failed for an ordinary reason -- unified to one interval instead
+// of maintaining a separate, shorter one.
+constexpr uint32_t kSkippedRetryDelayMs = kResyncIntervalMs;
 constexpr uint32_t kConnectTimeoutMs = 8000;
 constexpr uint32_t kNtpTimeoutMs = 5000;
 
@@ -281,13 +285,30 @@ void begin(std::vector<WifiCredential> credentials) {
 bool isSynced() { return synced; }
 
 String currentTimeString() {
-    if (!synced) return "--:--";
-    time_t now = syncedEpochUtc + (time_t)((millis() - syncMillisAt) / 1000);
-    now += (time_t)state.utcOffsetHours * 3600;
-    struct tm *t = gmtime(&now); // already offset above; gmtime() just splits it out, no further TZ shift
-    char buf[6];
-    snprintf(buf, sizeof(buf), "%02d:%02d", t->tm_hour, t->tm_min);
-    return String(buf);
+    if (synced) {
+        time_t now = syncedEpochUtc + (time_t)((millis() - syncMillisAt) / 1000);
+        now += (time_t)state.utcOffsetHours * 3600;
+        struct tm *t = gmtime(&now); // already offset above; gmtime() just splits it out, no further TZ shift
+        char buf[6];
+        snprintf(buf, sizeof(buf), "%02d:%02d", t->tm_hour, t->tm_min);
+        return String(buf);
+    }
+    if (manualTimeSet) {
+        uint32_t elapsedMin = (millis() - manualSetMillisAt) / 60000;
+        int totalMin = (manualBaseMinutes + (int)elapsedMin) % (24 * 60);
+        char buf[6];
+        snprintf(buf, sizeof(buf), "%02d:%02d", totalMin / 60, totalMin % 60);
+        return String(buf);
+    }
+    return "--:--";
 }
+
+void setManualTime(int hour, int minute) {
+    manualBaseMinutes = hour * 60 + minute;
+    manualSetMillisAt = millis();
+    manualTimeSet = true;
+}
+
+bool hasManualTime() { return manualTimeSet; }
 
 } // namespace TimeSync

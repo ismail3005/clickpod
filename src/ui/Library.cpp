@@ -394,4 +394,31 @@ void addToPlaylist(const String &playlistName, const Track &t) {
     extraPlaylistTracks[playlistName].push_back(t);
 }
 
+String nextNewPlaylistName() {
+    for (int n = 1;; n++) {
+        String candidate = "New Playlist " + String(n);
+        bool taken = false;
+        if (usingIndex()) {
+            for (auto &kv : indexPlaylists()) {
+                if (kv.first == candidate) { taken = true; break; }
+            }
+        } else {
+            for (auto &p : PLAYLISTS) {
+                if (p.name == candidate) { taken = true; break; }
+            }
+        }
+        if (!taken) return candidate;
+    }
+}
+
+void logFailedFile(const String &path, const String &reason) {
+    if (SD.cardType() == CARD_NONE) return;
+    File f = SD.open("/clickpod_failed.txt", FILE_APPEND);
+    if (!f) return;
+    f.print(path);
+    f.print(" -- ");
+    f.println(reason);
+    f.close();
+}
+
 } // namespace Library

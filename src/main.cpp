@@ -16,6 +16,7 @@
 #include "state/AppState.h"
 #include "state/Persist.h"
 #include "ui/Library.h"
+#include "ui/MenuEngine.h"
 #include "ui/Screens.h"
 #include "ui/UI.h"
 
@@ -360,6 +361,42 @@ static void syncBluetoothToUi() {
     }
 }
 
+// Headphone/headset-side play/pause/skip buttons, over the real AVRCP
+// passthrough mechanism (BluetoothSource.h's drainTransportCommand()) --
+// dispatches to the exact same functions the on-screen UI already uses
+// for these actions, so a headphone button press and the equivalent
+// on-screen action are indistinguishable from here on. Play/Pause are
+// deliberately NOT a toggle (unlike the on-screen CENTER-tap handler) --
+// AVRCP sends them as distinct commands, so each only acts if playback
+// isn't already in the state it's asking for, matching what a real
+// remote button is supposed to do.
+static void handleBtTransportCommands() {
+    switch (BluetoothSource::drainTransportCommand()) {
+        case BluetoothSource::TransportCmd::Play:
+            if (state.now.hasTrack && !state.now.playing) {
+                state.now.playing = true;
+                AudioBridge::pauseResume();
+                state.dirty = true;
+            }
+            break;
+        case BluetoothSource::TransportCmd::Pause:
+            if (state.now.hasTrack && state.now.playing) {
+                state.now.playing = false;
+                AudioBridge::pauseResume();
+                state.dirty = true;
+            }
+            break;
+        case BluetoothSource::TransportCmd::Next:
+            MenuEngine::playNextInQueue();
+            break;
+        case BluetoothSource::TransportCmd::Previous:
+            MenuEngine::skipPrevious();
+            break;
+        case BluetoothSource::TransportCmd::None:
+            break;
+    }
+}
+
 void loop() {
     audio.loop(); // pumps I2S streaming; must run every iteration
     AnoInput::update();
@@ -367,6 +404,7 @@ void loop() {
     syncBatteryToUi();
     BluetoothSource::tick(); // give-up-after-a-minute-of-searching watchdog, see BluetoothSource.h
     syncBluetoothToUi();
+    handleBtTransportCommands();
     UI::update();
 }
 

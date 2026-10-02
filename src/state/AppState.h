@@ -18,6 +18,7 @@ enum class AppMode {
     QUEUE,
     BT,
     TRACK_MENU,
+    SET_TIME,
     OFF,
 };
 
@@ -102,6 +103,18 @@ struct AppState {
     // a deliberate simplification. Persisted across reboots along with the
     // other settings below it -- see src/state/Persist.*.
     int utcOffsetHours = 0;
+
+    // AppMode::SET_TIME's editing state (MenuEngine::enterSetTime()/
+    // InputRouter.cpp's SET_TIME branch, Screens::drawSetTime()) -- an
+    // analog clock face + digital readout, encoder-driven since there's
+    // no keyboard: tap switches which hand is being edited (false=hour,
+    // true=minute), rotate sweeps the active hand, CENTER confirms
+    // (TimeSync::setManualTime()), LEFT cancels back to Settings without
+    // saving. No date involved -- see TimeSync.h's manual-time comment
+    // for why.
+    int setTimeHour = 12;
+    int setTimeMinute = 0;
+    bool setTimeEditingMinute = false;
 
     MenuReturn btReturn;
     MenuReturn trackMenuReturn;

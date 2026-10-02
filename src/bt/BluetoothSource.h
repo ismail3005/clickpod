@@ -136,4 +136,24 @@ void tick();
 void setVolume(uint8_t volume0to127);
 uint8_t getVolume(); // last known value, ours or the remote's
 
+// --- Transport controls from the connected device's own buttons ---
+//
+// Real, public ESP32-A2DP API (BluetoothA2DPSource::
+// set_avrc_passthru_command_callback(), confirmed from the real library
+// source): fires on every AVRCP passthrough command the connected
+// device sends (the same protocol/role already confirmed above for
+// volume, just a different event type) -- this is the standard way a
+// headset/headphones' own play/pause/skip buttons reach a SOURCE
+// device, the same mechanism a phone receives them through. Runs on the
+// BT stack's own task context, same constraint as every other BT
+// callback in this file (ssidCallback, providePcm) -- can't touch
+// MenuEngine/state directly from it. Stashes the latest command into a
+// single volatile slot instead (last-command-wins -- acceptable since
+// these are human-paced, one-at-a-time button presses, not a stream
+// that needs preserving, same reasoning already accepted for the
+// encoder delta accumulator); drainTransportCommand() is what the main
+// loop calls once per tick to pick it up and act on it.
+enum class TransportCmd : uint8_t { None, Play, Pause, Next, Previous };
+TransportCmd drainTransportCommand(); // returns and clears the pending command
+
 } // namespace BluetoothSource

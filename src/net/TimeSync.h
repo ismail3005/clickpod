@@ -69,7 +69,27 @@ void begin(std::vector<WifiCredential> credentials = {});
 bool isSynced();
 
 // "HH:MM" in the configured UTC offset (state.utcOffsetHours, Settings'
-// "Time zone" row), or "--:--" if never synced yet.
+// "Time zone" row) if a real NTP sync has happened, else the manually-
+// set wall-clock time (see setManualTime()) if one's been entered, else
+// "--:--".
 String currentTimeString();
+
+// Manual "Set Time" fallback (MenuEngine::confirmSetTime(), the
+// AppMode::SET_TIME screen) for when no open/known WiFi network is ever
+// in range to get a real NTP sync from. Deliberately HOUR:MINUTE only,
+// no date -- there's no RTC and no date entry UI, and nothing in this
+// app's own UI (the statusbar clock, the AOD screen) ever displays a
+// date, only HH:MM, so a date has no actual consumer to justify the
+// extra UI complexity of entering one. Counts forward from millis() the
+// same way a real sync does, just anchored to a user-entered time
+// instead of an NTP-fetched one -- drifts at the same rate a real sync
+// would between corrections, and (same as a real sync) resets to
+// whatever was last entered on every reboot, since there's no RTC to
+// carry wall-clock time across a power cycle either way. A real NTP
+// sync completing after this takes over automatically (currentTimeString()
+// always prefers `synced` when true) -- this is purely a fallback for
+// when one hasn't happened (yet, or ever).
+void setManualTime(int hour, int minute);
+bool hasManualTime();
 
 } // namespace TimeSync

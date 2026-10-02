@@ -102,6 +102,8 @@ void rotate(int dir) {
         state.progressDirty = true;
     } else if (state.mode == AppMode::QUEUE) {
         MenuEngine::moveQueueSelection(dir > 0 ? 1 : -1);
+    } else if (state.mode == AppMode::SET_TIME) {
+        MenuEngine::adjustSetTime(dir);
     }
 }
 
@@ -203,6 +205,20 @@ void handleTap(AnoButton btn) {
         // not just state.queue -- this is what lets a row from BEFORE the
         // currently-playing track be jumped back to directly.
         else if (btn == AnoButton::CENTER) MenuEngine::playFromCombinedIndex(state.queueSelected);
+    } else if (state.mode == AppMode::SET_TIME) {
+        // RIGHT switches which hand rotate() sweeps (tap, not rotation --
+        // matches the plan's "tap to switch which hand is active"); CENTER
+        // confirms (saves via TimeSync::setManualTime() and exits); LEFT
+        // cancels without saving. UP/DOWN deliberately unused here --
+        // three actions, three buttons, no reason to overload a fourth.
+        if (btn == AnoButton::RIGHT) {
+            state.setTimeEditingMinute = !state.setTimeEditingMinute;
+            state.dirty = true;
+        } else if (btn == AnoButton::CENTER) {
+            MenuEngine::confirmSetTime();
+        } else if (btn == AnoButton::LEFT) {
+            MenuEngine::exitSetTimeWithoutSaving();
+        }
     }
 }
 

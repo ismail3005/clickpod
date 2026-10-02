@@ -69,4 +69,30 @@ std::vector<Track> indexTracksForPlaylist(const String &name);
 // ephemeral behavior under the new storage model.
 void addToPlaylist(const String &playlistName, const Track &t);
 
+// Appends one line ("<path> -- <reason>") to /clickpod_failed.txt on SD
+// (creating it if needed) -- a plain-text, human-readable list of every
+// track that failed to play this session (or a previous one; never
+// cleared automatically), so finding which files need re-encoding (see
+// CLAUDE.md's FLAC-limitations writeup, option 2) doesn't require
+// catching the message live in the serial monitor. Called from both
+// real skip sites (MenuEngine.cpp's proactive 24-bit-skip, UI.cpp's
+// generic decode-failure grace-period skip) so neither path needs its
+// own SD-writing logic. Safe to call often -- opens/appends/closes once
+// per call, no held file handle, and silently no-ops if SD isn't ready
+// (mirrors every other SD helper in this codebase).
+void logFailedFile(const String &path, const String &reason);
+
+// Returns the first unused "New Playlist N" name (N starting at 1),
+// checking both the real index/overlay path and the mock PLAYLISTS
+// fallback so it never collides either way. Used by MenuEngine.cpp's
+// "+ New Playlist" row (see openTrackMenu()) -- auto-named rather than
+// a real text-entry UI, which this device has no existing component
+// for (no keyboard, just an encoder + 5 buttons) and would need a real
+// letter-picker screen designed simulator-first per this project's
+// usual UX discipline, not improvised here. Not a persistent counter --
+// just counts up past whatever names already exist each time it's
+// called, so creating N playlists in one session and renaming/deleting
+// isn't tracked (there's no rename/delete yet either).
+String nextNewPlaylistName();
+
 } // namespace Library

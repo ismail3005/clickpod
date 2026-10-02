@@ -23,6 +23,12 @@ void buildPlaylistTrackListFromIndex(const String &name);
 void buildPlaylistList();
 void buildSettings();
 
+// AppMode::SET_TIME -- see MenuEngine.cpp's big comment on enterSetTime().
+void enterSetTime();
+void confirmSetTime();
+void exitSetTimeWithoutSaving();
+void adjustSetTime(int delta);
+
 void playAlbumFrom(const LibraryAlbum &album, size_t index);
 void playQueueFrom(std::vector<Track> list, size_t index);
 void playNextInQueue();

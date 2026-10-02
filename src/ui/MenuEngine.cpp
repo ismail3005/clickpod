@@ -7,6 +7,7 @@
 #include "../audio/AudioBridge.h"
 #include "../audio/FlacMeta.h"
 #include "../bt/BluetoothSource.h"
+#include "../net/TimeSync.h"
 #include "../state/AppState.h"
 #include "../state/Persist.h"
 #include "AlbumArt.h"
@@ -169,6 +170,8 @@ void setNowPlaying(Track t) {
                 Serial.printf("[audio] \"%s\" is %u-bit FLAC -- this decoder only supports 8/16-bit, "
                               "skipping without attempting playback\n",
                               t.title.c_str(), (unsigned)si.bitsPerSample);
+                Library::logFailedFile(t.path,
+                                        String((unsigned)si.bitsPerSample) + "-bit FLAC, decoder only supports 8/16-bit");
             }
         }
     }
@@ -486,7 +489,7 @@ void buildPlaylistList() {
 }
 
 void buildSettings() {
-    std::vector<MenuItem> items(6);
+    std::vector<MenuItem> items(7);
     items[0].label = "Bluetooth";
     items[0].icon = "bt";
     items[0].subFn = btStatusLabel;
@@ -556,7 +559,64 @@ void buildSettings() {
         buildMainMenu();
     };
 
+    // Manual fallback for when no open/known WiFi network is ever in
+    // range for a real NTP sync (see TimeSync.h's setManualTime()
+    // comment -- HOUR:MINUTE only, no date, since nothing in this UI
+    // ever displays one). Plan item 6 from CLAUDE.md's "Next session
+    // plan" -- the analog clock face part specifically; see
+    // enterSetTime()/Screens::drawSetTime() below.
+    items[6].label = "Set Time";
+    items[6].icon = "timezone";
+    items[6].sub = "";
+    items[6].action = []() { enterSetTime(); };
+
     pushMenu("Settings", std::move(items));
+}
+
+// AppMode::SET_TIME -- analog clock face + digital readout, encoder-
+// driven (no keyboard on this device). Seeds the edit fields from
+// whatever the clock currently shows (real sync or a previous manual
+// set) so adjusting from "close to right" is the common case, not
+// always starting from a fixed default.
+void enterSetTime() {
+    int h = 12, m = 0;
+    String cur = TimeSync::currentTimeString();
+    if (cur.length() == 5 && cur[2] == ':') {
+        h = cur.substring(0, 2).toInt();
+        m = cur.substring(3, 5).toInt();
+    }
+    state.setTimeHour = h;
+    state.setTimeMinute = m;
+    state.setTimeEditingMinute = false;
+    state.mode = AppMode::SET_TIME;
+    state.dirty = true;
+}
+
+void confirmSetTime() {
+    TimeSync::setManualTime(state.setTimeHour, state.setTimeMinute);
+    Serial.printf("[ui] manual time set: %02d:%02d\n", state.setTimeHour, state.setTimeMinute);
+    state.mode = AppMode::MENU;
+    state.dirty = true;
+}
+
+void exitSetTimeWithoutSaving() {
+    state.mode = AppMode::MENU;
+    state.dirty = true;
+}
+
+// Rotating either hand wraps within its own range (0-23 for the hour,
+// 0-59 for the minute) rather than spilling into the other -- matches
+// how a real analog clock's hands behave (the minute hand wrapping
+// past 59 doesn't, by itself, advance the hour hand here; the user
+// switches hands explicitly with a tap, same as the plan's original
+// description).
+void adjustSetTime(int delta) {
+    if (state.setTimeEditingMinute) {
+        state.setTimeMinute = ((state.setTimeMinute + delta) % 60 + 60) % 60;
+    } else {
+        state.setTimeHour = ((state.setTimeHour + delta) % 24 + 24) % 24;
+    }
+    state.dirty = true;
 }
 
 void playAlbumFrom(const LibraryAlbum &album, size_t index) {
@@ -849,6 +909,27 @@ void openTrackMenu(const Track &track) {
     items[2].label = "Add to Playlist";
     items[2].action = [t]() {
         std::vector<MenuItem> plItems;
+        // Creates a brand-new playlist seeded with THIS track -- real,
+        // not a placeholder: Library::addToPlaylist() on a not-yet-seen
+        // name creates it on the spot (it's a plain map insert). Listed
+        // first so it doesn't get lost among existing playlists. Auto-
+        // named ("New Playlist N") rather than real text entry -- this
+        // device has no keyboard, and a real letter-picker screen is a
+        // genuine UX design surface that belongs in the simulator first
+        // per this project's usual discipline, not improvised here.
+        {
+            MenuItem row;
+            row.label = "+ New Playlist";
+            row.icon = "playlist";
+            Track track2 = t;
+            row.action = [track2]() {
+                String name = Library::nextNewPlaylistName();
+                Library::addToPlaylist(name, track2);
+                Serial.printf("[ui] created playlist \"%s\" with \"%s\"\n", name.c_str(), track2.title.c_str());
+                closeTrackMenu();
+            };
+            plItems.push_back(std::move(row));
+        }
         if (Library::usingIndex()) {
             for (auto &kv : Library::indexPlaylists()) {
                 MenuItem row;
