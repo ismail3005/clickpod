@@ -47,4 +47,14 @@ void markBtAttemptStarting();
 // survives into the next boot and load() will see it and skip resuming.
 void markBtAttemptDone();
 
+// Same pattern, for TimeSync's WiFi join path -- added after a real
+// bootloop traced to it (see CLAUDE.md). Unlike BT, TimeSync runs on
+// EVERY boot unconditionally, so this guard matters even more: without
+// it, any crash in the join path repeats forever with no recovery path.
+// Call starting() immediately before the risky WiFi.begin() call inside
+// TimeSync::tryOnce(), done() immediately after the connect attempt
+// resolves (success or ordinary failure, same as the BT pattern).
+void markTimeSyncAttemptStarting();
+void markTimeSyncAttemptDone();
+
 } // namespace Persist

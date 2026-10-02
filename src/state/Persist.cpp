@@ -26,7 +26,29 @@ void load() {
     state.btOn = prefs.getBool("btOn", false);
     state.btDeviceName = prefs.getString("btDeviceName", "").c_str();
     bool btPending = prefs.getBool("btPending", false);
+    bool timeSyncPending = prefs.getBool("tsPending", false);
     prefs.end();
+
+    if (timeSyncPending) {
+        // Mirrors the BT guard below -- added after a real bootloop in
+        // the field traced to TimeSync's WiFi join path. Unlike BT
+        // (which only auto-resumes if state.btOn was persisted true),
+        // TimeSync::begin() runs unconditionally on EVERY boot -- so a
+        // crash anywhere between markTimeSyncAttemptStarting() and
+        // markTimeSyncAttemptDone() had no guard at all, and would
+        // repeat on every single boot forever with zero way to recover
+        // short of pulling the SD card. Skip just the first attempt this
+        // boot; clearing the flag here means a genuinely-fixed bug
+        // doesn't stay gated forever, and a still-broken one just means
+        // one skipped attempt per boot instead of a bootloop.
+        Serial.println(F("[persist] previous boot's WiFi time-sync attempt "
+                          "never completed (likely crashed) -- skipping the "
+                          "first sync attempt this boot."));
+        state.timeSyncSkipFirstAttempt = true;
+        prefs.begin(kNamespace, false);
+        prefs.putBool("tsPending", false);
+        prefs.end();
+    }
 
     if (btPending && state.btOn) {
         // The previous boot started a BT auto-resume attempt and never
@@ -68,6 +90,18 @@ void markBtAttemptStarting() {
 void markBtAttemptDone() {
     prefs.begin(kNamespace, false);
     prefs.putBool("btPending", false);
+    prefs.end();
+}
+
+void markTimeSyncAttemptStarting() {
+    prefs.begin(kNamespace, false);
+    prefs.putBool("tsPending", true);
+    prefs.end();
+}
+
+void markTimeSyncAttemptDone() {
+    prefs.begin(kNamespace, false);
+    prefs.putBool("tsPending", false);
     prefs.end();
 }
 

@@ -3,12 +3,12 @@
 #include <SD.h>
 #include <WiFi.h>
 #include <atomic>
-#include <cstring>
 #include <ctime>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 #include "../state/AppState.h"
+#include "../state/Persist.h"
 #include "RadioLock.h"
 
 namespace TimeSync {
@@ -42,6 +42,17 @@ constexpr uint32_t kNtpTimeoutMs = 5000;
 enum class SyncResult { kOk, kSkipped, kFailed };
 
 SyncResult tryOnce() {
+    // Boot-crash guard -- a real bootloop was traced to this join path
+    // (see CLAUDE.md). Persist::load() sets this once, at most, if the
+    // PREVIOUS boot's attempt never confirmed completion -- consume it
+    // here (the very first tryOnce() call of this boot) and skip just
+    // that one attempt, same recovery shape as the BT boot-crash guard.
+    if (state.timeSyncSkipFirstAttempt) {
+        state.timeSyncSkipFirstAttempt = false;
+        Serial.println(F("[time] skipping this boot's first sync attempt (previous one didn't confirm)"));
+        return SyncResult::kSkipped;
+    }
+
     // Internal-heap guard FIRST -- a real WiFi init failure here aborted
     // the whole device in the field (esp_timer_create -> ESP_ERR_NO_MEM,
     // right after the boot-time library scan), so this has to be checked
@@ -84,22 +95,14 @@ SyncResult tryOnce() {
     // Prefer a network matching one of the SD-card credentials (the
     // user's own phone/laptop hotspot -- deliberately chosen, likely more
     // reliably present than a random open network) over an open network.
-    // Also capture the chosen network's channel/BSSID from THIS scan --
-    // see the real fix below for why.
     String chosenSsid;
     String chosenPassword; // empty means open network, no password needed
-    int32_t chosenChannel = 0;
-    uint8_t chosenBssid[6] = {0};
-    bool haveChosenBssid = false;
     for (int i = 0; i < n && chosenSsid.length() == 0; i++) {
         String ssid = WiFi.SSID(i);
         for (const WifiCredential &cred : knownCredentials) {
             if (ssid == cred.ssid) {
                 chosenSsid = ssid;
                 chosenPassword = cred.password;
-                chosenChannel = WiFi.channel(i);
-                memcpy(chosenBssid, WiFi.BSSID(i), 6);
-                haveChosenBssid = true;
                 break;
             }
         }
@@ -108,9 +111,6 @@ SyncResult tryOnce() {
         for (int i = 0; i < n; i++) {
             if (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) {
                 chosenSsid = WiFi.SSID(i);
-                chosenChannel = WiFi.channel(i);
-                memcpy(chosenBssid, WiFi.BSSID(i), 6);
-                haveChosenBssid = true;
                 break;
             }
         }
@@ -122,42 +122,36 @@ SyncResult tryOnce() {
         return SyncResult::kFailed;
     }
 
-    // Real fix for the alternating NO_AP_FOUND/AUTH_EXPIRE join failure
-    // seen against a correct, confirmed password: WiFi.begin(ssid, pass)
-    // with no channel/BSSID makes the ESP32 run ANOTHER internal scan to
-    // locate the AP before authenticating -- a second discovery pass that
-    // can behave differently (miss it, pick a stale/duplicate beacon,
-    // etc.) from the scan this function just did successfully. Passing
-    // the exact channel+BSSID already found above skips that second
-    // discovery entirely and connects directly to the known-good AP --
-    // a standard, well-documented fix for exactly this ESP32 WiFi
-    // flakiness class, not a guess. Also disabling WiFi modem sleep
-    // (`WiFi.setSleep(false)`) before connecting -- power-save mode
-    // missing beacons mid-handshake is the other common real cause of
-    // this same AUTH_EXPIRE flapping pattern; both are real, standard
-    // Arduino-ESP32 WiFi API, applied together since either alone might
-    // not be the whole story.
+    // WiFi.setSleep(false): low-risk, well-established standalone call
+    // (no pointer/buffer args, doesn't touch scan state) -- WiFi modem
+    // power-save missing beacons mid-handshake is a documented real
+    // cause of auth flakiness on ESP32. Kept from the reverted join fix
+    // below. The channel/BSSID-targeted WiFi.begin() overload that
+    // shipped alongside it did NOT get kept -- see CLAUDE.md: that
+    // change is the prime suspect for a real bootloop hit in the field
+    // (it's the only change between the last known-good flash and the
+    // one that bootlooped), and the plain two-arg begin() below is
+    // confirmed working again on the known-good revision. Not reattempted
+    // blind a second time without a way to verify it on real hardware.
     WiFi.setSleep(false);
-    Serial.printf("[time] joining \"%s\" for NTP (%s)%s...\n", chosenSsid.c_str(),
-                  chosenPassword.length() > 0 ? "known network" : "open network",
-                  haveChosenBssid ? ", direct to known channel/BSSID" : "");
+    Serial.printf("[time] joining \"%s\" for NTP (%s)...\n", chosenSsid.c_str(),
+                  chosenPassword.length() > 0 ? "known network" : "open network");
+    // Boot-crash guard around the actual join call -- see the top of
+    // this function. If WiFi.begin()/the connect wait below ever hard-
+    // crashes again for any reason, the next boot sees tsPending still
+    // true and skips just the first attempt instead of repeating the
+    // same crash forever.
+    Persist::markTimeSyncAttemptStarting();
     if (chosenPassword.length() > 0) {
-        if (haveChosenBssid) {
-            WiFi.begin(chosenSsid.c_str(), chosenPassword.c_str(), chosenChannel, chosenBssid);
-        } else {
-            WiFi.begin(chosenSsid.c_str(), chosenPassword.c_str());
-        }
+        WiFi.begin(chosenSsid.c_str(), chosenPassword.c_str());
     } else {
-        if (haveChosenBssid) {
-            WiFi.begin(chosenSsid.c_str(), nullptr, chosenChannel, chosenBssid);
-        } else {
-            WiFi.begin(chosenSsid.c_str());
-        }
+        WiFi.begin(chosenSsid.c_str());
     }
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < kConnectTimeoutMs) {
         delay(200);
     }
+    Persist::markTimeSyncAttemptDone();
 
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println(F("[time] couldn't join in time, will retry later"));

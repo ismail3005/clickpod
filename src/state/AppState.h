@@ -123,6 +123,13 @@ struct AppState {
     // it showed at the last full redraw, even after a background WiFi
     // sync completed in the background.
     bool statusbarDirty = false;
+
+    // Set by Persist::load() if the previous boot's WiFi time-sync
+    // attempt never confirmed completion (likely crashed) -- consumed
+    // once by TimeSync::tryOnce() to skip just that boot's first
+    // attempt, same boot-crash-guard shape as the Bluetooth one. See
+    // CLAUDE.md for the real bootloop this was added after.
+    bool timeSyncSkipFirstAttempt = false;
 };
 
 extern AppState state;

@@ -2102,47 +2102,93 @@ direct BSSID join, the WPA2/WPA3 mixed-mode theory becomes the leading
 suspect and the next step is checking Windows' Mobile Hotspot for a
 security-mode override, not another firmware guess.
 
-## Real Bluetooth audio -- explicitly NOT attempted this round, scoped instead of rushed
+**UPDATE -- this fix caused a real bootloop, REVERTED.** The commit
+right after this one (`fbd8d84`) was the only change between a
+confirmed-working flash and one that bootlooped on every power-on. User
+reverted to the pre-fix commit (`c8a65e1`) and confirmed **plain
+`WiFi.begin(ssid, pass)` with no channel/BSSID now joins successfully
+on its own** -- whatever caused the earlier `NO_AP_FOUND`/`AUTH_EXPIRE`
+flapping apparently wasn't a persistent incompatibility (or self-
+resolved). Verified the `WiFi.begin(ssid, pass, channel, bssid)` 4-arg
+overload and `WiFi.channel()`/`WiFi.BSSID()` signatures against the real
+`espressif/arduino-esp32` source after the fact -- they're correct, so
+the exact crash mechanism inside the join path is still unconfirmed; the
+bootloop evidence (every boot, no PlatformIO here to repro) was reason
+enough to not re-risk it blind a second time.
 
-Asked this round to "get rid of the BT test tone, I want real audio now."
-Deliberately did NOT attempt this blind in the same pass as the AOD work
-below -- this is the one item in the whole "Next session plan" list
-(item 8) that was explicitly marked **last, after everything else**, and
-for a real reason, not just ordering: routing `ESP32-audioI2S`'s decoded
-PCM output into `ESP32-A2DP`'s data callback instead of out to the I2S
-DAC is a genuine dual-output audio pipeline change -- the two libraries
-currently have **no shared hook point** for this (confirmed by reading
-both libraries' sources across this session's many deep-dives into each
-one separately, never together). Concretely, open questions that need
-real answers, not guesses, before writing a line of this:
-- Does `ESP32-audioI2S` expose ANY way to get at decoded PCM frames
-  before they go out over I2S (a callback, a ring buffer, anything), or
-  does `AudioBridge` need to intercept at the `Audio` class's own I2S
-  write call -- which would mean patching the library again (a THIRD
-  fork change on top of the FLAC frame-size/CRC-8 patches already
-  shipped), not just calling an existing hook?
-- Can both outputs (I2S DAC + A2DP source callback) coexist from the
-  same decode pass, or does switching to "stream to BT" need to
-  suppress the direct I2S write entirely (i.e. is this truly additive,
-  or does it require restructuring `AudioBridge`'s current "always
-  decode straight to I2S" assumption)?
-- Sample-rate/format matching: A2DP needs 44.1kHz 16-bit stereo PCM
-  (`BluetoothSource.cpp`'s existing `provideTestTone()` already matches
-  this) -- does every real file decode to exactly that, or does FLAC's
-  real sample rate/bit depth (already read via `FlacMeta::StreamInfo`)
-  sometimes differ and need resampling/conversion before reaching the
-  A2DP callback?
-A wrong guess on any of these risks either a silent no-op (BT "works"
-but plays nothing or garbage) or another build-breaking library patch
-attempt with no way to verify it compiles here. Per this project's own
-established discipline ("Scope it properly before attempting -- don't
-half-wire it," already written above before this round even started),
-the right next step is reading `ESP32-audioI2S`'s real decode/output
-path specifically for a PCM hook point (the way the FLAC frame-size fix
-needed reading `Audio.cpp`'s FLAC path directly, not just its public
-header) BEFORE writing any `AudioBridge`/`BluetoothSource` wiring code,
-not attempting it in the same pass as everything else this round. Not
-done this session -- next session's first real task if picked back up.
+**Reverted `TimeSync.cpp`'s join call back to the plain two-arg
+`WiFi.begin()`** (the confirmed-working version) -- dropped the channel/
+BSSID targeting entirely. Kept `WiFi.setSleep(false)` (a simple no-
+pointer-args standalone call, much lower risk, and a real documented
+fix for WiFi auth flakiness on its own) in case it still helps, since
+plain `begin()` was already proven safe with it absent at c8a65e1 and
+setSleep() doesn't change the join call's own signature/risk profile.
+
+**Added a real, generically useful fix alongside the revert**: TimeSync
+had NO boot-crash guard at all, unlike Bluetooth's (`Persist::
+markBtAttemptStarting/Done`, see "Settings + Bluetooth-on persistence"
+below) -- and TimeSync runs on EVERY boot unconditionally (not gated
+behind a persisted on/off flag the way BT's auto-resume is), so ANY
+crash in its join path, this one or a future one, had zero recovery
+path and would repeat forever. `Persist.{h,cpp}` gained
+`markTimeSyncAttemptStarting()`/`markTimeSyncAttemptDone()` (same
+pattern, new NVS key `tsPending`) wrapped directly around the actual
+`WiFi.begin()`/connect-wait in `TimeSync::tryOnce()`; `Persist::load()`
+checks `tsPending` on boot and sets `state.timeSyncSkipFirstAttempt`
+(new `AppState.h` field) if the previous attempt never confirmed
+completion, which `tryOnce()` consumes once to skip just that boot's
+first attempt instead of repeating a crash. This is a real safety net
+regardless of whether this exact join-path bug recurs.
+
+**Not yet hardware-confirmed**. Next real step: flash, confirm WiFi
+sync still works (should be unchanged from the known-good c8a65e1
+behavior) and no bootloop.
+
+## Real Bluetooth audio -- DONE, not yet hardware-confirmed
+
+Was initially scoped out of an earlier round of this session (see the
+open questions this section used to list) rather than attempted blind.
+Came back to it after properly reading `ESP32-audioI2S`'s real decode
+path and found it didn't need any guessing after all: `Audio.h` already
+declares a documented weak-symbol extension point --
+```cpp
+extern __attribute__((weak)) void audio_process_i2s(int16_t* outBuff,
+    uint16_t validSamples, uint8_t bitsPerSample, uint8_t channels,
+    bool *continueI2S); // record audiodata or send via BT
+```
+-- called by `Audio::playChunk()` with every decoded PCM buffer right
+before it would go to I2S, AFTER the library's own mono-upmix and
+8-bit-to-16-bit widening, so it's always already 44.1kHz 16-bit stereo
+interleaved -- exactly the format A2DP wants, answering all three of
+the open questions from before (hook point: yes, this; additive: yes,
+`*continueI2S=false` skips the I2S write cleanly; format: already
+matches, no conversion needed). This answers "no shared hook point"
+from the earlier scoping pass -- that was wrong, or at least premature;
+the hook was there, just not found until actually reading the decode
+path end to end instead of stopping at the public header.
+
+**Implementation**: `AudioBridge.cpp` defines `audio_process_i2s()` at
+global scope (the weak symbol isn't inside any namespace, confirmed
+from the real header) -- whenever `BluetoothSource::isConnected()`,
+feeds the exact PCM buffer into a new `BluetoothSource::feedPcm()` and
+sets `continueI2S=false`; otherwise unchanged normal wired I2S output.
+`BluetoothSource.cpp` gained a small ring buffer (`kPcmRingSize`,
+16KB, PSRAM-allocated per this project's established PSRAM push) --
+`feedPcm()` (producer, called from the main/audio task) and a new
+`providePcm()` pull callback (consumer, called from the BT stack's own
+task, registered via `set_data_callback()` in place of the old
+`provideTestTone()`) run on different FreeRTOS tasks, synchronized by a
+plain mutex (`xSemaphoreCreateMutex`). Underruns (not enough decoded
+audio buffered yet) fill with silence rather than garbage -- a brief
+gap reads better than noise. The old 440Hz test-tone generator is
+fully removed, not just unused.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox to
+compile against, same caveat as every change this session. Next real
+step: flash, connect Bluetooth, play a real track, confirm actual music
+comes out instead of the test tone -- and separately confirm wired
+(non-BT) playback is unaffected (the `continueI2S=true` branch should
+be byte-for-byte the same behavior as before this change).
 
 ## AOD ("keep playing + lock input + show clock") -- software half built, screen dimming still blocked on backlight hardware
 
