@@ -1,5 +1,6 @@
 #include "AudioBridge.h"
 
+#include "../bt/BluetoothSource.h"
 #include "../config/Pins.h"
 #include "../ui/Util.h"
 
@@ -139,3 +140,24 @@ bool isRunning() {
 }
 
 } // namespace AudioBridge
+
+// ESP32-audioI2S's own documented extension point (Audio.h: "extern weak
+// void audio_process_i2s(...); // record audiodata or send via BT") --
+// called by Audio::playChunk() with every decoded PCM buffer right
+// before it would go to I2S, already 44.1kHz 16-bit stereo interleaved
+// (the library upmixes mono and widens 8-bit to 16-bit before this call).
+// Real routing for Bluetooth output, replacing the old 440Hz test tone:
+// whenever BT is actually connected, feed these exact samples into
+// BluetoothSource's ring buffer and skip the I2S write entirely --
+// matches this project's "wired and BT are mutually exclusive output
+// paths" design (docs/SPEC.md section 7). When BT isn't connected,
+// behavior is unchanged: normal wired I2S output.
+void audio_process_i2s(int16_t *outBuff, uint16_t validSamples, uint8_t /*bitsPerSample*/,
+                        uint8_t /*channels*/, bool *continueI2S) {
+    if (BluetoothSource::isConnected()) {
+        BluetoothSource::feedPcm(reinterpret_cast<const uint8_t *>(outBuff), (size_t)validSamples * 2);
+        *continueI2S = false;
+    } else {
+        *continueI2S = true;
+    }
+}

@@ -4,6 +4,8 @@
 #include <math.h>
 #include <cstring>
 #include <nvs.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include "../net/RadioLock.h"
 
@@ -84,27 +86,45 @@ BluetoothA2DPSource a2dpSource;
 bool running = false;
 String currentTarget; // name last passed to begin(), "" if never begun
 
-constexpr float kSampleRate = 44100.0f;
-constexpr float kToneHz = 440.0f;
-constexpr float kPhaseIncrement = 2.0f * PI * kToneHz / kSampleRate;
-float phase = 0.0f;
+// Real audio ring buffer -- fed by AudioBridge.cpp's audio_process_i2s()
+// weak-symbol override (ESP32-audioI2S's own documented hook, literally
+// commented "record audiodata or send via BT" in its header) with every
+// decoded PCM buffer, already 44.1kHz 16-bit stereo interleaved. Producer
+// (feedPcm, called from the main/audio task) and consumer (providePcm,
+// called from the BT stack's own task) run on different tasks, so this
+// needs real synchronization -- a plain FreeRTOS mutex, not an ISR
+// context on either side.
+constexpr size_t kPcmRingSize = 16384; // ~93ms of headroom at 44.1kHz/16-bit/stereo
+uint8_t *pcmRing = nullptr; // ps_malloc'd lazily, PSRAM (this project's established push)
+SemaphoreHandle_t pcmMutex = nullptr;
+size_t pcmHead = 0, pcmTail = 0, pcmCount = 0;
 
-// Raw callback: fill `data` with interleaved 16-bit signed stereo PCM at
-// 44.1kHz, the format ESP32-A2DP's source expects. byteCount is how many
-// bytes the library wants; return how many were actually written.
-int32_t provideTestTone(uint8_t *data, int32_t byteCount) {
-    int16_t *samples = reinterpret_cast<int16_t *>(data);
-    int32_t frameCount = byteCount / 4; // 4 bytes per stereo frame (2ch x 16-bit)
+void ensurePcmRing() {
+    if (pcmRing) return;
+    pcmRing = (uint8_t *)ps_malloc(kPcmRingSize);
+    pcmMutex = xSemaphoreCreateMutex();
+}
 
-    for (int32_t i = 0; i < frameCount; i++) {
-        int16_t sample = static_cast<int16_t>(sinf(phase) * 8000); // moderate volume
-        samples[i * 2] = sample;     // left
-        samples[i * 2 + 1] = sample; // right
-        phase += kPhaseIncrement;
-        if (phase > 2.0f * PI) phase -= 2.0f * PI;
+// Pull callback ESP32-A2DP's source calls on its own task whenever it
+// needs more bytes. Drains the ring buffer; underruns (not enough
+// decoded audio buffered yet) fill with silence rather than garbage --
+// a brief silent gap reads far better than noise.
+int32_t providePcm(uint8_t *data, int32_t byteCount) {
+    ensurePcmRing();
+    if (!pcmRing || !pcmMutex) {
+        memset(data, 0, byteCount);
+        return byteCount;
     }
-
-    return frameCount * 4;
+    xSemaphoreTake(pcmMutex, portMAX_DELAY);
+    int32_t n = (int32_t)min((size_t)byteCount, pcmCount);
+    for (int32_t i = 0; i < n; i++) {
+        data[i] = pcmRing[pcmTail];
+        pcmTail = (pcmTail + 1) % kPcmRingSize;
+    }
+    pcmCount -= n;
+    xSemaphoreGive(pcmMutex);
+    if (n < byteCount) memset(data + n, 0, byteCount - n);
+    return byteCount;
 }
 
 // --- Discovery stash ---
@@ -175,7 +195,7 @@ void BluetoothSource::begin(const char *targetDeviceName, bool allowAutoReconnec
     }
 
     Serial.printf("[bt] Starting Bluetooth A2DP source... (free heap: %u bytes)\n", ESP.getFreeHeap());
-    a2dpSource.set_data_callback(provideTestTone);
+    a2dpSource.set_data_callback(providePcm);
     a2dpSource.set_ssid_callback(nullptr); // ensure a prior discovery scan's callback isn't still armed
     a2dpSource.set_auto_reconnect(allowAutoReconnect); // see BluetoothSource.h's comment on this parameter
     a2dpSource.start(targetDeviceName);
@@ -220,7 +240,7 @@ void BluetoothSource::startDiscovery() {
         return;
     }
     discoveredCountVal = 0;
-    a2dpSource.set_data_callback(provideTestTone);
+    a2dpSource.set_data_callback(providePcm);
     a2dpSource.set_ssid_callback(ssidCallback);
     a2dpSource.start(); // no name -- pure discovery, see BluetoothSource.h
     RadioLock::release(); // same brief-hold pattern as begin() -- discovery itself runs async on the BT task
@@ -256,4 +276,20 @@ void BluetoothSource::connectToDiscovered(const char *name) {
     // normal begin() (status row, boot auto-resume) correctly auto-
     // reconnects to the newly-picked device from then on.
     begin(name, /*allowAutoReconnect=*/false);
+}
+
+void BluetoothSource::feedPcm(const uint8_t *data, size_t len) {
+    ensurePcmRing();
+    if (!pcmRing || !pcmMutex) return;
+    xSemaphoreTake(pcmMutex, portMAX_DELAY);
+    for (size_t i = 0; i < len; i++) {
+        if (pcmCount >= kPcmRingSize) { // overflow: drop oldest, keep latest audio
+            pcmTail = (pcmTail + 1) % kPcmRingSize;
+            pcmCount--;
+        }
+        pcmRing[pcmHead] = data[i];
+        pcmHead = (pcmHead + 1) % kPcmRingSize;
+        pcmCount++;
+    }
+    xSemaphoreGive(pcmMutex);
 }

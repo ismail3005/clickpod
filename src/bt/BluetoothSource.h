@@ -83,4 +83,15 @@ const char *discoveredName(int index);
 // clarity.
 void connectToDiscovered(const char *name);
 
+// Real audio output -- replaces the old 440Hz test tone. Called from
+// AudioBridge.cpp's audio_process_i2s() (a weak-symbol hook
+// ESP32-audioI2S itself exposes, literally commented "record audiodata
+// or send via BT" in its own header) with every decoded PCM buffer,
+// already 44.1kHz 16-bit stereo interleaved -- exactly what A2DP wants,
+// no conversion needed. Buffers into a small ring the A2DP data callback
+// (running on the BT stack's own task, not the caller's) drains from;
+// thread-safe via an internal mutex since producer and consumer run on
+// different tasks. Safe to call even when not connected (no-ops).
+void feedPcm(const uint8_t *data, size_t len);
+
 } // namespace BluetoothSource
