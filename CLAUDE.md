@@ -946,6 +946,49 @@ bug fixes rather than a UX iteration round. If the simulator should show
 matching row icons too, that's a follow-up, not done here -- see
 CLAUDE.md's usual porting-discipline note.
 
+**UPDATE -- real vector icons, replacing most of the plain letter
+badges.** User explicitly asked for nicer icons on the 4 main-menu tiles
+(only Bluetooth had a real hand-drawn glyph, Music/Playlists/Settings
+were plain "M"/"P"/"S" letters) and mentioned track rows' letter badges
+looked out of place too. `Screens.cpp` gained five new glyph-drawing
+functions right next to `drawBtGlyph()`, same deliberately-simple-
+primitives style (plain lines/circles/rounded-rects from a normalized
+24x24 viewBox, nothing needing a curve library) so they can be reasoned
+about for correctness without a way to preview them before the user
+flashes them -- same discipline `drawBtGlyph()` already established:
+- `drawNoteGlyph()` -- single eighth note (notehead + stem + flag).
+  Music tile AND track rows both use this (a track IS a song -- same
+  glyph at a different scale instead of inventing a second one).
+- `drawPlaylistGlyph()` -- three descending-length horizontal bars, the
+  standard "list" icon. Playlists tile and playlist rows.
+- `drawSettingsGlyph()` -- three horizontal "sliders" (a line each with
+  a knob at a different position), not a gear -- a gear's teeth need
+  real resolution to read as teeth rather than a blob at this badge
+  size, and getting that wrong with no preview was a real risk not
+  worth taking for the Settings tile specifically.
+- `drawArtistGlyph()` -- head (circle) + shoulders (rounded rect).
+- `drawAlbumGlyph()` -- disc (outer ring + filled center hole).
+
+`drawMainMenuGrid()`'s icon dispatch now branches on `"note"`/
+`"playlist"`/`"gear"` to call the matching glyph (alongside the existing
+`"bt"` branch) instead of printing a letter. `rowIconFor()`/
+`drawRowIconIfAny()` (the shared per-row badge renderer every list
+screen uses) gained a `RowGlyph` enum replacing the old single-letter
+field, dispatching `"track"`/`"playlist"`/`"artist"`/`"album"`/`"bt"` to
+real glyphs the same way -- Settings' own sub-rows
+(`"brightness"`/`"sort"`/`"theme"`/`"timezone"`/`"rescan"`) stay plain
+letter badges for now, not asked for this round and five more distinct
+small icons was more new-shape surface area than seemed worth it in one
+pass.
+
+**Not yet hardware-confirmed**, same caveat as everything in this
+sandbox (no PlatformIO to compile against) -- brace-balance and call-
+site review done carefully since this touches shared rendering code
+every screen depends on, but real visual confirmation needs a flash.
+Next real step: flash, check the main menu's three newly-iconed tiles
+plus a few track/playlist/artist/album rows render as expected (not
+garbled/misaligned/wrong color) before trusting this pattern further.
+
 ## Finer Now Playing scrubbing
 
 `InputRouter.cpp`'s `rotate()` scrub step in `NOW_PLAYING` mode dropped

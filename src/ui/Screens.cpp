@@ -50,6 +50,78 @@ void drawBtGlyph(int16_t x, int16_t y, int16_t size, uint16_t color) {
     }
 }
 
+// Real vector icons, added after the user asked for nicer badges than
+// the plain colored-letter ones everywhere but Bluetooth (which already
+// had drawBtGlyph() above). Same deliberately-simple-primitives
+// discipline as drawBtGlyph() -- plain lines/circles/rounded-rects from
+// a normalized 24x24 viewBox, nothing that needs a curve library or
+// careful anti-aliasing, so these can be reasoned about for correctness
+// without a way to preview them on real hardware before the user flashes
+// them. Each takes the same (x, y, size, color) shape as drawBtGlyph()
+// so every call site can treat all icon glyphs identically.
+
+// Single eighth note -- notehead + stem + flag. Used for both the Music
+// main-menu tile ("note") and individual track rows ("track", smaller) --
+// a track IS a song, so reusing the same glyph at a different scale
+// reinforces that instead of needing a second, visually-unrelated icon.
+void drawNoteGlyph(int16_t x, int16_t y, int16_t size, uint16_t color) {
+    auto sx = [&](float vx) -> int16_t { return x + (int16_t)(vx / 24.0f * size); };
+    auto sy = [&](float vy) -> int16_t { return y + (int16_t)(vy / 24.0f * size); };
+    int16_t r = max((int16_t)1, (int16_t)(size * 3.0f / 24.0f));
+    tftPtr->fillCircle(sx(8), sy(18), r, color);
+    tftPtr->drawLine(sx(11), sy(18), sx(11), sy(4), color);
+    tftPtr->drawLine(sx(11), sy(4), sx(17), sy(9), color);
+}
+
+// Three descending-length horizontal bars -- a standard "playlist/list"
+// glyph, used for both the Playlists main-menu tile and playlist rows.
+void drawPlaylistGlyph(int16_t x, int16_t y, int16_t size, uint16_t color) {
+    auto sx = [&](float vx) -> int16_t { return x + (int16_t)(vx / 24.0f * size); };
+    auto sy = [&](float vy) -> int16_t { return y + (int16_t)(vy / 24.0f * size); };
+    tftPtr->drawLine(sx(2), sy(5), sx(21), sy(5), color);
+    tftPtr->drawLine(sx(2), sy(12), sx(16), sy(12), color);
+    tftPtr->drawLine(sx(2), sy(19), sx(11), sy(19), color);
+}
+
+// Three sliders (horizontal tracks with a knob at a different position on
+// each) -- a standard "settings" glyph. Deliberately NOT a gear: a gear's
+// teeth need enough resolution to read as teeth rather than a blob at
+// small badge sizes, and get that wrong with no way to preview it first.
+// Sliders are the same "settings" idea built entirely from lines + filled
+// circles, same primitives as every other glyph here.
+void drawSettingsGlyph(int16_t x, int16_t y, int16_t size, uint16_t color) {
+    auto sx = [&](float vx) -> int16_t { return x + (int16_t)(vx / 24.0f * size); };
+    auto sy = [&](float vy) -> int16_t { return y + (int16_t)(vy / 24.0f * size); };
+    int16_t r = max((int16_t)1, (int16_t)(size * 2.0f / 24.0f));
+    tftPtr->drawLine(sx(2), sy(5), sx(22), sy(5), color);
+    tftPtr->fillCircle(sx(16), sy(5), r, color);
+    tftPtr->drawLine(sx(2), sy(12), sx(22), sy(12), color);
+    tftPtr->fillCircle(sx(8), sy(12), r, color);
+    tftPtr->drawLine(sx(2), sy(19), sx(22), sy(19), color);
+    tftPtr->fillCircle(sx(18), sy(19), r, color);
+}
+
+// Person silhouette (head + shoulders) -- Artist rows.
+void drawArtistGlyph(int16_t x, int16_t y, int16_t size, uint16_t color) {
+    auto sx = [&](float vx) -> int16_t { return x + (int16_t)(vx / 24.0f * size); };
+    auto sy = [&](float vy) -> int16_t { return y + (int16_t)(vy / 24.0f * size); };
+    int16_t r = max((int16_t)1, (int16_t)(size * 3.5f / 24.0f));
+    tftPtr->fillCircle(sx(12), sy(8), r, color);
+    int16_t rw = max((int16_t)1, (int16_t)(sx(18) - sx(6)));
+    int16_t rh = max((int16_t)1, (int16_t)(sy(21) - sy(14)));
+    tftPtr->fillRoundRect(sx(6), sy(14), rw, rh, max((int16_t)1, (int16_t)(size / 8)), color);
+}
+
+// Disc (outer ring + center hole) -- Album rows.
+void drawAlbumGlyph(int16_t x, int16_t y, int16_t size, uint16_t color) {
+    auto sx = [&](float vx) -> int16_t { return x + (int16_t)(vx / 24.0f * size); };
+    auto sy = [&](float vy) -> int16_t { return y + (int16_t)(vy / 24.0f * size); };
+    int16_t rOuter = max((int16_t)2, (int16_t)(size * 9.0f / 24.0f));
+    int16_t rInner = max((int16_t)1, (int16_t)(size * 2.0f / 24.0f));
+    tftPtr->drawCircle(sx(12), sy(12), rOuter, color);
+    tftPtr->fillCircle(sx(12), sy(12), rInner, color);
+}
+
 void drawStatusbar() {
     const Palette &p = pal();
     tftPtr->fillRect(0, 0, kScreenW, kStatusbarH, p.sbarBg);
@@ -157,14 +229,24 @@ void drawMainMenuGrid() {
         int16_t bx = cx + tilePad, by = cy + (rowH - badgeSize) / 2;
 
         tftPtr->fillRoundRect(bx, by, badgeSize, badgeSize, 6, badgeColors[i % 4]);
-        if (m->items[i].icon == "bt") {
+        const String &tileIcon = m->items[i].icon;
+        if (tileIcon == "bt") {
             drawBtGlyph(bx + badgeSize / 4, by + badgeSize / 4, badgeSize / 2, TFT_WHITE);
+        } else if (tileIcon == "note") {
+            drawNoteGlyph(bx + badgeSize / 4, by + badgeSize / 4, badgeSize / 2, TFT_WHITE);
+        } else if (tileIcon == "playlist") {
+            drawPlaylistGlyph(bx + badgeSize / 4, by + badgeSize / 4, badgeSize / 2, TFT_WHITE);
+        } else if (tileIcon == "gear") {
+            drawSettingsGlyph(bx + badgeSize / 4, by + badgeSize / 4, badgeSize / 2, TFT_WHITE);
         } else {
+            // Fallback for any future tile that doesn't set a recognized
+            // icon -- shouldn't happen for the 4 current main-menu tiles,
+            // kept only so a new tile added later degrades gracefully
+            // instead of drawing nothing.
             tftPtr->setTextColor(TFT_WHITE, badgeColors[i % 4]);
             tftPtr->setTextSize(2);
             tftPtr->setCursor(bx + badgeSize / 2 - 6, by + badgeSize / 2 - 8);
-            String letter = m->items[i].icon == "note" ? "M" : m->items[i].icon == "playlist" ? "P" : "S";
-            tftPtr->print(letter);
+            tftPtr->print(tileIcon.length() ? tileIcon.substring(0, 1) : "?");
         }
 
         int16_t textX = bx + badgeSize + (rowW * 4 / 100); // .tile gap: 4%
@@ -209,9 +291,11 @@ int menuStartIdx(int selected) {
 // already-shipped pattern. Not cross-checked against the browser
 // simulator this round (see CLAUDE.md) -- this is new firmware-only
 // polish, not a ported behavior/UX decision.
+enum class RowGlyph { kNone, kBt, kNote, kPlaylist, kArtist, kAlbum, kLetter };
+
 struct RowIcon {
     bool present = false;
-    bool isBt = false;
+    RowGlyph glyph = RowGlyph::kNone;
     char letter = 0;
     uint16_t color = 0;
 };
@@ -219,17 +303,21 @@ struct RowIcon {
 RowIcon rowIconFor(const String &icon) {
     // Same 4-color rotation as drawMainMenuGrid()'s badgeColors.
     static const uint16_t colors[4] = {0x2D9F, 0x855F, 0x0725, 0xFC80};
-    if (icon == "bt") return {true, true, 0, colors[2]};
-    if (icon == "artist") return {true, false, 'A', colors[0]};
-    if (icon == "album") return {true, false, 'D', colors[1]}; // D = disc, avoids clashing with Artist's A
-    if (icon == "track") return {true, false, 'N', colors[2]}; // N = note
-    if (icon == "playlist") return {true, false, 'P', colors[1]};
-    if (icon == "brightness") return {true, false, 'B', colors[0]};
-    if (icon == "sort") return {true, false, 'S', colors[1]};
-    if (icon == "theme") return {true, false, 'T', colors[2]};
-    if (icon == "timezone") return {true, false, 'Z', colors[3]};
-    if (icon == "rescan") return {true, false, 'R', colors[0]};
-    return {false, false, 0, 0};
+    if (icon == "bt") return {true, RowGlyph::kBt, 0, colors[2]};
+    if (icon == "artist") return {true, RowGlyph::kArtist, 0, colors[0]};
+    if (icon == "album") return {true, RowGlyph::kAlbum, 0, colors[1]};
+    if (icon == "track") return {true, RowGlyph::kNote, 0, colors[2]};
+    if (icon == "playlist") return {true, RowGlyph::kPlaylist, 0, colors[1]};
+    // Settings sub-rows: still simple letter badges for now -- not asked
+    // for real glyphs this round, and five more distinct small icons is
+    // real extra surface area for a rendering bug with no way to preview
+    // them first. Letter badges already read fine at this size.
+    if (icon == "brightness") return {true, RowGlyph::kLetter, 'B', colors[0]};
+    if (icon == "sort") return {true, RowGlyph::kLetter, 'S', colors[1]};
+    if (icon == "theme") return {true, RowGlyph::kLetter, 'T', colors[2]};
+    if (icon == "timezone") return {true, RowGlyph::kLetter, 'Z', colors[3]};
+    if (icon == "rescan") return {true, RowGlyph::kLetter, 'R', colors[0]};
+    return {false, RowGlyph::kNone, 0, 0};
 }
 
 // Draws a row's icon badge (if it has one) and returns the x position the
@@ -244,14 +332,20 @@ int16_t drawRowIconIfAny(const MenuItem &item, int16_t y) {
     int16_t badgeSize = 16;
     int16_t bx = 8, by = y + (kMenuRowH - badgeSize) / 2;
     tftPtr->fillRoundRect(bx, by, badgeSize, badgeSize, 4, ic.color);
-    if (ic.isBt) {
-        drawBtGlyph(bx + 3, by + 3, badgeSize - 6, TFT_WHITE);
-    } else {
-        tftPtr->setTextColor(TFT_WHITE, ic.color);
-        tftPtr->setTextSize(1);
-        tftPtr->setCursor(bx + badgeSize / 2 - 3, by + badgeSize / 2 - 4);
-        char buf[2] = {ic.letter, 0};
-        tftPtr->print(buf);
+    switch (ic.glyph) {
+        case RowGlyph::kBt: drawBtGlyph(bx + 3, by + 3, badgeSize - 6, TFT_WHITE); break;
+        case RowGlyph::kNote: drawNoteGlyph(bx + 3, by + 3, badgeSize - 6, TFT_WHITE); break;
+        case RowGlyph::kPlaylist: drawPlaylistGlyph(bx + 3, by + 3, badgeSize - 6, TFT_WHITE); break;
+        case RowGlyph::kArtist: drawArtistGlyph(bx + 3, by + 3, badgeSize - 6, TFT_WHITE); break;
+        case RowGlyph::kAlbum: drawAlbumGlyph(bx + 3, by + 3, badgeSize - 6, TFT_WHITE); break;
+        default: {
+            tftPtr->setTextColor(TFT_WHITE, ic.color);
+            tftPtr->setTextSize(1);
+            tftPtr->setCursor(bx + badgeSize / 2 - 3, by + badgeSize / 2 - 4);
+            char buf[2] = {ic.letter, 0};
+            tftPtr->print(buf);
+            break;
+        }
     }
     return bx + badgeSize + 6;
 }
