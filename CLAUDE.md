@@ -2402,6 +2402,104 @@ comes out instead of the test tone -- and separately confirm wired
 (non-BT) playback is unaffected (the `continueI2S=true` branch should
 be byte-for-byte the same behavior as before this change).
 
+**UPDATE -- hardware-confirmed partially working, with two real
+follow-up bugs, both now fixed.** User confirmed real audio DOES come
+out over Bluetooth now (no more test tone) -- but reported it as
+"laggy and noisy and glitchy and overall just unusable."
+
+**Root cause**: `feedPcm()` dropped the OLDEST buffered audio on
+overflow instead of exerting any backpressure on the producer.
+Skipping the I2S write (`continueI2S=false`) removes the one thing
+that was naturally pacing the decode loop to real-time -- a blocking
+I2S write takes roughly as long as the audio it writes actually takes
+to play. Without that pacing, nothing stopped `audio.loop()`'s decode
+from producing chunks faster than A2DP could drain them, and "drop
+oldest" was silently throwing away chunks of audio mid-stream -- which
+is exactly what a glitchy, discontinuous stream sounds like. The 16KB
+(~93ms) buffer was also thin margin for real BT link jitter on top of
+that.
+
+**Fixed**: `kPcmRingSize` bumped to 65536 (~372ms headroom -- PSRAM is
+abundant, 4MB, and a player doesn't care about a few hundred ms of
+extra latency the way a real-time call would). `feedPcm()` rewritten to
+block (in short bursts, bounded to 250ms total so a stalled/
+disconnected consumer can't hang the main loop forever) for room
+instead of dropping -- this re-creates the real-time pacing a blocking
+I2S write used to provide, letting the decode loop naturally slow to
+match what A2DP can actually drain, instead of racing ahead and
+corrupting the stream.
+
+**Separately, a real crash -- root cause found and fixed, not just
+diagnosed.** User disconnected the headphones (powered them off) and,
+while clickpod was (as designed at the time) auto-reconnecting, pressed
+"Turn Bluetooth Off" -- crashed with `Guru Meditation Error: Core 0
+panic'ed (LoadProhibited)`, `EXCVADDR: 0x0000000c` (a near-null pointer
+dereference). The log leading up to it showed the real mechanism
+directly: `handle_reconnect_logic(): Attempting auto-reconnect, retries
+left: 1000` -> `esp_a2d_connect()` fired -> moments later our own
+`end()` log line -> then two BT stack log lines visibly INTERLEAVED
+character-by-character (`bt_app_av_state_co[n n8e5c5t7i6n]g[_Ih]d...`)
+-- unambiguous evidence of two FreeRTOS tasks writing to Serial at the
+literal same instant, i.e. genuinely concurrent execution, not just a
+fast sequence.
+
+Confirmed the exact mechanism by reading `BluetoothA2DPSource::end()`
+in the real library source: it has `while(discovery_active) delay_ms
+(100);` -- a real, working guard that waits out an in-flight DISCOVERY
+scan before tearing down -- but **no equivalent guard for an in-flight
+CONNECT attempt**. The library's own reconnect heartbeat
+(`handle_reconnect_logic()`, running on `bt_app_task`, the library's
+own dedicated event task) had just called `connect_to()`/
+`esp_a2d_connect()` -- an async, in-flight profile-level operation --
+at the exact moment our `end()` (running on the main/calling task)
+started tearing down AVRC/GAP/A2D state out from under it. Two tasks
+touching the same shared state with nothing serializing them is a
+textbook crash, and this is a real, confirmed gap in the library's own
+`end()`, not a heap issue (heap was low at 14524 bytes when this
+happened, which may have compounded things, but the interleaved-log
+evidence points squarely at the concurrency race as the actual trigger
+-- heap exhaustion alone doesn't produce two tasks visibly writing to
+UART at once).
+
+**Fixed at the real root, not by avoiding calling `end()` carefully**:
+`begin()` now calls `a2dpSource.set_auto_reconnect(allowAutoReconnect,
+0)` -- the real library source confirms a second, public overload,
+`set_auto_reconnect(bool, int max_retries)`, that `BluetoothA2DPSource`
+exposes specifically for this (name-hides the common base class's
+single-arg version, so the existing call site picks up the new
+behavior with no other code changes needed). With `max_retries=0`,
+`handle_reconnect_logic()`'s very first post-disconnect heartbeat check
+takes its OTHER branch -- a one-shot discovery scan, not `connect_to()`
+-- which `end()` DOES safely wait out via the existing
+`discovery_active` guard. This doesn't just make the crash less likely,
+it removes the specific unsafe state (an in-flight `connect_to()`) that
+`end()` can ever be called into.
+
+**Also directly implements the user's explicit UX ask** ("once a
+device is disconnected, turn off and stop looking for that device"):
+`BluetoothSource::tick()` (already polling every `loop()` iteration)
+now tracks `hasEverConnectedThisSession` -- the moment a REAL
+connection (not just the first attempt) drops, it calls `end()`
+immediately, not after the 60-second give-up window from the
+twenty-seventh bug (that window still applies, unchanged, to the
+*first* connection attempt of a `begin()` session, where the device
+simply not being in range yet is an ordinary case worth a real chance,
+not a disconnect). This is a stronger, simpler, and SAFER design than
+the previous 60-second watchdog for the post-connection case: reacting
+on literally the first tick after a drop means `end()` runs before the
+(now-neutered, but still real) heartbeat has any chance to reach its
+risky discovery-scan fallback, rather than coexisting with it for up to
+a minute.
+
+**Not yet hardware-confirmed**, same caveat as every change this
+session. Next real step: flash, play real audio over Bluetooth and
+confirm it's actually clean now (not glitchy/noisy), then specifically
+reproduce the original crash scenario (connect, power off the
+headphones, wait for the "device disconnected -- turning Bluetooth
+off" log line to confirm the new immediate-off behavior, then separately
+confirm pressing "Turn Bluetooth Off" at any point, including
+immediately after a disconnect, no longer crashes).
+
 ## AOD ("keep playing + lock input + show clock") -- software half built, screen dimming still blocked on backlight hardware
 
 Plan item 7's software-only half (everything that doesn't need the
@@ -2709,9 +2807,22 @@ last"):
    connection from recent rework before suspecting firmware or strapping
    pins -- pull the board off the breadboard and flash it directly as a
    fast diagnostic.
-8. **Real Bluetooth audio** (routing `ESP32-audioI2S`'s decoded PCM into
-   the A2DP source callback instead of the test tone) -- explicitly
-   deprioritized by the user, do this LAST, after everything above.
+8. **Real Bluetooth audio** -- DONE, see the dedicated section above
+   (search "Real Bluetooth audio -- DONE"). Not deprioritized anymore --
+   picked back up, found the library's own documented hook, implemented,
+   and iterated on real hardware feedback (glitchy audio, a real crash)
+   across several rounds.
+9. **Create new playlists from the device itself.** User flagged this
+   while the Bluetooth crash/audio-quality work above was still being
+   worked through -- explicitly grouped it with items 6/7 (manual
+   "Set time" UI + AOD) as later work, after Bluetooth is solid.
+   Currently playlists can only be ADDED TO from a track's "..." menu
+   ("Add to Playlist") -- there's no way to create a brand-new, empty
+   (or first-track) playlist from the device; `Library.cpp`'s playlist
+   model (both the mock `PLAYLISTS` data and the real on-SD-index path,
+   see the "on-SD compact index" section above) and the "Add to
+   Playlist" submenu in `MenuEngine.cpp` would need a real look before
+   attempting this -- not scoped yet, not started.
 
 ## Working style this project has used (carry forward)
 

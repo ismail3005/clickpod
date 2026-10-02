@@ -94,17 +94,24 @@ void connectToDiscovered(const char *name);
 // different tasks. Safe to call even when not connected (no-ops).
 void feedPcm(const uint8_t *data, size_t len);
 
-// Call once per main loop() iteration while BT is on. Watches how long
-// it's been searching/reconnecting without actually landing a connection
-// and gives up (calls end() internally) past kGiveUpMs -- see the real
-// crash/complaint this was added for: "constantly trying to scan and
-// connect" is both a real battery/radio cost and, combined with
-// TimeSync's periodic WiFi scans sharing the same radio, a real crash
-// surface. The library's own retry logic (reconnect-by-address, then
-// fall back to discovery) has no exposed "give up after N attempts"
-// knob from application code -- this is a deliberately simple
-// application-level watchdog on top of it instead. No-op when not
-// running or already connected.
+// Call once per main loop() iteration while BT is on. Two distinct
+// behaviors, both application-level (the library exposes no equivalent
+// knob for either):
+//   1. A real disconnect AFTER a real connection (headphones powered
+//      off, walked out of range, ...) -- turns Bluetooth off
+//      IMMEDIATELY, not auto-searching for that device again. This is
+//      also the fix for a real crash: calling end() while the
+//      library's own reconnect heartbeat has an esp_a2d_connect() in
+//      flight is unsafe (confirmed from source -- end() only waits out
+//      an in-flight discovery scan, not a connect attempt), and
+//      begin() now pins the library's own retry count to 0 specifically
+//      so a disconnect's first heartbeat tick can never reach that
+//      unsafe in-flight-connect state before this catches it.
+//   2. Still trying to land the FIRST connection of this begin()
+//      session (device simply wasn't in range/on yet) -- a real,
+//      bounded (kGiveUpMs) grace period before giving up, since that's
+//      an ordinary case, not a disconnect.
+// No-op when not running.
 void tick();
 
 } // namespace BluetoothSource

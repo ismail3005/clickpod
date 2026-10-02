@@ -6,6 +6,7 @@
 #include <nvs.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 
 #include "../net/RadioLock.h"
 
@@ -86,15 +87,16 @@ BluetoothA2DPSource a2dpSource;
 bool running = false;
 String currentTarget; // name last passed to begin(), "" if never begun
 
-// See tick()/BluetoothSource.h's comment -- 0 means "not currently
-// searching" (either never begun, or currently connected). Set to
-// millis() the moment a disconnected/searching state is first observed,
-// reset to 0 the moment a connection lands -- so the give-up window
-// always measures from the start of the CURRENT search, not from the
-// original begin() call hours earlier if it had connected and later
-// dropped.
+// See tick()/BluetoothSource.h's comment. searchingSinceMs: 0 means "not
+// currently searching for the FIRST connection of this begin() session"
+// -- set to millis() the moment a not-yet-ever-connected search starts,
+// reset to 0 once it lands. kGiveUpMs only bounds THIS first-connection
+// search (a normal "Bluetooth On" with the device briefly out of range
+// should get a real chance) -- a disconnect AFTER a real connection is
+// handled completely differently, immediately, see tick().
 uint32_t searchingSinceMs = 0;
-constexpr uint32_t kGiveUpMs = 60000; // 1 minute of fruitless searching
+constexpr uint32_t kGiveUpMs = 60000; // 1 minute to land the FIRST connection
+bool hasEverConnectedThisSession = false;
 
 // Real audio ring buffer -- fed by AudioBridge.cpp's audio_process_i2s()
 // weak-symbol override (ESP32-audioI2S's own documented hook, literally
@@ -104,7 +106,25 @@ constexpr uint32_t kGiveUpMs = 60000; // 1 minute of fruitless searching
 // called from the BT stack's own task) run on different tasks, so this
 // needs real synchronization -- a plain FreeRTOS mutex, not an ISR
 // context on either side.
-constexpr size_t kPcmRingSize = 16384; // ~93ms of headroom at 44.1kHz/16-bit/stereo
+//
+// Real hardware report: audio over BT was "laggy and noisy and glitchy
+// and overall unusable." Root cause wasn't the buffer being too small
+// alone -- it's that feedPcm() (below) used to DROP the oldest buffered
+// audio on overflow instead of pushing back on the producer. Skipping
+// the I2S write (continueI2S=false) removes the one thing that was
+// naturally pacing the decode loop to real-time -- a blocking I2S write
+// takes roughly as long as the audio it writes actually takes to play.
+// Without that, nothing stopped the decoder from producing chunks
+// faster than A2DP drains them, and "drop oldest" silently threw away
+// chunks of audio MID-STREAM -- which is exactly what a glitchy,
+// discontinuous-sounding stream is. 16KB (~93ms) was also just thin
+// margin for real BT link jitter on top of that. Both fixed below:
+// feedPcm() now blocks (bounded) for room instead of dropping, which
+// re-creates the pacing a real I2S write would have provided, and the
+// buffer is bumped to give real jitter headroom -- PSRAM is abundant
+// (4MB, see this project's established PSRAM push) and a player doesn't
+// care about a few hundred ms of extra latency the way a call would.
+constexpr size_t kPcmRingSize = 65536; // ~372ms of headroom at 44.1kHz/16-bit/stereo
 uint8_t *pcmRing = nullptr; // ps_malloc'd lazily, PSRAM (this project's established push)
 SemaphoreHandle_t pcmMutex = nullptr;
 size_t pcmHead = 0, pcmTail = 0, pcmCount = 0;
@@ -170,6 +190,7 @@ bool ssidCallback(const char *ssid, esp_bd_addr_t /*address*/, int /*rssi*/) {
 void BluetoothSource::begin(const char *targetDeviceName, bool allowAutoReconnect) {
     if (running) return;
     searchingSinceMs = 0; // fresh search window -- see tick()'s comment
+    hasEverConnectedThisSession = false;
 
     // Internal-heap guard FIRST -- a real crash in the field
     // (semphr_create_wrapper assert, then separately a WiFi esp_timer_create
@@ -208,7 +229,26 @@ void BluetoothSource::begin(const char *targetDeviceName, bool allowAutoReconnec
     Serial.printf("[bt] Starting Bluetooth A2DP source... (free heap: %u bytes)\n", ESP.getFreeHeap());
     a2dpSource.set_data_callback(providePcm);
     a2dpSource.set_ssid_callback(nullptr); // ensure a prior discovery scan's callback isn't still armed
-    a2dpSource.set_auto_reconnect(allowAutoReconnect); // see BluetoothSource.h's comment on this parameter
+    // max_retries=0 is the real crash fix, not just the "stop hammering
+    // forever" UX one -- see the real crash log this was traced to:
+    // end() was called while the library's own heartbeat-driven
+    // reconnect-by-address (handle_reconnect_logic(), retries defaulted
+    // to ~1000) had an esp_a2d_connect() actively in flight. Confirmed
+    // from the real library source: BluetoothA2DPSource::end() only
+    // waits out an in-flight DISCOVERY scan (`while(discovery_active)
+    // delay_ms(100)`) before tearing down -- there is NO equivalent
+    // guard for an in-flight CONNECT attempt, so end() and the BT
+    // stack's own event task (bt_app_task, running handle_reconnect_
+    // logic()/connect_to() concurrently) raced on the same AVRC/GAP/A2D
+    // state with nothing serializing them -- a real Guru Meditation
+    // LoadProhibited crash (EXCVADDR near-null), not heap exhaustion.
+    // With max_retries=0, a disconnect's very first heartbeat check
+    // takes handle_reconnect_logic()'s OTHER branch (a one-shot
+    // discovery scan, not connect_to()) -- which end() DOES safely wait
+    // out. This doesn't just reduce the crash's likelihood, it removes
+    // the specific unsafe state (an in-flight connect_to()) end() can
+    // ever be called into.
+    a2dpSource.set_auto_reconnect(allowAutoReconnect, 0);
     a2dpSource.start(targetDeviceName);
     RadioLock::release(); // see above -- don't hold this past the actual start() call
     running = true;
@@ -302,31 +342,71 @@ void BluetoothSource::connectToDiscovered(const char *name) {
 void BluetoothSource::feedPcm(const uint8_t *data, size_t len) {
     ensurePcmRing();
     if (!pcmRing || !pcmMutex) return;
-    xSemaphoreTake(pcmMutex, portMAX_DELAY);
-    for (size_t i = 0; i < len; i++) {
-        if (pcmCount >= kPcmRingSize) { // overflow: drop oldest, keep latest audio
-            pcmTail = (pcmTail + 1) % kPcmRingSize;
-            pcmCount--;
+    // Real backpressure instead of drop-oldest-on-overflow -- see the
+    // big comment on kPcmRingSize above for why dropping was the actual
+    // cause of the glitchy/noisy audio. When the buffer's full, wait in
+    // short bursts for the consumer (providePcm(), the BT stack's own
+    // task) to drain some before writing more -- this is what re-creates
+    // the real-time pacing a blocking I2S write used to provide. Bounded
+    // total wait (kMaxWaitMs) so a stalled/disconnected consumer can't
+    // hang the main loop (audio.loop() calls this synchronously) forever
+    // -- past that, the rest of this one chunk is dropped (logged once),
+    // which is a world apart from silently dropping continuously.
+    constexpr uint32_t kMaxWaitMs = 250;
+    uint32_t waitStart = millis();
+    size_t written = 0;
+    while (written < len) {
+        xSemaphoreTake(pcmMutex, portMAX_DELAY);
+        size_t space = kPcmRingSize - pcmCount;
+        size_t chunk = min(space, len - written);
+        for (size_t i = 0; i < chunk; i++) {
+            pcmRing[pcmHead] = data[written + i];
+            pcmHead = (pcmHead + 1) % kPcmRingSize;
         }
-        pcmRing[pcmHead] = data[i];
-        pcmHead = (pcmHead + 1) % kPcmRingSize;
-        pcmCount++;
+        pcmCount += chunk;
+        written += chunk;
+        xSemaphoreGive(pcmMutex);
+        if (written >= len) break;
+        if (millis() - waitStart >= kMaxWaitMs) {
+            Serial.println(F("[bt] PCM ring buffer stayed full too long -- dropping the rest of this chunk"));
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2)); // brief yield, let the consumer task actually run and drain
     }
-    xSemaphoreGive(pcmMutex);
 }
 
 void BluetoothSource::tick() {
     if (!running) return;
     if (a2dpSource.is_connected()) {
-        searchingSinceMs = 0; // connected -- not searching, reset so a LATER drop gets its own fresh window
+        hasEverConnectedThisSession = true;
+        searchingSinceMs = 0;
         return;
     }
+    // Real disconnect AFTER a real connection (headphones powered off,
+    // walked out of range, etc.) -- user's explicit ask: "once a device
+    // is disconnected, turn off and stop looking for that device."
+    // Turning off HERE, immediately, rather than waiting for the
+    // kGiveUpMs window below, is also the safest timing: max_retries=0
+    // (see begin()) means the library's own heartbeat won't have
+    // started a risky in-flight connect_to() yet on this very first
+    // post-disconnect tick, so end() is called into a quiescent state,
+    // not racing an active reconnect attempt the way the real crash did.
+    if (hasEverConnectedThisSession) {
+        Serial.println(F("[bt] device disconnected -- turning Bluetooth off (not auto-searching for it again)"));
+        end();
+        return;
+    }
+    // Below here: still trying to land the FIRST connection of this
+    // begin() session (e.g. device was out of range/off when "Bluetooth
+    // On" was pressed) -- give it a real, bounded chance rather than
+    // ending instantly, since that's a normal, expected case, not a
+    // disconnect.
     if (searchingSinceMs == 0) {
-        searchingSinceMs = millis(); // first tick observed as disconnected/searching
+        searchingSinceMs = millis(); // first tick observed as still-searching
         return;
     }
     if (millis() - searchingSinceMs >= kGiveUpMs) {
-        Serial.println(F("[bt] giving up after a minute of searching with no connection -- turning off "
+        Serial.println(F("[bt] giving up after a minute without finding the device -- turning off "
                           "(use the Bluetooth menu to try again)"));
         end();
     }
