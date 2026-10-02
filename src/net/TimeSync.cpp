@@ -27,15 +27,28 @@ std::vector<WifiCredential> knownCredentials;
 constexpr uint32_t kResyncIntervalMs = 6UL * 60 * 60 * 1000; // 6 hours -- corrects millis() drift
 // If a sync attempt is SKIPPED before it even touches the radio (not
 // enough internal heap headroom, or Bluetooth currently owns it -- see
-// RadioLock.h), retry much sooner than the normal 6h cadence, since both
-// are likely transient (heap recovers once boot-time temporaries are
-// freed; BT gets turned off). A sync that was actually ATTEMPTED and
-// failed for a real reason (no open network in range, couldn't join,
-// NTP didn't answer) does NOT get this fast retry -- that's an ordinary,
-// possibly-permanent condition (no open network anywhere nearby, ever),
-// and hammering WiFi scans every 2 minutes forever over it would just
-// waste battery for no benefit.
-constexpr uint32_t kSkippedRetryDelayMs = 2UL * 60 * 1000; // 2 minutes
+// RadioLock.h), retry sooner than the normal 6h cadence, since both are
+// likely transient (heap recovers once boot-time temporaries are freed;
+// BT gets turned off). A sync that was actually ATTEMPTED and failed for
+// a real reason (no open network in range, couldn't join, NTP didn't
+// answer) does NOT get this fast retry -- that's an ordinary, possibly-
+// permanent condition, and hammering WiFi scans over it would just waste
+// battery for no benefit.
+//
+// WAS 2 minutes -- real-world report of WiFi "trying to sync a lot more
+// often than expected." Root cause: this fast path was designed for a
+// one-off transient skip at BOOT (low heap right after the library
+// scan), back before Bluetooth commonly stayed on for an entire
+// listening session. Now that real BT usage is normal (RadioLock skips
+// EVERY TimeSync attempt for as long as BT is connected -- see
+// RadioLock.h), a multi-hour BT session meant TimeSync retried every 2
+// minutes continuously, for hours -- clearly visible, clearly wasteful,
+// and exactly what was reported. Raised to 30 minutes -- still recovers
+// much faster than the full 6h cycle from a genuinely transient low-heap
+// moment at boot, but doesn't hammer a WiFi scan every couple minutes
+// for the entire time Bluetooth happens to be on, which is now the
+// common case this needs to coexist with gracefully.
+constexpr uint32_t kSkippedRetryDelayMs = 30UL * 60 * 1000; // 30 minutes
 constexpr uint32_t kConnectTimeoutMs = 8000;
 constexpr uint32_t kNtpTimeoutMs = 5000;
 

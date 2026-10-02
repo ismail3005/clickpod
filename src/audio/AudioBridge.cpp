@@ -106,10 +106,43 @@ void pauseResume() {
     audioPtr->pauseResume();
 }
 
+// Real fix for "two volume controls that don't agree" -- user reported
+// the headphones' own volume buttons genuinely changed the audible
+// level (visible in the serial log too) while the on-screen slider sat
+// there as a completely separate control, stacking with it ("blast
+// volume on both" / "reduce to zero on both but one would be
+// undetectable"). Traced the real cause by reading Audio.cpp directly:
+// Audio::playChunk() applies its own Gain() (the volume this function
+// sets, 0-21) BEFORE calling audio_process_i2s() -- meaning whatever we
+// hand to Bluetooth is ALREADY attenuated by this value. Separately,
+// ESP32-A2DP's library-level set_volume()/volume_control() (0-127,
+// AVRCP-synced with the connected device both directions -- see
+// BluetoothSource.h) attenuates AGAIN on top of that whenever the
+// connected device reports a volume change, which the library does
+// automatically and unconditionally, not something app code can
+// suppress. Two independent attenuation stages in series is exactly
+// what was reported.
+//
+// Fixed by making this ONE stage active at a time instead of fighting
+// each other: while Bluetooth is connected, this keeps the wired/I2S
+// side pinned at max (unity -- no attenuation applied before
+// audio_process_i2s() sees the samples) and drives the real, single
+// volume control through BluetoothSource::setVolume() instead, scaled
+// to its native 0-127 range -- which is also finer-grained than this
+// function's own 0-21 DAC range, fixing the separately-reported
+// coarseness/"on-screen can push past what the headphones' own buttons
+// reach" complaint as a side effect of using the full native range
+// instead of our own narrower one. Wired-only playback (BT not
+// connected) is unchanged from before.
 void setVolumePercent(int pct) {
     if (!audioPtr) return;
     pct = constrain(pct, 0, 100);
-    audioPtr->setVolume(map(pct, 0, 100, 0, 21));
+    if (BluetoothSource::isConnected()) {
+        audioPtr->setVolume(21);
+        BluetoothSource::setVolume((uint8_t)map(pct, 0, 100, 0, 127));
+    } else {
+        audioPtr->setVolume(map(pct, 0, 100, 0, 21));
+    }
 }
 
 bool seekTo(uint16_t sec) {

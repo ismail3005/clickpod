@@ -2787,19 +2787,33 @@ it extends/varies with the title's actual resolution), which matches
 "rarely works out fine" -- it only looks right when a particular file's
 resolution happens to downscale to something close to 92 already.
 
-**Not fixed this round** -- user asked for it to go on the deferred
-list, not to be fixed now. Two real options, not mutually exclusive
-(user's own suggestion, matches the actual cause): (1) add a real
-post-decode resize step -- decode at the current finest-available scale
-as now, then software-downsample (nearest-neighbor is cheap; a real
-box/bilinear filter would look better but costs more CPU) from whatever
-size that lands on down to exactly `kSize`, instead of center-cropping;
-(2) grow `kSize`/the Now Playing art box itself so less of the decoded
-image needs to be cropped off relative to typical embedded-art
-resolutions -- doesn't fix the aspect-ratio-crop root cause by itself,
-but reduces how much is lost. Likely worth doing both: resize properly
-AND give art a bit more screen space. Not scoped/attempted further this
-round.
+**UPDATE -- fixed, not yet hardware-confirmed.** Implemented option 1
+from the two originally proposed: `AlbumArt.cpp`'s `tjpgCallback()`/
+`loadForTrack()` now decode into a SEPARATE, per-track scratch buffer
+(`decodeBuf`, sized to that file's actual post-TJpg-scale dimensions,
+`ps_malloc()`'d and freed each load) instead of writing straight into
+the fixed `kSize`x`kSize` `artBuf` with a centering offset -- that
+offset-write WAS the crop (anything outside `[0,kSize)` after centering
+was silently clipped). After decoding into the full scratch buffer, a
+real nearest-neighbor resize step fits it into the `kSize`x`kSize` box
+preserving aspect ratio (scales to whichever axis is smaller, letterbox-
+pads the other with centering, same as the old crop's centering math but
+now shrinking instead of clipping) -- no more thrown-away image content.
+Nearest-neighbor, not a box/bilinear filter -- cheap, and the source is
+already close to `kSize` after the existing TJpg scale-factor selection,
+so a fancier filter wouldn't gain much at this size. Option 2 (growing
+`kSize`/the art box itself) is NOT done -- the resize alone should fix
+the "awkward crop" complaint; growing the box is a separate, bigger
+layout change (touches `Screens.cpp`'s Now Playing layout, not just
+`AlbumArt.cpp`) and wasn't asked for alongside this fix. Revisit only if
+real art still looks too small/soft after this round confirms on
+hardware.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: flash, play a few tracks with real embedded art (especially
+ones that looked badly cropped before) and confirm the full image now
+shows, just possibly letterboxed (thin padding bars on one axis for
+non-square art), not cut off.
 
 ## Thirtieth real hardware bug (found, fixed, not yet hardware-confirmed): the 128-byte PSRAM threshold wasn't actually catching real Track strings -- BT stalled mid-session, then refused to connect at all after a fresh RST
 
@@ -2999,6 +3013,149 @@ DOES control. This doesn't prove the stack-size fix is correct, but it
 does rule out the one alternative (consumer-task stack) that would have
 made the fix target the wrong side entirely, so it's the right first
 thing to try.
+
+## Thirty-third real hardware bug (found, fixed, not yet hardware-confirmed): two independent, unsynced volume controls stacking over Bluetooth
+
+User reported the headphones' own volume buttons genuinely changed the
+audible level (visible in the serial log too) while the on-screen
+slider behaved as a completely separate control -- "theoretically I can
+blast the volume on both... or reduce it to zero on both but one would
+be undetectable." Separately: the on-screen slider felt coarser than
+the headphones' own buttons, and could be pushed louder than the
+headphones' own controls could reach on their own ("headphone ones tap
+out at 127 but I can push it further maxing out the on-screen ones").
+
+**Traced the real cause by reading both the real `ESP32-audioI2S` and
+`ESP32-A2DP` sources directly**: `Audio::playChunk()` applies its own
+`Gain()` (the volume `AudioBridge::setVolumePercent()` sets, 0-21 range)
+BEFORE calling `audio_process_i2s()` -- confirmed from source, not
+guessed -- meaning whatever reaches Bluetooth is ALREADY attenuated by
+that value. Separately, `BluetoothA2DPCommon.h`'s `set_volume()` (0-127)
+attenuates AGAIN via its own internal `volume_control()`, and the
+library calls this AUTOMATICALLY AND UNCONDITIONALLY every time the
+connected device reports ITS OWN volume changed (confirmed from
+`BluetoothA2DPSource::bt_av_notify_evt_handler()`'s
+`ESP_AVRC_RN_VOLUME_CHANGE` case) -- not something app code can suppress
+or opt out of. Two independent attenuation stages, each able to move
+on its own, exactly matches what was reported. The "127 vs. can push
+further" complaint is the same root cause from a different angle: the
+on-screen slider only ever drove the 0-21 DAC-range stage, with the
+127-range AVRCP stage able to independently pile more or less
+attenuation on top regardless of what the slider showed.
+
+**Fixed**: `AudioBridge::setVolumePercent()` now makes only ONE stage
+active at a time instead of letting them fight -- while Bluetooth is
+connected, it pins the wired/I2S side at max (21, unity -- no
+attenuation before `audio_process_i2s()` sees the samples) and drives
+the real, single volume control through a new `BluetoothSource::
+setVolume()`/`getVolume()` pair (wrapping the library's real
+`set_volume()`/`get_volume()`) scaled to its native 0-127 range instead
+-- which also directly fixes the coarseness complaint, since 127 steps
+is finer than the DAC path's 21. `BluetoothSource::setVolume()` both
+attenuates OUR output and sends the AVRCP "set absolute volume" command
+so the connected device's own volume readout updates to match (real,
+built-in library behavior, confirmed from source, not something this
+project had to implement itself). The OTHER direction -- the headphones
+reporting their own volume change -- was already being applied to real
+attenuation automatically by the library (per the unconditional-call
+finding above); what was missing was telling OUR UI about it.
+`main.cpp`'s `syncBluetoothToUi()` now polls `BluetoothSource::
+getVolume()` each loop tick while connected and mirrors a change into
+`state.volume` (marking the UI dirty), and re-invokes
+`AudioBridge::setVolumePercent(state.volume)` on every real connect/
+disconnect transition so the right attenuation stage is always the one
+actually live for the current output path. Wired-only playback (BT not
+connected) is completely unchanged from before this fix.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: flash, connect Bluetooth, confirm (a) the on-screen slider
+and the headphones' own volume display move together no matter which
+side initiates the change, (b) the slider can't be pushed past what the
+headphones themselves can reach, and (c) the volume change actually
+feels finer-grained than before.
+
+## Thirty-fourth real hardware bug/decision (found, fixed, not yet hardware-confirmed): WiFi sync retrying every 2 minutes for hours while Bluetooth stayed on
+
+User reported WiFi trying to sync "a lot more frequently than expected"
+-- a power-saving concern, not a correctness bug. Root cause in
+`TimeSync.cpp`: `kSkippedRetryDelayMs` (2 minutes) was designed, early
+in this project, for a one-off TRANSIENT skip right at boot (low
+internal heap immediately after the library scan) -- back before real,
+long-duration Bluetooth usage was common. `RadioLock.h`'s design means
+EVERY `TimeSync::tryOnce()` attempt gets skipped for as long as
+Bluetooth is connected (the radio lock isn't available), and a real BT
+listening session can run for hours -- meaning this fast-retry path was
+firing a real WiFi scan attempt every 2 minutes, continuously, for the
+entire time Bluetooth happened to be on, which is now the common case,
+not a rare transient one.
+
+**Fixed**: `kSkippedRetryDelayMs` raised from 2 minutes to 30 minutes --
+still recovers much faster than the full 6h normal resync cycle from a
+genuinely transient low-heap moment at boot, but doesn't hammer a WiFi
+scan every couple of minutes for a multi-hour BT session. The normal
+`kResyncIntervalMs` (6h, for an attempt that actually ran and failed for
+an ordinary reason) is unchanged -- that one was never the issue.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: flash, use Bluetooth for an extended session, and confirm
+WiFi scan attempts in the serial log are now spaced out (roughly every
+30 minutes while BT is on, not every 2).
+
+## Deferred: full headphone remote-control compatibility (transport controls + ULT WEAR-specific features)
+
+User flagged, not yet scoped or started: beyond volume (thirty-third bug
+above), the headphones' own PHYSICAL controls should ideally also
+reach play/pause and skip-forward/skip-back, and separately asked
+whether device-specific features (the ULT WEAR's bass-boost EQ, ANC,
+and transparency/ambient mode) can be made to work from this firmware,
+or whether those are inherently headphone-side-only regardless of what
+the source device does.
+
+**Not investigated yet** -- noting what's known/suspected without
+having verified any of it against real library source yet (unlike the
+volume work above, which WAS verified before being called fixed):
+
+- **Transport controls (play/pause/skip) are the standard AVRCP
+  "passthrough" command set** -- this is the same protocol family the
+  volume sync work above already confirmed this library implements
+  (`BluetoothA2DPSource`'s AVRC Controller role). Headphones sending
+  play/pause/next/previous button presses to a SOURCE device over AVRCP
+  passthrough is extremely standard, common behavior (this is exactly
+  how a phone receives headphone button presses) -- plausible this
+  library already receives these events the same unconditional way it
+  already handles `ESP_AVRC_RN_VOLUME_CHANGE`, just not yet traced into
+  the source to confirm the exact event/callback names, or wired up to
+  call `MenuEngine`'s existing play/pause/skip actions
+  (`AudioBridge::pauseResume()`, `MenuEngine::playNextInQueue()`,
+  `MenuEngine::skipPrevious()` already exist and do the right thing --
+  this would likely be "receive the AVRCP event, call the function
+  that already exists," not new playback logic).
+- **EQ/bass-boost, ANC, transparency mode are almost certainly
+  headphone-side-only, NOT controllable from a generic A2DP source** --
+  this is a strong prior, not yet confirmed by reading source: standard
+  Bluetooth A2DP/AVRCP profiles have no concept of "enable ANC" or "set
+  bass boost" -- those are real-time DSP decisions the HEADPHONES make
+  on their own hardware, usually from their own physical buttons or a
+  companion phone app talking to the headphones over a proprietary
+  vendor protocol (Sony's own app protocol for the ULT WEAR, in this
+  case) that has nothing to do with A2DP/AVRCP and nothing this
+  ESP32-A2DP-based firmware could plausibly speak without reverse-
+  engineering Sony's own proprietary control channel -- a very large,
+  separate undertaking, likely not practical. **Not confirmed/ruled
+  out with actual research yet** -- flagged as a strong suspicion to
+  verify (or disprove) before concluding it's impossible, not stated as
+  fact.
+
+**Next real step when this gets picked up**: trace the real
+`ESP32-A2DP` source for AVRCP passthrough command handling (the same
+kind of investigation the volume-sync and discovery work above already
+did successfully) to confirm exactly what's receivable and wire
+transport controls to the existing playback functions first (the likely
+quick, real win) -- then separately research whether ANY standard
+Bluetooth mechanism exists for ANC/transparency/EQ control from a
+source device, treating that as a probably-separate, probably-much-
+harder problem rather than assuming it rides along with transport
+controls for free.
 
 ## Next session plan (as of 2026-10-01, agreed in a planning-only conversation, nothing below built yet)
 

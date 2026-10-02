@@ -289,6 +289,13 @@ void BluetoothSource::end() {
     Serial.println(F("[bt] A2DP source stopped"));
 }
 
+void BluetoothSource::setVolume(uint8_t volume0to127) {
+    if (!running) return;
+    a2dpSource.set_volume(volume0to127);
+}
+
+uint8_t BluetoothSource::getVolume() { return (uint8_t)a2dpSource.get_volume(); }
+
 bool BluetoothSource::isConnected() { return running && a2dpSource.is_connected(); }
 bool BluetoothSource::isRunning() { return running; }
 const char *BluetoothSource::currentTargetName() { return currentTarget.c_str(); }

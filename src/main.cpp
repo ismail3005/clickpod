@@ -321,6 +321,38 @@ static void syncBluetoothToUi() {
     bool running = BluetoothSource::isRunning();
     bool connected = running && BluetoothSource::isConnected();
     String connectedTo = connected ? String(BluetoothSource::currentTargetName()) : String("");
+    // Was only comparing against state.btConnectedTo before -- `connected`
+    // itself (not just the name) needs tracking too, so the moment-of-
+    // transition volume-regime switch below fires exactly once per real
+    // connect/disconnect, not on every tick while connected.
+    static bool wasConnected = false;
+    if (connected != wasConnected) {
+        wasConnected = connected;
+        // Re-apply the current on-screen volume through AudioBridge::
+        // setVolumePercent() -- it already branches on BluetoothSource::
+        // isConnected() internally (see its own big comment), so calling
+        // it again here just switches which attenuation stage is live:
+        // pins wired to max and engages the real AVRCP-synced BT volume
+        // on a fresh connect, or restores normal wired attenuation the
+        // moment BT drops. Without this, the stage active before the
+        // transition would just keep attenuating (or not) regardless of
+        // whether that's still the right one for the new output path.
+        AudioBridge::setVolumePercent(state.volume);
+    }
+    // Mirrors a volume change initiated FROM the connected device's own
+    // controls (e.g. headphone volume buttons) back into the on-screen
+    // slider -- the library applies the remote's reported volume to its
+    // own real attenuation automatically and unconditionally (see
+    // BluetoothSource.h's comment), it just never told our UI about it
+    // before this, which was the other half of "two volume controls
+    // that don't agree."
+    if (connected) {
+        int btPct = map(BluetoothSource::getVolume(), 0, 127, 0, 100);
+        if (btPct != state.volume) {
+            state.volume = btPct;
+            state.dirty = true;
+        }
+    }
     if (running != state.btOn || connectedTo != state.btConnectedTo) {
         state.btOn = running;
         state.btConnectedTo = connectedTo;

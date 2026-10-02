@@ -114,4 +114,26 @@ void feedPcm(const uint8_t *data, size_t len);
 // No-op when not running.
 void tick();
 
+// --- AVRCP absolute volume (real sync with the connected device) ---
+//
+// BluetoothA2DPSource::set_volume(0-127) does two real things at once
+// (confirmed from the real library source, BluetoothA2DPCommon.h): it
+// attenuates the audio WE send (via its own internal volume_control(),
+// applied on top of whatever providePcm() returns) AND sends an AVRCP
+// "set absolute volume" command so the connected device's own volume
+// readout/state updates to match. Separately, the library ALREADY
+// handles the other direction automatically and internally: when the
+// connected device reports its OWN volume changed (e.g. its hardware
+// buttons were pressed), BluetoothA2DPSource::bt_av_notify_evt_handler()
+// calls its own set_volume() with the reported value -- nothing we need
+// to wire up for that half, it happens regardless of whether app code
+// ever calls setVolume() itself. What the library does NOT expose is a
+// callback for US to learn that happened -- getVolume() is for polling
+// that (see BluetoothSource::tick()'s call site in main.cpp) so the
+// on-screen UI can mirror a headphone-side volume change instead of
+// silently drifting out of sync with it, which is the exact bug this
+// was built to fix ("two volume controls that don't agree").
+void setVolume(uint8_t volume0to127);
+uint8_t getVolume(); // last known value, ours or the remote's
+
 } // namespace BluetoothSource
