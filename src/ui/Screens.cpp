@@ -520,6 +520,12 @@ void drawLyrics() {
     }
 }
 
+// Renders the COMBINED [history | now playing | upcoming queue] list --
+// previously this only ever showed state.queue (upcoming tracks), the
+// classic "Spotify can't scroll back past where you started" limitation.
+// state.queueSelected is now an index into this same combined space (see
+// MenuEngine.cpp's playFromCombinedIndex()/moveQueueSelection()), not a
+// plain state.queue index.
 void drawQueue() {
     const Palette &p = pal();
     tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
@@ -527,13 +533,19 @@ void drawQueue() {
     tftPtr->setCursor(10, kBodyY + 10);
     tftPtr->print(state.queueGrabbed ? "Queue - UP/DOWN move, RIGHT drop" : "Queue - RIGHT to grab, select to play");
 
-    if (state.queue.empty()) {
+    int histN = (int)state.history.size();
+    int nowSlot = state.now.hasTrack ? 1 : 0;
+    int queueN = (int)state.queue.size();
+    int total = histN + nowSlot + queueN;
+
+    if (total == 0) {
         tftPtr->setTextColor(p.muted, p.bg);
         tftPtr->setCursor(kScreenW / 2 - 40, kBodyY + kBodyH / 2);
         tftPtr->print("Queue is empty");
         return;
     }
-    if (state.queueSelected >= (int)state.queue.size()) state.queueSelected = (int)state.queue.size() - 1;
+    if (state.queueSelected >= total) state.queueSelected = total - 1;
+    if (state.queueSelected < 0) state.queueSelected = 0;
 
     int16_t rowH = 24;
     int16_t y = kBodyY + 26;
@@ -541,10 +553,26 @@ void drawQueue() {
     int16_t startIdx = 0;
     if (state.queueSelected >= maxRows) startIdx = state.queueSelected - maxRows + 1;
 
-    for (int i = startIdx; i < (int)state.queue.size() && (i - startIdx) < maxRows; i++) {
+    for (int i = startIdx; i < total && (i - startIdx) < maxRows; i++) {
         bool sel = i == state.queueSelected;
+        bool isNowRow = (i == histN) && nowSlot;
         bool grabbed = sel && state.queueGrabbed;
         uint16_t rowColor = grabbed ? 0xFD20 /*amber*/ : p.accent;
+
+        const String *title;
+        const String *artist;
+        if (i < histN) {
+            title = &state.history[i].title;
+            artist = &state.history[i].artist;
+        } else if (isNowRow) {
+            title = &state.now.title;
+            artist = &state.now.artist;
+        } else {
+            int qi = i - histN - nowSlot;
+            title = &state.queue[qi].title;
+            artist = &state.queue[qi].artist;
+        }
+
         if (sel) tftPtr->fillRect(0, y, kScreenW, rowH, rowColor);
         if (grabbed) {
             // Three-bar "grip" glyph in place of the index number, and a
@@ -552,17 +580,31 @@ void drawQueue() {
             // differently from a merely-selected one.
             tftPtr->drawRect(0, y, kScreenW, rowH, TFT_WHITE);
             for (int b = 0; b < 3; b++) tftPtr->drawFastHLine(10, y + 8 + b * 4, 6, TFT_WHITE);
+        } else if (isNowRow) {
+            // A small filled "play" triangle instead of an index number --
+            // this row is the anchor the rest of the list scrolls around
+            // (history above, upcoming below), so it needs to read as
+            // structurally different from a plain numbered row, not just
+            // another list entry.
+            uint16_t glyphColor = sel ? TFT_WHITE : p.accent;
+            tftPtr->fillTriangle(12, y + 6, 12, y + 18, 20, y + 12, glyphColor);
         } else {
             tftPtr->setTextColor(sel ? TFT_WHITE : p.muted2, sel ? rowColor : p.bg);
             tftPtr->setCursor(12, y + 6);
-            tftPtr->print(String(i + 1));
+            // Upcoming queue rows count forward from 1 (unchanged from
+            // before); history rows count backward from -1 at the track
+            // just before "now" -- a single index across the whole
+            // combined list (e.g. "7") would have no obvious meaning
+            // relative to what's actually playing.
+            int label = (i < histN) ? (i - histN) : (i - histN - nowSlot + 1);
+            tftPtr->print(String(label));
         }
-        tftPtr->setTextColor(sel ? TFT_WHITE : p.fg, sel ? rowColor : p.bg);
+        tftPtr->setTextColor(sel ? TFT_WHITE : (i < histN ? p.muted : p.fg), sel ? rowColor : p.bg);
         tftPtr->setCursor(34, y + 2);
-        tftPtr->print(state.queue[i].title);
+        tftPtr->print(*title);
         tftPtr->setTextColor(sel ? 0xE73C : p.muted, sel ? rowColor : p.bg);
         tftPtr->setCursor(34, y + 12);
-        tftPtr->print(state.queue[i].artist);
+        tftPtr->print(*artist);
         y += rowH;
     }
 }

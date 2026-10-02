@@ -186,7 +186,12 @@ void handleTap(AnoButton btn) {
         // drag with) -- while grabbed, UP/DOWN move the row itself instead
         // of the cursor, and LEFT/CENTER are ignored so a drag can't be
         // interrupted early.
-        if (btn == AnoButton::RIGHT) { state.queueGrabbed = !state.queueGrabbed; state.dirty = true; }
+        // RIGHT only actually grabs when the cursor is on an upcoming-queue
+        // row -- history/now rows can't be reordered (queueSelectionIsQueueItem()),
+        // so this is a no-op there instead of grabbing something immovable.
+        if (btn == AnoButton::RIGHT) {
+            if (MenuEngine::queueSelectionIsQueueItem()) { state.queueGrabbed = !state.queueGrabbed; state.dirty = true; }
+        }
         else if (state.queueGrabbed) {
             if (btn == AnoButton::UP) MenuEngine::moveGrabbedQueueItem(-1);
             else if (btn == AnoButton::DOWN) MenuEngine::moveGrabbedQueueItem(1);
@@ -194,7 +199,10 @@ void handleTap(AnoButton btn) {
         else if (btn == AnoButton::UP) MenuEngine::moveQueueSelection(-1);
         else if (btn == AnoButton::DOWN) MenuEngine::moveQueueSelection(1);
         else if (btn == AnoButton::LEFT) { state.mode = AppMode::NOW_PLAYING; state.queueGrabbed = false; state.dirty = true; }
-        else if (btn == AnoButton::CENTER) MenuEngine::playFromQueueIndex(state.queueSelected);
+        // CENTER now dispatches across the combined history+now+queue list,
+        // not just state.queue -- this is what lets a row from BEFORE the
+        // currently-playing track be jumped back to directly.
+        else if (btn == AnoButton::CENTER) MenuEngine::playFromCombinedIndex(state.queueSelected);
     }
 }
 
@@ -224,7 +232,17 @@ void handleLongPress(AnoButton btn) {
         }
     } else if (state.mode == AppMode::NOW_PLAYING) {
         if (btn == AnoButton::DOWN) { state.mode = AppMode::LYRICS; state.dirty = true; }
-        else if (btn == AnoButton::UP) { state.mode = AppMode::QUEUE; state.queueSelected = 0; state.queueGrabbed = false; state.dirty = true; }
+        else if (btn == AnoButton::UP) {
+            // Anchor the cursor on the "now playing" row when opening the
+            // Queue screen, not row 0 of the upcoming queue -- the combined
+            // list now has history above it and queue below it, and landing
+            // in the middle is what makes "scroll up for what already
+            // played, down for what's next" read naturally on open.
+            state.mode = AppMode::QUEUE;
+            state.queueSelected = (int)state.history.size();
+            state.queueGrabbed = false;
+            state.dirty = true;
+        }
         else if (btn == AnoButton::LEFT && state.now.hasTrack) {
             Track t{state.now.artist, state.now.album, state.now.title, state.now.durSec, state.now.art, state.now.path};
             MenuEngine::openTrackMenu(t);
@@ -236,8 +254,12 @@ void handleLongPress(AnoButton btn) {
         if (btn == AnoButton::DOWN) { state.mode = AppMode::NOW_PLAYING; state.dirty = true; }
     } else if (state.mode == AppMode::QUEUE) {
         if (btn == AnoButton::UP) { state.mode = AppMode::NOW_PLAYING; state.queueGrabbed = false; state.dirty = true; }
-        else if (btn == AnoButton::LEFT && !state.queue.empty() && !state.queueGrabbed) {
-            MenuEngine::openTrackMenu(state.queue[state.queueSelected]);
+        else if (btn == AnoButton::LEFT && !state.queueGrabbed) {
+            // Works on any row now -- history and the "now playing" row
+            // included, not just the upcoming queue, since all three are
+            // part of the same selectable list.
+            Track t = MenuEngine::trackAtCombinedIndex(state.queueSelected);
+            if (t.title.length()) MenuEngine::openTrackMenu(t);
         }
     }
 }

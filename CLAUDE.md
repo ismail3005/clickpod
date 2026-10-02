@@ -2587,6 +2587,115 @@ resume, not a list of paired devices to choose from (see the spec 8
 amendment on why). If the UI ever supports configuring a different
 target device name, that choice belongs in `Persist` too.
 
+## Twenty-eighth real hardware bug (found, fixed, not yet hardware-confirmed): real root cause of "garbled and noisy" Bluetooth audio -- wrong byte-count math, not a buffering issue
+
+The previous round's Bluetooth-audio fix (bigger ring buffer + blocking
+backpressure in `feedPcm()`, see "Real Bluetooth audio" above) was a real
+improvement but the user still reported it as unusable. Re-read
+`Audio.cpp`'s own `playChunk()` (the real pinned 3.0.12 source, not
+`Audio.h`'s public declaration this project usually checks against) to
+find what else could explain "noisy/garbled" rather than a timing/dropout
+symptom -- and found a genuine, structural bug in `AudioBridge.cpp`'s
+`audio_process_i2s()` hook, present since the feature was first built:
+
+`Audio.h`'s weak-symbol hook signature gives `validSamples` alongside
+`bitsPerSample`/`channels`, but `audio_process_i2s()` discarded the
+latter two with `(void)` casts and computed the byte count fed into
+`BluetoothSource::feedPcm()` as `validSamples * 2` -- an assumption that
+`validSamples` is already a total 16-bit-word count. Checking the real
+i2s write right after this hook fires in `Audio.cpp` proves that's wrong:
+```cpp
+err = i2s_write(..., (int16_t*)m_outBuff + count,
+                 validSamples * (sampleSize * m_channels), &i2s_bytesConsumed, 40);
+```
+`validSamples` is a **frame count** (one unit per interleaved sample
+group across all channels), not a word count -- the real byte size is
+`validSamples * (bitsPerSample/8) * channels`. For the normal 16-bit
+stereo case that's `validSamples * 4`, not `validSamples * 2` -- the old
+code was feeding BluetoothSource exactly HALF of every decoded PCM chunk
+into the ring buffer, with the second half silently left behind (never
+read, overwritten by the next decode pass). That's real, structural data
+corruption -- cutting every chunk in half mid-stream and resuming the next
+chunk from the wrong offset -- not a starvation/timing issue, which is
+why the bigger-buffer-plus-backpressure fix from the previous round
+(itself a real, worthwhile fix, kept as-is) couldn't have addressed it:
+the data handed to the ring buffer was already wrong before it ever got
+there.
+
+**Fixed**: `audio_process_i2s()` now uses the real `bitsPerSample`/
+`channels` parameters instead of discarding them --
+`byteCount = validSamples * (bitsPerSample/8) * channels` -- matching
+the library's own internal formula exactly rather than hardcoding an
+assumption about the buffer's layout.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: flash, connect Bluetooth, play real audio, confirm it's
+actually clean now. If it's still not clean after this, the ring-buffer/
+backpressure design from the previous round is the next thing to
+re-examine (this fix and that one address different failure modes, both
+real, and nothing rules out there being a third).
+
+## Twenty-ninth real hardware bug/decision (found, fixed, not yet hardware-confirmed): Queue screen couldn't scroll back past "now" -- the whole history list existed but was never shown
+
+User asked for free bidirectional navigation through the current
+playlist/queue instead of the classic "Spotify can't scroll back past
+where you started" behavior. Investigated `state.history` (tracked since
+early in this project, used only by `skipPrevious()`'s one-step-back
+case) and `Screens.cpp`'s `drawQueue()` (only ever rendered
+`state.queue`, the upcoming-tracks list) -- confirmed the data needed for
+free navigation already existed, it just was never surfaced: history was
+tracked and kept correct the whole time, nothing ever showed it or let
+you jump into it beyond one step.
+
+**Fixed by combining history + the currently-playing track + the
+upcoming queue into one continuous, freely-scrollable list** on the
+Queue screen, instead of adding a separate screen or mode:
+
+- `MenuEngine.cpp` gained `playFromHistoryIndex()` (generalizes
+  `skipPrevious()`'s one-step logic to jump back arbitrarily far --
+  everything between the picked history item and "now" moves onto the
+  front of the queue, in order, so playing forward from there revisits
+  exactly what got skipped over) and `playFromCombinedIndex()` (dispatches
+  a combined-list index to history/now/queue). `trackAtCombinedIndex()`
+  lets the "..." track menu (Play Next / Add to Queue / Add to Playlist)
+  open from ANY row now, not just an upcoming-queue one.
+  `queueSelectionIsQueueItem()` gates the RIGHT-tap grab/reorder gesture
+  to upcoming-queue rows only -- dragging an already-played history row
+  or the currently-playing track around has no meaning, so that gesture
+  is a no-op there instead of attempting something nonsensical.
+- `state.queueSelected` changed meaning: it now indexes the COMBINED
+  `[history | now | queue]` space, not `state.queue` alone.
+  `moveQueueSelection()`/`moveGrabbedQueueItem()` (the latter still
+  confined to the queue segment, translating to/from a local
+  `state.queue` index internally) were updated accordingly.
+  `InputRouter.cpp`'s entry point (long-press UP from Now Playing) now
+  anchors the cursor on the "now playing" row (`state.history.size()`)
+  instead of row 0 of the upcoming queue, so opening the screen reads as
+  "history above, queue below" rather than starting mid-list.
+- `Screens.cpp`'s `drawQueue()` renders all three segments in one
+  scrollable viewport: history rows (muted text, counting backward from
+  -1 at the track just before now), a "now playing" row (a small filled
+  triangle glyph instead of an index number -- the anchor the rest of the
+  list scrolls around, needs to read as structurally different from a
+  plain numbered row), then upcoming-queue rows (unchanged from before,
+  counting forward from 1).
+
+**Not simulator-ported, not spec-amended this round** -- same honest
+gap this file already flags for several other recent real-hardware fixes
+(row icons, the various BT/heap rounds): this was real behavior-changing
+UX, which CLAUDE.md's usual discipline says should go through the
+simulator first, but the user asked to move fast on a live bug/feature
+request rather than a UX-iteration round. Worth a follow-up simulator
+port + `docs/SPEC.md` amendment if this flow needs further iteration --
+flagged, not silently skipped.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: flash, play a few tracks so history accumulates, open the
+Queue screen and confirm it shows past tracks above "now" and upcoming
+ones below, scroll up and CENTER on a past track to confirm it actually
+jumps back and requeues what was skipped, and confirm grab/reorder still
+works for upcoming-queue rows but is a no-op on a history/now row.
+
 ## Next session plan (as of 2026-10-01, agreed in a planning-only conversation, nothing below built yet)
 
 A lot got discussed/decided in conversation without any code written this

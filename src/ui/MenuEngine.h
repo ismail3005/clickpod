@@ -29,6 +29,20 @@ void playNextInQueue();
 void skipPrevious();
 void playFromQueueIndex(int idx);
 
+// The Queue screen used to only ever show state.queue (upcoming tracks) --
+// classic "Spotify can't scroll back past where you started" behavior,
+// since state.history (already-played tracks) was tracked but never
+// surfaced anywhere except the one-step skipPrevious(). It now renders
+// history + the current track + the upcoming queue as one continuous,
+// freely-scrollable list (see Screens.cpp's drawQueue()), and
+// state.queueSelected indexes into that COMBINED list, not state.queue
+// alone. These three functions are what make picking any row in that
+// combined list actually work:
+void playFromHistoryIndex(int idx);  // jump back to something already played
+void playFromCombinedIndex(int idx); // dispatches to history/now/queue based on idx
+Track trackAtCombinedIndex(int idx); // for opening "..." track menu on any row
+bool queueSelectionIsQueueItem();    // only upcoming-queue rows can be grabbed/reordered
+
 String btStatusLabel();
 void enterBluetooth();
 // Real device-picker screen -- ESP32-A2DP's source mode genuinely

@@ -69,7 +69,12 @@ struct AppState {
     std::vector<Track> queue;
     int queueSelected = 0;
     bool queueGrabbed = false; // true while the selected queue row is picked up for reordering
-    std::vector<Track> history; // previously played tracks this session, for "skip previous"
+    // Previously played tracks this session -- was only ever used by
+    // skipPrevious()'s one-step-back case; the Queue screen now also
+    // renders this (alongside `now` and `queue`) as part of one combined,
+    // freely-scrollable list, and queueSelected indexes into that combined
+    // space (see MenuEngine.cpp's playFromCombinedIndex()/moveQueueSelection()).
+    std::vector<Track> history;
 
     int volume = 62; // 0-100 UI scale; mapped to the DAC's 0-21 range in AudioBridge
     // Synced from the real MAX17048 reading each loop() iteration (see

@@ -152,10 +152,27 @@ bool isRunning() {
 // matches this project's "wired and BT are mutually exclusive output
 // paths" design (docs/SPEC.md section 7). When BT isn't connected,
 // behavior is unchanged: normal wired I2S output.
-void audio_process_i2s(int16_t *outBuff, uint16_t validSamples, uint8_t /*bitsPerSample*/,
-                        uint8_t /*channels*/, bool *continueI2S) {
+void audio_process_i2s(int16_t *outBuff, uint16_t validSamples, uint8_t bitsPerSample, uint8_t channels,
+                        bool *continueI2S) {
     if (BluetoothSource::isConnected()) {
-        BluetoothSource::feedPcm(reinterpret_cast<const uint8_t *>(outBuff), (size_t)validSamples * 2);
+        // validSamples is a FRAME count (one unit per channel-interleaved
+        // sample group), not a total int16-word count -- confirmed by
+        // reading Audio.cpp's own i2s_write() call right after this hook
+        // fires: it sizes the write as
+        // `validSamples * (bitsPerSample/8) * channels` bytes. This code
+        // previously assumed validSamples was already a total 16-bit-word
+        // count and used `validSamples * 2`, which for the normal 16-bit
+        // stereo case is exactly HALF the real buffer -- silently feeding
+        // only the first half of every decoded chunk into the BT ring
+        // buffer while the second half got discarded/overwritten by the
+        // next decode pass. That's a real, structural data-corruption bug,
+        // not a buffering/timing issue -- it's the actual root cause of
+        // "garbled and noisy" BT audio (the bigger ring buffer + backpressure
+        // fix from the previous round was a correct improvement on its own
+        // but couldn't have fixed this, since the data fed in was already
+        // wrong before it ever reached the ring buffer).
+        size_t byteCount = (size_t)validSamples * (bitsPerSample / 8) * channels;
+        BluetoothSource::feedPcm(reinterpret_cast<const uint8_t *>(outBuff), byteCount);
         *continueI2S = false;
     } else {
         *continueI2S = true;

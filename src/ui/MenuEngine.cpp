@@ -619,6 +619,69 @@ void playFromQueueIndex(int idx) {
     state.dirty = true;
 }
 
+// Jumps playback BACK to something already played (state.history[idx]) --
+// the whole point of the Queue screen no longer stopping at "now" the way
+// Spotify's does. Generalizes skipPrevious()'s one-step-back logic to an
+// arbitrary depth: everything between idx and the currently-playing track
+// (exclusive of idx, inclusive of "now") moves back onto the front of the
+// queue, in its original order, so playing forward from here revisits
+// exactly what got skipped over -- nothing is lost, just reordered.
+void playFromHistoryIndex(int idx) {
+    if (idx < 0 || idx >= (int)state.history.size()) return;
+    std::vector<Track> requeued(state.history.begin() + idx + 1, state.history.end());
+    if (state.now.hasTrack) requeued.push_back(trackObj(state.now));
+    state.queue.insert(state.queue.begin(), requeued.begin(), requeued.end());
+    Track t = state.history[idx];
+    state.history.resize(idx);
+    setNowPlaying(t);
+    state.mode = AppMode::NOW_PLAYING;
+    Serial.printf("[ui] play from history: \"%s\"\n", t.title.c_str());
+    state.dirty = true;
+}
+
+// state.queueSelected indexes into the combined [history | now | queue]
+// list the Queue screen renders (see drawQueue()) -- this dispatches a
+// CENTER-press on any row of that list to the right place. Selecting the
+// "now" row itself is a no-op (already playing); nothing to jump to.
+void playFromCombinedIndex(int idx) {
+    int histN = (int)state.history.size();
+    if (idx < histN) {
+        playFromHistoryIndex(idx);
+        return;
+    }
+    if (idx == histN && state.now.hasTrack) {
+        state.mode = AppMode::NOW_PLAYING;
+        state.dirty = true;
+        return;
+    }
+    playFromQueueIndex(idx - histN - (state.now.hasTrack ? 1 : 0));
+}
+
+// For opening the "..." track menu (Play Next / Add to Queue / Add to
+// Playlist) on whichever row of the combined list is currently selected --
+// previously only reachable for upcoming-queue rows, since history/now
+// weren't part of the selectable list at all.
+Track trackAtCombinedIndex(int idx) {
+    int histN = (int)state.history.size();
+    int nowSlot = state.now.hasTrack ? 1 : 0;
+    if (idx < 0) return Track{};
+    if (idx < histN) return state.history[idx];
+    if (idx == histN && nowSlot) return trackObj(state.now);
+    int qi = idx - histN - nowSlot;
+    if (qi >= 0 && qi < (int)state.queue.size()) return state.queue[qi];
+    return Track{};
+}
+
+// Reordering (grab + UP/DOWN) only makes sense for the upcoming queue --
+// dragging an already-played history row or the currently-playing track
+// around has no meaning. Used to gate the RIGHT-tap grab toggle in
+// InputRouter so it's a no-op on a history/now row instead of grabbing
+// something that can't actually be moved.
+bool queueSelectionIsQueueItem() {
+    int queueStart = (int)state.history.size() + (state.now.hasTrack ? 1 : 0);
+    return state.queueSelected >= queueStart && state.queueSelected < queueStart + (int)state.queue.size();
+}
+
 // Called at render time, not baked into a menu item once -- a plain string
 // sub-label would go stale the moment BT state changes on a different
 // screen, which is exactly the bug the simulator hit first. state.btOn/
@@ -848,24 +911,37 @@ void moveSelection(int delta) {
     else state.selectionDirty = true;
 }
 
+// Moves the cursor across the COMBINED [history | now | queue] list (see
+// the big comment on playFromCombinedIndex above) -- wraps around the
+// whole list, same style every other menu's moveSelection() already
+// wraps with, so scrolling past the oldest history item lands on the
+// newest queue item and vice versa rather than stopping dead at either
+// end.
 void moveQueueSelection(int delta) {
-    if (state.queue.empty()) return;
-    int n = (int)state.queue.size();
+    int n = (int)state.history.size() + (state.now.hasTrack ? 1 : 0) + (int)state.queue.size();
+    if (n <= 0) return;
     state.queueSelected = ((state.queueSelected + delta) % n + n) % n;
     state.dirty = true;
 }
 
 // While a queue row is "grabbed" (see the RIGHT-tap toggle in
-// InputRouter), UP/DOWN swap it with its neighbor and move the cursor
-// along with it, instead of just moving the cursor -- the drag-and-drop
-// equivalent for a device with no touchscreen.
+// InputRouter, gated by queueSelectionIsQueueItem() so this can only ever
+// be called with the cursor already inside the queue segment), UP/DOWN
+// swap it with its neighbor and move the cursor along with it, instead of
+// just moving the cursor -- the drag-and-drop equivalent for a device
+// with no touchscreen. state.queueSelected is a combined-list index now,
+// so it has to be translated to/from a plain state.queue index here --
+// dragging stays confined to the queue segment itself (can't drag a row
+// back into history or past "now", which wouldn't mean anything).
 void moveGrabbedQueueItem(int delta) {
+    int queueStart = (int)state.history.size() + (state.now.hasTrack ? 1 : 0);
     int n = (int)state.queue.size();
     if (n < 2) return;
-    int from = state.queueSelected;
+    int from = state.queueSelected - queueStart;
+    if (from < 0 || from >= n) return;
     int to = ((from + delta) % n + n) % n;
     std::swap(state.queue[from], state.queue[to]);
-    state.queueSelected = to;
+    state.queueSelected = queueStart + to;
     state.dirty = true;
 }
 
