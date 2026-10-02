@@ -1755,6 +1755,14 @@ on this SD card if many false-adjacent candidates get scanned before a
 CRC-8 match lands -- not confirmed, just the obvious next place to look)
 rather than guessing at another decoder correctness bug.
 
+**UPDATE, confirmed resolved**: user confirms scrubbing is now perfect on
+the latest flash (the twenty-fifth bug's rubberbanding fix, above --
+`state.scrubPending` suppressing the real-position sync fight during an
+active scrub -- was the fix that actually closed this out; the "laggy"
+complaint here was most likely the same rubberbanding fight read as
+sluggishness, not a separate unaddressed seek-performance issue after
+all). No further action needed on scrubbing.
+
 ## Bluetooth device picker + last-device auto-reconnect (built, not yet hardware-confirmed)
 
 Plan item 4 from the "Next session plan" above -- the Bluetooth screen's
@@ -2695,6 +2703,103 @@ Queue screen and confirm it shows past tracks above "now" and upcoming
 ones below, scroll up and CENTER on a past track to confirm it actually
 jumps back and requeues what was skipped, and confirm grab/reorder still
 works for upcoming-queue rows but is a no-op on a history/now row.
+
+## How wired vs. Bluetooth output switching actually works (traced from code, not yet real-hardware-tested for this specific scenario)
+
+User asked, not yet having tested it: what happens if BT connects mid-
+playback, or connects while wired is already "active," or the reverse.
+Worth writing down precisely since the answer turned out to be simpler
+than the question implies, once traced through the real code path.
+
+**There is no "wired device" that connects/disconnects at all.** The
+PCM5102A DAC is permanently wired to the I2S bus (`AudioBridge::begin()`
+calls `audioPtr->setPinout(...)` once, at boot) -- there's no headphone-
+jack-detect circuit anywhere in the BOM/`Pins.h`, so there's no runtime
+"wired connected" event for firmware to react to in the first place.
+Wired output is just always physically live, continuously fed whatever
+`Audio::playChunk()` writes to it (or doesn't).
+
+**Routing is decided fresh on EVERY decoded PCM chunk, not once per
+track or once per connection event.** `AudioBridge.cpp`'s
+`audio_process_i2s()` -- called by the library for every chunk right
+before it would go to I2S -- checks `BluetoothSource::isConnected()`
+live, every single call:
+- `isConnected()` true -> chunk goes into `BluetoothSource::feedPcm()`'s
+  ring buffer, `*continueI2S = false` (the wired I2S write for that
+  chunk is skipped).
+- `isConnected()` false -> `*continueI2S = true`, normal wired I2S write,
+  completely unchanged from how it's always worked.
+
+This means every scenario asked about resolves the same way, automatically,
+with no special-cased "device connected" handling needed anywhere:
+- **BT connects mid-playback** (user turns BT on while a track is already
+  playing over wired): during the A2DP connection handshake,
+  `isConnected()` is still false, so wired keeps playing uninterrupted --
+  no gap waiting for BT to pair. The instant `isConnected()` flips true,
+  the very next decoded chunk routes to BT instead and wired stops
+  getting fresh data. This is a hard cut on a chunk boundary, not a
+  crossfade -- see the open question below.
+- **BT is already connected and wired "connects"**: doesn't apply, per
+  above -- wired has no connect event, it's just a question of whether
+  `isConnected()` is true or false at any given moment.
+- **BT disconnects mid-playback** (headphones walk out of range/power
+  off): the next chunk's `isConnected()` check goes false immediately,
+  so routing falls back to wired on literally the next decoded chunk --
+  independent of `BluetoothSource::tick()`'s own `end()` cleanup call
+  (twenty-seventh bug/BT redesign section above), which only runs once
+  per `loop()` iteration and exists to stop the library from trying to
+  reconnect, not to restore audio output (that already happened by the
+  time `tick()` gets to it).
+- **Never double-outputs or drops both**: it's a strict either/or per
+  chunk based on one live boolean check, so there's no window where both
+  outputs are silent or both are live at once.
+
+**What's NOT verified, and worth listening for specifically on the next
+real test**: whether the hard cut at the exact moment of a BT connect/
+disconnect produces an audible click/pop/glitch -- there's no fade or
+synchronization around the switch, just `continueI2S` flipping between
+one chunk and the next. Also not independently confirmed: what the I2S
+peripheral itself does with a skipped write (whether the DMA buffer
+just holds/repeats its last contents for that one cycle, which would be
+inaudible at a single-chunk timescale, or something else) -- reasoned
+from how `continueI2S` is used, not traced into the IDF I2S driver
+itself. If a real test reveals an audible artifact at the switch point,
+this is the first place to look, not a sign the routing logic itself is
+wrong.
+
+## Album art is routinely cropped awkwardly -- deferred, not fixed yet
+
+User flagged: embedded cover art on the Now Playing screen is "slightly
+too big for the display area... awkwardly cropped all the time (sometimes
+it works out fine but rarely)". Traced the real cause in `AlbumArt.cpp`:
+the fixed `kSize = 92` buffer (matching Screens.cpp's Now Playing art
+box) is filled by picking the FINEST power-of-2 JPEG decode-time scale
+(`TJpg_Decoder` only supports 1/2/4/8x, no arbitrary resize) that still
+leaves the decoded image >= `kSize` on both axes, then center-CROPPING
+that decoded image down to exactly 92x92 -- there's no "fit/contain"
+path, only "decode to the smallest available size that's still big
+enough, then crop off whatever doesn't fit." Since real embedded art is
+almost never a clean multiple of 92 at one of the 4 available scale
+factors, the decoded-but-pre-crop image is often meaningfully larger
+than 92x92 (e.g. a 300x300 source decodes at scale=2 to 150x150, then
+gets cropped by ~29px off every edge -- repeat this chunk size per file,
+it extends/varies with the title's actual resolution), which matches
+"rarely works out fine" -- it only looks right when a particular file's
+resolution happens to downscale to something close to 92 already.
+
+**Not fixed this round** -- user asked for it to go on the deferred
+list, not to be fixed now. Two real options, not mutually exclusive
+(user's own suggestion, matches the actual cause): (1) add a real
+post-decode resize step -- decode at the current finest-available scale
+as now, then software-downsample (nearest-neighbor is cheap; a real
+box/bilinear filter would look better but costs more CPU) from whatever
+size that lands on down to exactly `kSize`, instead of center-cropping;
+(2) grow `kSize`/the Now Playing art box itself so less of the decoded
+image needs to be cropped off relative to typical embedded-art
+resolutions -- doesn't fix the aspect-ratio-crop root cause by itself,
+but reduces how much is lost. Likely worth doing both: resize properly
+AND give art a bit more screen space. Not scoped/attempted further this
+round.
 
 ## Next session plan (as of 2026-10-01, agreed in a planning-only conversation, nothing below built yet)
 
