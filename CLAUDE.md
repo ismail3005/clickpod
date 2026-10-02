@@ -2881,6 +2881,125 @@ allocation per vector, separate from each String's own buffer) rather
 than the String buffers this fix targets, which would need its own,
 separate PSRAM-allocator treatment.
 
+## Thirty-first real hardware bug (found, fixed): queue "free navigation" only reached session-played history, not the rest of the source list you started in the middle of
+
+User confirmed the twenty-ninth bug's combined Queue screen DOES work for
+what it was built for -- scrolling back reaches the first track you
+picked and everything played forward from it since. But picking track 5
+of a 12-track album left tracks 1-4 completely unreachable: "still can't
+go back a song after picking one in the middle... only forwards." Root
+cause in `MenuEngine.cpp`'s `playQueueFrom()`: it only ever populated
+`state.queue` with what comes AFTER the picked index
+(`list.assign(list.begin()+index+1, list.end())`) and unconditionally
+cleared `state.history` to empty -- everything before the picked index
+in the source list was simply discarded at the moment playback started,
+never tracked anywhere. The combined-list Queue screen (twenty-ninth
+bug) was only ever showing ACTUAL session playback history, not "the
+rest of the list you started from," which is what "free roam the
+queue/playlist" actually means.
+
+**Fixed**: `playQueueFrom()` now does
+`state.history.assign(list.begin(), list.begin() + index)` instead of
+clearing history -- the queue/history split now treats the whole source
+list (whatever album/playlist/queue-row you picked from) as the
+navigable context from the start: everything before the picked track
+goes into history (in original order), everything after goes into the
+queue, exactly symmetric. Starting playback from a specific track now
+means "I'm positioned in the middle of this list," not "history begins
+empty from here" -- scrolling up in the combined Queue screen reaches
+the untouched earlier tracks immediately, no need to have ever played
+them first. Picking a different list to play from (a different
+album/playlist/queue-row) still replaces the whole context, same as
+before -- each `playQueueFrom()` call establishes a fresh "list you're
+positioned inside," discarding whatever context was active before it.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: flash, pick a track from the middle of an album, open the
+Queue screen, and confirm scrolling up shows the earlier untouched
+tracks (not just empty/nothing above "now" until you've actually played
+back to that point).
+
+## Thirty-second real hardware bug (reasoned hypothesis, not confirmed root cause): new `spinlock_acquire` crash after scrubbing while Bluetooth streams real audio
+
+User reported scrubbing through a track while connected over Bluetooth
+worked for listening to different parts, but scrubbing BACK afterward
+"lagged and crashed" -- `assert failed: spinlock_acquire spinlock.h:122`,
+a multi-core heap-lock assert, immediately following a FLAC decode error
+(`RESERVED CHANNEL ASSIGNMENT`) and a second resync (`stream ready`
+twice in the log) right around the time of the scrub-back action.
+
+**Not a confirmed root cause** -- this sandbox has no PlatformIO to
+build against and no ELF to resolve the crash's raw backtrace addresses
+into function names, so this is a reasoned hypothesis from the failure
+signature and timing, not something traced to an exact line the way
+most of this file's other fixes are. Flagging the distinction honestly
+rather than presenting a guess as confirmed.
+
+**The reasoning**: a `spinlock_acquire` assert is the classic signature
+of memory corruption near a task's stack (ESP-IDF's heap allocator uses
+a spinlock for cross-core safety; corrupted/overrun stack memory
+adjacent to heap structures is a well-known way to trip this assert in
+code that itself did nothing wrong). The crash followed a call-depth
+combination that has never actually been exercised together before on
+real hardware: a real seek (scrubbing back) triggers
+`FLACDecoderReset()` and a resync, which happens deep inside the SAME
+`loop()`-task call chain that also runs `Audio::playChunk()` ->
+`audio_process_i2s()` -> `BluetoothSource::feedPcm()`'s bounded blocking
+retry loop (new this session, the twenty-eighth bug's BT-audio fix) --
+all of this nested inside whatever else `loop()` is doing (menu
+rendering, SD/FlacMeta reads, Library lookups). Every previous seek/
+resync crash (fourteenth/sixteenth/nineteenth bugs) was tested and fixed
+against WIRED-only output, a simple synchronous I2S write -- this is
+the first time a real seek has been exercised together with the BT
+ring-buffer feed path's added call depth. The Arduino-ESP32 core's
+default `loop()` task stack is a plain 8192 bytes (confirmed by reading
+the real core source, `cores/esp32/main.cpp`) -- never sized against
+this specific worst-case depth.
+
+**Fixed (as a reasoned mitigation, not a proven fix)**: `main.cpp`
+gained `getArduinoLoopTaskStackSize()` returning 16384 instead of the
+default 8192 -- a real, documented override point (declared
+`__attribute__((weak))` in the core specifically so a sketch can resize
+it), confirmed from source, not guessed. Deliberately a moderate +8KB,
+not a large jump -- mindful of this project's hard-won internal-heap
+headroom (the thirtieth hardware bug's PSRAM-threshold work); stack is
+a one-time static allocation at boot, not an ongoing cost the way BT/
+WiFi's dynamic heap pressure is, so this is a bounded, known tradeoff.
+
+**If this doesn't fix it**: the next real step is getting a SYMBOLIZED
+backtrace (needs the actual built `.pio/build/esp32wrover/firmware.elf`
+and `xtensa-esp32-elf-addr2line`, or `pio run -t ... | ... monitor`'s
+own symbolication if the platform IDE does it automatically) rather than
+guessing at a second hypothesis blind -- the raw hex backtrace in the
+report isn't resolvable without the actual binary, which doesn't exist
+in this sandbox. Worth also trying to reproduce on a file that does NOT
+trigger a mid-playback decode error, to see whether the decode-error/
+resync is actually necessary to trigger this or just coincidental timing.
+
+**Follow-up investigation, strengthening confidence this is the right
+side to fix**: cloned the real ESP-IDF Bluedroid source
+(`components/bt/host/bluedroid/btc/profile/std/a2dp/btc_a2dp_source.c`)
+to trace exactly what task calls our `providePcm()` data callback, to
+rule in/out the CONSUMER side (the BT stack's own task, not ours to
+resize via `getArduinoLoopTaskStackSize()`) as the real culprit instead
+of the producer side. Confirmed: a periodic `osi_alarm` fires every
+`BTC_MEDIA_TIME_TICK_MS`, which posts an event to a dedicated OSI thread
+(`btc_aa_src_task_hdl`) rather than running inline in the timer/alarm's
+own context -- so our callback runs on a real, ordinary FreeRTOS task,
+not an ISR or timer-callback context where blocking would be outright
+illegal. More importantly: `providePcm()` itself is lightweight on that
+task's stack -- one bounded mutex take, a tight byte-copy loop, one
+give, no recursion, no large local buffers -- so it's an unlikely
+candidate for overflowing ITS task's own (separately-sized, IDF-
+controlled, not ours to resize from the sketch) stack. The actual
+complex, deep, genuinely-blocking work (FLAC resync/CRC-8 verification,
+SD reads, `feedPcm()`'s up-to-250ms retry loop) all happens on the
+PRODUCER side -- the main `loop()` task, which `getArduinoLoopTaskStackSize()`
+DOES control. This doesn't prove the stack-size fix is correct, but it
+does rule out the one alternative (consumer-task stack) that would have
+made the fix target the wrong side entirely, so it's the right first
+thing to try.
+
 ## Next session plan (as of 2026-10-01, agreed in a planning-only conversation, nothing below built yet)
 
 A lot got discussed/decided in conversation without any code written this

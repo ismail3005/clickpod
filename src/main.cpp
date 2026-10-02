@@ -19,6 +19,32 @@
 #include "ui/Screens.h"
 #include "ui/UI.h"
 
+// Real, verified Arduino-ESP32 core mechanism (confirmed by reading the
+// actual core/esp32/main.cpp source, not guessed): getArduinoLoopTaskStackSize()
+// is declared __attribute__((weak)) there specifically so a sketch can
+// override it to resize the loop() task's stack -- the default is a plain
+// 8192 bytes (ARDUINO_LOOP_STACK_SIZE). Added in response to a real crash:
+// `assert failed: spinlock_acquire spinlock.h:122` -- a multi-core heap-
+// lock assert, the classic signature of memory corruption near a task's
+// stack (NOT a heap-size failure the radioHeapOk() guards already cover;
+// this is a different failure class). It hit immediately after scrubbing
+// (a real seek, triggering FLACDecoderReset()) while Bluetooth was
+// actively streaming real audio -- a call-depth combination that didn't
+// exist in any earlier testing: decode/resync -> Audio::playChunk() ->
+// audio_process_i2s() -> BluetoothSource::feedPcm()'s bounded blocking
+// retry loop, all nested several frames deep inside the SAME loop()-task
+// call chain that also does menu rendering, SD/FlacMeta reads, and
+// Library index lookups elsewhere. 8192 bytes was never tested against
+// that specific worst-case depth. This is a reasoned hypothesis from the
+// failure signature and the fact this is a genuinely new code path, not
+// a confirmed root cause -- flagged honestly in CLAUDE.md. Bumped by 8KB
+// (not further) to stay mindful of this project's hard-won internal-heap
+// headroom (the thirtieth hardware bug's PSRAM-threshold work) -- stack
+// is a one-time static allocation at boot, not a per-operation cost, so
+// 8KB more here is a bounded, known tradeoff, unlike BT/WiFi's dynamic
+// heap pressure.
+size_t getArduinoLoopTaskStackSize(void) { return 16384; }
+
 // Bring-up sequence (docs/SPEC.md section 4):
 //   1. ESP32 + PSRAM verification            [this file]
 //   2. ESP32 + SD card init                  [this file]

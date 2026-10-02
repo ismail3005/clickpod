@@ -571,7 +571,19 @@ void playQueueFrom(std::vector<Track> list, size_t index) {
     const Track &t = list[index];
     setNowPlaying(t);
     state.queue.assign(list.begin() + index + 1, list.end());
-    state.history.clear();
+    // Previously state.history.clear() -- which meant "free navigation"
+    // only ever covered tracks actually PLAYED this session, not the
+    // rest of the list you started in the middle of. Picking track 5 of
+    // a 12-track album left tracks 1-4 completely unreachable (never
+    // played, never queued, just discarded) -- "still can't go back a
+    // song after picking one in the middle" was this: there was nothing
+    // in history to go back TO. The queue IS the context list you picked
+    // from, not a separate thing from it -- everything before the picked
+    // index belongs in history (in original list order) exactly the same
+    // way everything after it belongs in the queue, so scrolling up in
+    // the combined Queue screen reaches the rest of the source list, not
+    // just whatever's been played forward from here.
+    state.history.assign(list.begin(), list.begin() + index);
     state.mode = AppMode::NOW_PLAYING;
     state.lastActiveMode = AppMode::NOW_PLAYING;
     Serial.printf("[ui] play \"%s\"\n", t.title.c_str());
