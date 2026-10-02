@@ -2801,6 +2801,86 @@ but reduces how much is lost. Likely worth doing both: resize properly
 AND give art a bit more screen space. Not scoped/attempted further this
 round.
 
+## Thirtieth real hardware bug (found, fixed, not yet hardware-confirmed): the 128-byte PSRAM threshold wasn't actually catching real Track strings -- BT stalled mid-session, then refused to connect at all after a fresh RST
+
+Testing the twenty-eighth/twenty-ninth bugs' fixes (BT byte-count, queue
+navigation) while playing from the full 425-track "funky times" playlist
+surfaced two connected failures:
+
+1. **Mid-session**: BT audio went sluggish, the ring buffer logged
+   "stayed full too long -- dropping the rest of this chunk" continuously,
+   and no sound came out at all. User noted this happened while a wired
+   jack was also plugged in -- unplugging it did NOT fix it, only a full
+   RST did. The jack correlation is most likely coincidental, not
+   causal: this board has no jack-detect circuit (see the dedicated
+   section above on wired/BT routing -- there's no "plugged in" signal
+   firmware can even see), and "only a fresh boot fixes it" is a much
+   stronger signature of the ring buffer/BT stack getting wedged in a bad
+   state than of anything jack-related.
+2. **After the RST**: Bluetooth refused to connect AT ALL, every attempt
+   immediately logging `radioHeapOk()`'s skip message -- free internal
+   heap stuck around 39.6-39.7KB against the 60KB cold-init floor
+   (`kMinInternalHeapForRadioColdInit`, twentieth bug), with NOTHING
+   about this heap number changing across repeated "Bluetooth on" taps.
+
+**Real root cause, not a new bug -- the eighth hardware bug's prediction
+confirmed with real numbers**: that writeup already flagged `state.queue`
+holding every remaining `Track` (artist/album/title/path `String`s) of
+whatever's actually playing, for the WHOLE playback session, as the
+likely next structural heap problem once scanning itself stopped being
+the bottleneck -- and said the fix, if needed, would be moving that
+String data to PSRAM. The twentieth bug's fix (lowering
+`heap_caps_malloc_extmem_enable()`'s threshold 4096 -> 128) was aimed at
+exactly this, but the real number proves 128 wasn't low enough: a real
+full nested path from this exact test session --
+`/funky times/Dire Straits/Making Movies/Dire Straits - Tunnel of Love
+(Intro The Carousel Waltz).flac` -- is only 102 bytes, UNDER the 128-byte
+floor, so even a long real path (let alone a short artist/album name)
+was still landing in internal RAM, not PSRAM. Playing a 425-track
+playlist keeps roughly that many Track structs (up to 4 strings each)
+resident in `state.queue` continuously -- this is very plausibly tens of
+KB of internal RAM that should have been living in PSRAM the whole time,
+directly explaining both symptoms: heap pressure degrading BT/scheduling
+enough mid-session to starve the data-callback consumer (ring buffer
+fills, "stayed full" spam, no sound), and the same pressure persisting
+across a reboot (the queue is rebuilt fresh each boot from the index,
+same string-heavy shape) to permanently block the cold-init floor.
+
+**Fixed**: `main.cpp`'s `heap_caps_malloc_extmem_enable()` threshold
+lowered again, 128 -> 1 -- essentially any non-empty String allocation
+(Arduino's String has no small-string optimization, confirmed in this
+file's own earlier writeup) now prefers PSRAM, not just the rare large
+one. Same safety argument as both previous lowerings (4096->128,
+128->1): DMA-capable allocations explicitly request
+`MALLOC_CAP_DMA`/`INTERNAL` and bypass this threshold regardless, so
+WiFi/BT/I2S's own buffers are unaffected -- the only real cost is
+PSRAM's marginally slower random access vs. internal RAM, negligible for
+text data that's compared/copied occasionally, not hot-looped.
+
+**Deliberately did NOT touch `kMinInternalHeapForRadioColdInit` (60KB)
+itself** -- lowering the actual safety floor to match a low heap number
+would risk reintroducing the hard-abort crashes that floor exists to
+prevent (seventh/eighth bugs), with no confirmation cold-init is safe
+at ~40KB. The intended fix is raising the real available heap back
+above the existing floor, not lowering the floor to meet a degraded
+heap number.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: flash, load up the full "funky times" playlist again (play
+from it so `state.queue` holds the same several-hundred-Track shape that
+triggered this), and confirm (a) Bluetooth now connects on a fresh RST
+instead of being stuck skipping at ~40KB, and (b) playing real audio
+over BT during that same large-playlist session stays clean instead of
+degrading into the "ring buffer stayed full" stall. If BT still can't
+clear the cold floor after this, the next real step is getting a fresh
+boot log's heap number specifically right before the first BT attempt,
+to see how much (if any) this actually recovered -- if the number is
+still short, the remaining gap is likely the Track VECTOR's own capacity
+overhead (std::vector's heap-allocated backing array itself, one
+allocation per vector, separate from each String's own buffer) rather
+than the String buffers this fix targets, which would need its own,
+separate PSRAM-allocator treatment.
+
 ## Next session plan (as of 2026-10-01, agreed in a planning-only conversation, nothing below built yet)
 
 A lot got discussed/decided in conversation without any code written this

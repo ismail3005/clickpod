@@ -169,28 +169,33 @@ void setup() {
     // the existing heap guards already handle safely), that's the first
     // thing to suspect and this call is the one to revert.
     //
-    // LOWERED from 4096 to 128 -- real logged numbers (CLAUDE.md's "we
-    // have a memory issue" writeup) showed internal heap getting tight
-    // enough that Bluetooth's OWN post-init baseline cost alone was
-    // enough to starve out every later radio operation. 4096 only ever
-    // caught genuinely large allocations (a big opened playlist's track
-    // vector, a lyrics buffer) -- it never touched the much more common
-    // small ones: every individual Track's artist/album/title/path
-    // String, each well under 4KB on its own but numerous (up to
-    // hundreds of small String buffer allocations live at once while a
-    // big playlist/album screen is open, via Library's on-SD index
-    // materializing that one screen's tracks -- see CLAUDE.md's on-SD-
-    // index writeup). Arduino's String class has no small-string
-    // optimization -- any non-empty one allocates its buffer from the
-    // heap immediately, and 128 bytes is low enough that essentially
-    // every real String buffer in this app (not just the rare huge one)
-    // now prefers PSRAM, while leaving truly tiny, latency-sensitive
-    // allocations (a handful of bytes) on internal RAM where fast access
-    // actually matters. Same safety argument as before applies unchanged:
-    // DMA-capable allocations explicitly request MALLOC_CAP_DMA/INTERNAL
-    // and bypass this threshold regardless, so WiFi/BT/I2S's own buffers
-    // are unaffected either way.
-    heap_caps_malloc_extmem_enable(128);
+    // LOWERED again, 128 -> 1 -- real logged numbers from playing a full
+    // 425-track playlist (CLAUDE.md's twenty-ninth-area writeup) showed
+    // Bluetooth refusing to start AT ALL after a fresh RST, free internal
+    // heap stuck around ~40KB against a 60KB cold-init floor, confirming
+    // the 128-byte threshold wasn't actually fixing the thing it was
+    // introduced for. The reason: real Track strings on this card are
+    // mostly SHORTER than 128 bytes (artist/album names, short titles --
+    // even a full nested path like
+    // "/funky times/Dire Straits/Making Movies/Dire Straits - Tunnel of
+    // Love (Intro The Carousel Waltz).flac" is only 102 bytes), so most
+    // of the per-track String allocations this was meant to catch were
+    // STILL landing in internal RAM under the old 128 floor -- this
+    // matters most for `state.queue`, which holds every remaining track
+    // of whatever's actually playing as Track structs for the WHOLE
+    // playback session (not just transiently while a menu screen is
+    // open), so playing a large playlist keeps hundreds of these live in
+    // RAM continuously. Dropping the floor to 1 byte means essentially
+    // any non-empty String (Arduino's String has no small-string
+    // optimization -- any non-empty one allocates immediately) now
+    // prefers PSRAM, not just the rare large one. Same safety argument as
+    // every previous lowering of this threshold: DMA-capable allocations
+    // explicitly request MALLOC_CAP_DMA/INTERNAL and bypass this
+    // threshold regardless, so WiFi/BT/I2S's own buffers are unaffected
+    // either way -- the only real cost is PSRAM's slightly slower random
+    // access vs. internal RAM, negligible for text data that's just being
+    // compared/copied, not hot-looped.
+    heap_caps_malloc_extmem_enable(1);
 
     initDisplay();
     AnoInput::begin();
