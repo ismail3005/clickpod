@@ -3702,6 +3702,123 @@ next to "now" on both sides (last history row, first queue row) and
 confirm pushing it toward "now" just stops it there instead of moving
 it anywhere.
 
+## Forty-sixth real hardware bug (found, real fix shipped as a fork commit, not yet hardware-confirmed): aggressive scrubbing crashed with heap corruption -- a bit-buffer underflow in the FLAC decoder, not a BT bug
+
+User scrubbed very fast/aggressively back and forth over Bluetooth and
+hit a real crash: `Guru Meditation Error: Core 0 panic'ed
+(StoreProhibited)`, backtrace inside `remove_free_block`/`tlsf_malloc`
+-- classic heap-corruption-discovered-by-an-unrelated-allocator
+signature, and the allocator call that actually panicked was
+`btc_media_aa_prep_sbc_2_send()`'s `malloc()`, deep inside the BT
+stack's own SBC-encode timer task -- i.e. the corruption happened
+earlier, somewhere else, and an unrelated Bluetooth allocation was just
+the next victim to walk the now-corrupted free list. Right before it,
+the log showed a NEW error not seen before: `[flac_decoder.cpp:177]
+readUint(): error in bitreader`.
+
+**Traced the real cause by cloning the fork and reading `readUint()`
+directly** (`flac_decoder.cpp`'s bit-reader, the function every FLAC
+header/subframe/residual field gets pulled through) -- two real,
+compounding bugs, both now fixed:
+1. The underflow-detection order was backwards: `*(s_flacInptr +
+   s_rIndex)` was read, then `s_rIndex`/`*bytesLeft` updated, THEN
+   checked for underflow -- meaning every underflow already read one
+   byte past the end of the input buffer before noticing. A real
+   out-of-bounds READ, though on its own likely harmless (reading past
+   a large heap buffer rarely crashes), not the main bug.
+2. **The real one**: even after detecting the underflow and setting
+   `s_f_bitReaderError`, the function fell through to
+   `s_flacBitBufferLen -= nBits` UNCONDITIONALLY -- but the loop broke
+   early having buffered FEWER than `nBits` bits, so this subtraction
+   underflows `s_flacBitBufferLen` (a `uint8_t`). That corrupted value
+   (e.g. wrapping to 249) then persists as GLOBAL decoder state into
+   every subsequent `readUint()` call -- on top of which, shifting the
+   64-bit bit-buffer by a now-garbage length >= 64 is undefined
+   behavior. This garbage propagates into decoded block sizes/sample
+   counts/prediction coefficients -- exactly the class of value that
+   can drive an out-of-bounds WRITE into a PCM sample buffer, which is
+   what actually corrupts the heap; the crash itself just surfaces
+   later, in whatever allocator call happens to walk the corrupted free
+   list next (this time Bluetooth's SBC encoder, coincidentally, not
+   causally -- any other `malloc()`/`free()` soon after could have been
+   the one to panic instead).
+
+**Fixed at the real source** (fork, `clickpod-3.0.12-flac-patch`,
+commit `b33764e`, re-pinned in `platformio.ini`): the bounds check now
+happens BEFORE reading the byte (fixes bug 1), and `readUint()` returns
+immediately on `s_f_bitReaderError` -- before touching
+`s_flacBitBufferLen` at all -- instead of falling through (fixes bug
+2). Every caller already checks `s_f_bitReaderError` right after (see
+`decodeResidual()`'s existing checks) and discards the frame on error,
+so the dummy `0` this now returns on the error path is never actually
+used for real decode output -- this just stops the corrupted global
+state from ever being written in the first place.
+
+Why this surfaced now, specifically while scrubbing hard: a resync
+after a seek can land close enough to the end of the currently-buffered
+input chunk that a legitimately-accepted frame header still runs out
+of bytes partway through its subframe/residual data -- more likely the
+harder/faster you scrub (more resyncs per second, each one a fresh
+chance to land near a buffer edge), not something normal straight-
+through playback exercises much.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: flash, and specifically try to reproduce by scrubbing fast
+and aggressively back and forth the same way that triggered this --
+confirm no crash, and ideally confirm `readUint(): error in bitreader`
+can still appear in the log (that's fine, it's a real, recoverable
+input-exhaustion case) without ever being followed by a heap-corruption
+panic afterward.
+
+## Bluetooth reconnect failing after a crash -- most likely the speaker's own side, not confirmed as a firmware issue
+
+User tried reconnecting to the paired speaker ("Ismail's BOOM 4") right
+after the forty-sixth bug's crash+reboot and got the same failure
+pattern as before re-pairing: a direct reconnect-by-address attempt
+(`"Reconnecting to 88:92:cc:94:a8:ba"` -> `connect_to()` ->
+`esp_a2d_connect()`) sat in `CONNECTING` for ~5s, then
+`ESP_BT_GAP_ACL_CONN_CMPL_STAT_EVT` fired and the state fell back to
+`UNCONNECTED` -- a real ACL-level connection failure, not a timeout our
+code controls. With `max_retries=0` (the twenty-seventh bug's crash
+fix), that immediately falls through to discovery-scan, which then
+repeatedly logged `"Device discovery failed, continue to discover..."`
+for the next ~40+ seconds with no sign of finding the speaker.
+
+**Read the real library source for what "discovery failed" actually
+means** (`BluetoothA2DPSource.cpp`'s `ESP_BT_GAP_DISC_STATE_CHANGED_EVT`
+handler): it just means the ~10-13s inquiry window ended without ever
+seeing the target device name in a scan result -- i.e. this is the
+normal, correct behavior for "the device isn't currently answering
+inquiry scans," not a sign of a bug in the scan logic itself (already
+read and confirmed correct in earlier rounds -- twentieth/twenty-first
+bugs).
+
+**Leading theory, NOT confirmed, and NOT acted on blind**: the crash
+right before this was an ungraceful disconnect -- clickpod rebooted
+without ever sending a clean AVRCP/A2DP disconnect to the speaker. Many
+Bluetooth speakers don't immediately notice their peer vanished; they
+can sit holding a stale "connected" state for anywhere from several
+seconds to roughly a minute (their own supervision-timeout behavior,
+not something this firmware can see or control) before resetting to
+connectable/discoverable again -- and a speaker that still thinks it's
+connected to someone will typically reject or ignore a new connection
+attempt from anyone, including the same device reconnecting. Trying to
+reconnect immediately after the crash, before the speaker's own
+timeout cleared, would look exactly like this log: a failed direct
+connect, then a scan that never finds it because it also isn't
+currently answering inquiries.
+
+**Deliberately not treated as a firmware bug to patch** -- there's no
+code-level mechanism here to fix (this firmware has no way to detect or
+influence the PEER's own stale-connection timeout), and guessing at a
+"fix" with no real target would be exactly the kind of blind patch this
+project avoids. **Next real step**: after any crash/ungraceful
+disconnect specifically, try power-cycling the speaker (or just waiting
+closer to a full minute) before reconnecting, and see if that changes
+the outcome -- if reconnecting still fails the same way well after the
+speaker's had time to notice the stale link and reset, that would be
+real evidence against this theory and worth a fresh look.
+
 ## Deferred: vaguer "menus were a bit confusing" feedback on playlist creation
 
 Flagged without enough specifics to act on yet. The one CONCRETE bug
