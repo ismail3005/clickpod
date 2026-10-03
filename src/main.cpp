@@ -348,7 +348,15 @@ static void syncBluetoothToUi() {
     // before this, which was the other half of "two volume controls
     // that don't agree."
     if (connected) {
-        int btPct = map(BluetoothSource::getVolume(), 0, 127, 0, 100);
+        // ::map(), not map() -- plain map() is ambiguous here between
+        // Arduino's global map() function and std::map the class
+        // template (pulled into scope transitively via Library.h's
+        // <map> include, needed for its playlist overlay). First real
+        // `pio run` of this round caught it -- GCC can't disambiguate
+        // an unqualified call when a same-named class template is also
+        // visible, even though it's not actually callable as a
+        // function. Explicit global-scope qualification sidesteps it.
+        int btPct = ::map(BluetoothSource::getVolume(), 0, 127, 0, 100);
         if (btPct != state.volume) {
             state.volume = btPct;
             state.dirty = true;

@@ -696,7 +696,10 @@ void begin(TFT_eSPI &tft) { tftPtr = &tft; }
 // instead of guessing at a third strapping pin.
 void applyBrightness(int percent) {
     percent = constrain(percent, 0, 100);
-    uint8_t level = map(percent, 0, 100, 0, 255);
+    // ::map() -- same std::map/Arduino-map() ambiguity as main.cpp's
+    // syncBluetoothToUi(), here because this file also includes
+    // Library.h (for its <map>-based playlist overlay).
+    uint8_t level = ::map(percent, 0, 100, 0, 255);
 
     if (tftPtr) {
         tftPtr->writecommand(0x53); // WRCTRLD
