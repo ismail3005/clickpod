@@ -207,10 +207,29 @@ void tryUntilAttempted() {
     }
 }
 
+// Settings' "Sync Time Now" row sets this; the task below polls it in
+// short slices instead of one long vTaskDelay(kResyncIntervalMs), so a
+// manual request doesn't have to wait up to 6h to be noticed. Polling
+// every 1s for up to 6h is negligible cost (a flag check + a short
+// sleep), nowhere near worth a more complex wake-the-task mechanism
+// (a queue/semaphore) for something this infrequent.
+std::atomic<bool> manualSyncRequested{false};
+
+void waitUpToWithEarlyWake(uint32_t totalMs) {
+    uint32_t waited = 0;
+    constexpr uint32_t kPollMs = 1000;
+    while (waited < totalMs) {
+        if (manualSyncRequested.exchange(false)) return;
+        uint32_t chunk = min(totalMs - waited, kPollMs);
+        vTaskDelay(pdMS_TO_TICKS(chunk));
+        waited += chunk;
+    }
+}
+
 void taskFn(void *) {
     tryUntilAttempted();
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(kResyncIntervalMs));
+        waitUpToWithEarlyWake(kResyncIntervalMs);
         tryUntilAttempted();
     }
 }
@@ -310,5 +329,14 @@ void setManualTime(int hour, int minute) {
 }
 
 bool hasManualTime() { return manualTimeSet; }
+
+// Settings' "Sync Time Now" row -- lets the user force an immediate
+// attempt instead of waiting for the next scheduled 6h cycle (or a
+// reboot) -- e.g. right after fixing /clickpod_wifi.txt, no reason to
+// wait. Just sets the flag taskFn()'s polling wait checks; the actual
+// attempt still goes through the same radioHeapOk()/RadioLock path as
+// every other attempt, so it can still be skipped (and retried per the
+// normal rules) if the radio genuinely isn't available right now.
+void requestManualSync() { manualSyncRequested = true; }
 
 } // namespace TimeSync

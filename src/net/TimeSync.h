@@ -92,4 +92,11 @@ String currentTimeString();
 void setManualTime(int hour, int minute);
 bool hasManualTime();
 
+// Settings' "Sync Time Now" row -- forces an immediate sync attempt
+// instead of waiting for the next scheduled cycle (6h) or a reboot.
+// Still subject to the same radioHeapOk()/RadioLock checks every other
+// attempt is -- this requests an attempt, it doesn't bypass the safety
+// guards around one.
+void requestManualSync();
+
 } // namespace TimeSync

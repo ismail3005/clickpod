@@ -162,21 +162,91 @@ void drawBoot() {
     tftPtr->print("booting...");
 }
 
+// Shared analog clock face renderer -- hour/minute hands + 12 tick
+// marks, used by both the Set Time screen (editable, one hand
+// highlighted) and the AOD/locked screen (read-only, just shows the
+// current time). Every trig-derived endpoint uses lroundf(), not a
+// truncating (int) cast -- the previous (int) casts truncated toward
+// zero, which biases every tick/hand very slightly short, and
+// unevenly (the exact bias depends on each angle's fractional part) --
+// confirmed real, not cosmetic paranoia: reported as "12 and 00 aren't
+// exactly centered." Rounding to the nearest pixel fixes that.
+void drawAnalogClockFace(int cx, int cy, int radius, int hour, int minute, uint16_t faceColor,
+                          uint16_t tickColor, bool highlightHour, bool highlightMinute, uint16_t highlightColor) {
+    tftPtr->drawCircle(cx, cy, radius, faceColor);
+    for (int i = 0; i < 12; i++) {
+        float a = i * (2 * PI / 12) - PI / 2;
+        int x1 = cx + (int)lroundf((radius - 8) * cosf(a));
+        int y1 = cy + (int)lroundf((radius - 8) * sinf(a));
+        int x2 = cx + (int)lroundf(radius * cosf(a));
+        int y2 = cy + (int)lroundf(radius * sinf(a));
+        tftPtr->drawLine(x1, y1, x2, y2, tickColor);
+    }
+
+    float hourAngle = ((hour % 12) + minute / 60.0f) * (2 * PI / 12) - PI / 2;
+    int hourLen = radius * 55 / 100;
+    uint16_t hourColor = highlightHour ? highlightColor : faceColor;
+    int hx = cx + (int)lroundf(hourLen * cosf(hourAngle));
+    int hy = cy + (int)lroundf(hourLen * sinf(hourAngle));
+    tftPtr->drawLine(cx, cy, hx, hy, hourColor);
+    if (highlightHour) {
+        tftPtr->drawLine(cx + 1, cy, hx + 1, hy, hourColor); // thicker: active hand
+        tftPtr->drawLine(cx, cy + 1, hx, hy + 1, hourColor);
+    }
+
+    float minAngle = minute * (2 * PI / 60) - PI / 2;
+    int minLen = radius * 85 / 100;
+    uint16_t minColor = highlightMinute ? highlightColor : faceColor;
+    int mx = cx + (int)lroundf(minLen * cosf(minAngle));
+    int my = cy + (int)lroundf(minLen * sinf(minAngle));
+    tftPtr->drawLine(cx, cy, mx, my, minColor);
+    if (highlightMinute) {
+        tftPtr->drawLine(cx + 1, cy, mx + 1, my, minColor);
+        tftPtr->drawLine(cx, cy + 1, mx, my + 1, minColor);
+    }
+
+    tftPtr->fillCircle(cx, cy, 2, faceColor);
+}
+
 // AOD/locked screen's clock -- separated from drawOff() so a once-a-minute
 // tick (see UI.cpp's tickStatusbarClock(), which runs regardless of mode)
-// can refresh just this text without re-blitting the whole black screen
-// every time, same reasoning as drawStatusbar()'s own partial-redraw path.
-// Background here is already solid black from drawOff()'s one-time
-// fillScreen(), so clearing just this strip before redrawing is enough --
-// no flicker risk the way a full-body redraw would have.
-constexpr int16_t kOffClockY = kScreenH / 2 - 24;
+// can refresh just this (now including the analog face, not just the
+// digital text -- user asked for the clock FACE to accompany the digital
+// readout here too, matching the Set Time screen) without re-blitting the
+// whole black screen every time, same reasoning as drawStatusbar()'s own
+// partial-redraw path. Background here is already solid black from
+// drawOff()'s one-time fillScreen(), so clearing just this region before
+// redrawing is enough -- no flicker risk the way a full-body redraw would
+// have. Redraws the whole face region every tick rather than tracking/
+// erasing just the previous hand positions -- simplest correct approach,
+// and this only fires once a minute, not worth the extra complexity of a
+// hands-only partial erase.
+constexpr int16_t kOffClockCx = kScreenW / 2;
+constexpr int16_t kOffClockCy = 70;
+constexpr int16_t kOffClockRadius = 46;
+constexpr int16_t kOffClockDigitalY = kOffClockCy + kOffClockRadius + 12;
 
 void drawOffClock() {
-    tftPtr->fillRect(0, kOffClockY - 4, kScreenW, 36, TFT_BLACK);
+    tftPtr->fillRect(kOffClockCx - kOffClockRadius - 6, kOffClockCy - kOffClockRadius - 6,
+                      (kOffClockRadius + 6) * 2, (kOffClockRadius + 6) * 2 + 30, TFT_BLACK);
+    String t = TimeSync::currentTimeString();
+    int hour = 0, minute = 0;
+    if (t.length() == 5 && t[2] == ':') {
+        hour = t.substring(0, 2).toInt();
+        minute = t.substring(3, 5).toInt();
+    }
+    // Still shows a (frozen, pointing at 12) face even before any sync/
+    // manual set -- "--:--" parses to hour=minute=0 via the guard above
+    // failing, leaving hour/minute at their 0 default, which is a
+    // reasonable, harmless default appearance rather than skipping the
+    // face entirely.
+    drawAnalogClockFace(kOffClockCx, kOffClockCy, kOffClockRadius, hour, minute, TFT_WHITE, TFT_WHITE, false, false,
+                         TFT_WHITE);
     tftPtr->setTextColor(TFT_WHITE, TFT_BLACK);
-    tftPtr->setTextSize(3);
-    tftPtr->setCursor(kScreenW / 2 - 48, kOffClockY);
-    tftPtr->print(TimeSync::currentTimeString());
+    tftPtr->setTextSize(2);
+    tftPtr->setCursor(kOffClockCx - 30, kOffClockDigitalY);
+    tftPtr->print(t);
+    tftPtr->setTextSize(1);
 }
 
 void drawOff() {
@@ -184,13 +254,13 @@ void drawOff() {
     drawOffClock();
     tftPtr->setTextColor(0x4208, TFT_BLACK);
     tftPtr->setTextSize(1);
-    tftPtr->setCursor(kScreenW / 2 - 60, kScreenH / 2 + 20);
+    tftPtr->setCursor(kScreenW / 2 - 60, kOffClockDigitalY + 32);
     tftPtr->print("hold CENTER to power on");
     // Real AOD requirement: playback keeps going while locked -- show that
     // it's still doing so, rather than a screen that looks fully "off"
     // while music is actually still playing behind it.
     if (state.now.hasTrack) {
-        tftPtr->setCursor(kScreenW / 2 - 70, kScreenH / 2 + 38);
+        tftPtr->setCursor(kScreenW / 2 - 70, kOffClockDigitalY + 50);
         tftPtr->print(state.now.playing ? "playing" : "paused");
     }
 }
@@ -629,46 +699,8 @@ void drawSetTime() {
     int cx = kScreenW / 2;
     int cy = kBodyY + 26 + 70;
     int radius = 64;
-
-    tftPtr->drawCircle(cx, cy, radius, p.fg);
-    // Hour tick marks every 30 degrees (12 of them) -- small fixed-length
-    // radial lines, cheap and legible at this size without text labels.
-    for (int i = 0; i < 12; i++) {
-        float a = i * (2 * PI / 12) - PI / 2;
-        int x1 = cx + (int)((radius - 8) * cosf(a));
-        int y1 = cy + (int)((radius - 8) * sinf(a));
-        int x2 = cx + (int)(radius * cosf(a));
-        int y2 = cy + (int)(radius * sinf(a));
-        tftPtr->drawLine(x1, y1, x2, y2, p.muted);
-    }
-
-    // Hour hand: 12-hour face (so it reads as a normal clock), shorter.
-    float hourAngle = ((state.setTimeHour % 12) + state.setTimeMinute / 60.0f) * (2 * PI / 12) - PI / 2;
-    int hourLen = radius * 55 / 100;
-    bool editingHour = !state.setTimeEditingMinute;
-    uint16_t hourColor = editingHour ? p.accent : p.fg;
-    int hx = cx + (int)(hourLen * cosf(hourAngle));
-    int hy = cy + (int)(hourLen * sinf(hourAngle));
-    tftPtr->drawLine(cx, cy, hx, hy, hourColor);
-    if (editingHour) {
-        tftPtr->drawLine(cx + 1, cy, hx + 1, hy, hourColor); // thicker: active hand
-        tftPtr->drawLine(cx, cy + 1, hx, hy + 1, hourColor);
-    }
-
-    // Minute hand: longer, full 0-59 sweep.
-    float minAngle = state.setTimeMinute * (2 * PI / 60) - PI / 2;
-    int minLen = radius * 85 / 100;
-    bool editingMinute = state.setTimeEditingMinute;
-    uint16_t minColor = editingMinute ? p.accent : p.fg;
-    int mx = cx + (int)(minLen * cosf(minAngle));
-    int my = cy + (int)(minLen * sinf(minAngle));
-    tftPtr->drawLine(cx, cy, mx, my, minColor);
-    if (editingMinute) {
-        tftPtr->drawLine(cx + 1, cy, mx + 1, my, minColor);
-        tftPtr->drawLine(cx, cy + 1, mx, my + 1, minColor);
-    }
-
-    tftPtr->fillCircle(cx, cy, 2, p.fg);
+    drawAnalogClockFace(cx, cy, radius, state.setTimeHour, state.setTimeMinute, p.fg, p.muted,
+                         !state.setTimeEditingMinute, state.setTimeEditingMinute, p.accent);
 
     // Digital readout below the face -- the actual glanceable value.
     char buf[6];

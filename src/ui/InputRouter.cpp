@@ -188,11 +188,10 @@ void handleTap(AnoButton btn) {
         // drag with) -- while grabbed, UP/DOWN move the row itself instead
         // of the cursor, and LEFT/CENTER are ignored so a drag can't be
         // interrupted early.
-        // RIGHT only actually grabs when the cursor is on an upcoming-queue
-        // row -- history/now rows can't be reordered (queueSelectionIsQueueItem()),
-        // so this is a no-op there instead of grabbing something immovable.
+        // RIGHT grabs any row except "now" itself (canGrabSelectedRow()) --
+        // history rows are reorderable too now, not just the upcoming queue.
         if (btn == AnoButton::RIGHT) {
-            if (MenuEngine::queueSelectionIsQueueItem()) { state.queueGrabbed = !state.queueGrabbed; state.dirty = true; }
+            if (MenuEngine::canGrabSelectedRow()) { state.queueGrabbed = !state.queueGrabbed; state.dirty = true; }
         }
         else if (state.queueGrabbed) {
             if (btn == AnoButton::UP) MenuEngine::moveGrabbedQueueItem(-1);

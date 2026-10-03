@@ -444,7 +444,11 @@ void buildPlaylistTrackListFromIndex(const String &name) {
     pushMenu(name, std::move(items));
 }
 
-void buildPlaylistList() {
+// Factored out of buildPlaylistList() so refreshPlaylistListIfPresent()
+// (below) can rebuild an EXISTING stack frame's items in place, not
+// just push a fresh one -- the actual fix needed for "created a
+// playlist, went back, it wasn't there yet."
+std::vector<MenuItem> buildPlaylistItems() {
     std::vector<MenuItem> items;
     if (Library::usingIndex()) {
         for (auto &kv : Library::indexPlaylists()) {
@@ -485,11 +489,35 @@ void buildPlaylistList() {
             items.push_back(std::move(it));
         }
     }
-    pushMenu("Playlists", std::move(items));
+    return items;
+}
+
+void buildPlaylistList() { pushMenu("Playlists", buildPlaylistItems()); }
+
+// Real fix for "created a playlist from a track's '...' menu, went
+// back to Playlists, it wasn't there yet -- had to leave and re-enter
+// to see it": state.menuStack holds frozen snapshots built once, at
+// the moment each level was entered -- navigating back to an existing
+// frame (a plain pop/stack-restore, as closeTrackMenu() does) never
+// re-invokes buildPlaylistList(), so it kept showing whatever the
+// Playlists screen looked like BEFORE the new one was created. Call
+// this right after closeTrackMenu() wherever a new playlist might have
+// just been created -- it finds any "Playlists" frame still sitting in
+// the (now-restored) stack and rebuilds its items in place, preserving
+// the selection index where possible.
+void refreshPlaylistListIfPresent() {
+    for (auto &m : state.menuStack) {
+        if (m.title != "Playlists") continue;
+        int prevSelected = m.selected;
+        m.items = buildPlaylistItems();
+        if (m.items.empty()) m.selected = 0;
+        else if (prevSelected < (int)m.items.size()) m.selected = prevSelected;
+        else m.selected = (int)m.items.size() - 1;
+    }
 }
 
 void buildSettings() {
-    std::vector<MenuItem> items(7);
+    std::vector<MenuItem> items(8);
     items[0].label = "Bluetooth";
     items[0].icon = "bt";
     items[0].subFn = btStatusLabel;
@@ -569,6 +597,21 @@ void buildSettings() {
     items[6].icon = "timezone";
     items[6].sub = "";
     items[6].action = []() { enterSetTime(); };
+
+    // User's explicit ask: a way to force a WiFi sync attempt on demand
+    // instead of waiting up to 6h (or a reboot) -- e.g. right after
+    // fixing /clickpod_wifi.txt. Fire-and-forget: no busy spinner/
+    // confirmation screen (the attempt itself can take several seconds
+    // -- scan, join, NTP fetch -- and runs on TimeSync's own background
+    // task, not this one), the statusbar clock just updates on its own
+    // via the existing tickStatusbarClock() path once/if it succeeds.
+    items[7].label = "Sync Time Now";
+    items[7].icon = "timezone";
+    items[7].sub = "";
+    items[7].action = []() {
+        TimeSync::requestManualSync();
+        Serial.println(F("[ui] manual time sync requested"));
+    };
 
     pushMenu("Settings", std::move(items));
 }
@@ -744,15 +787,13 @@ Track trackAtCombinedIndex(int idx) {
     return Track{};
 }
 
-// Reordering (grab + UP/DOWN) only makes sense for the upcoming queue --
-// dragging an already-played history row or the currently-playing track
-// around has no meaning. Used to gate the RIGHT-tap grab toggle in
-// InputRouter so it's a no-op on a history/now row instead of grabbing
-// something that can't actually be moved.
-bool queueSelectionIsQueueItem() {
-    int queueStart = (int)state.history.size() + (state.now.hasTrack ? 1 : 0);
-    return state.queueSelected >= queueStart && state.queueSelected < queueStart + (int)state.queue.size();
-}
+// Reordering (grab + UP/DOWN) makes sense within EITHER segment --
+// history or upcoming queue -- but not for the currently-playing "now"
+// row itself, which has no position to move to/from. Originally
+// restricted to the queue segment only; user explicitly asked for
+// history rows to be grabbable too ("I want it to work"). Used to gate
+// the RIGHT-tap grab toggle in InputRouter.
+bool canGrabSelectedRow() { return state.queueSelected != (int)state.history.size(); }
 
 // Called at render time, not baked into a menu item once -- a plain string
 // sub-label would go stale the moment BT state changes on a different
@@ -812,6 +853,14 @@ void enterBluetooth() {
     items[2].label = "Turn Bluetooth Off";
     items[2].icon = "bt";
     items[2].action = []() {
+        // Real teardown latency reported ("froze for a good second") --
+        // BluetoothSource::end()'s own disconnect/AVRC-deinit work is a
+        // real, blocking cost, not a bug to fix away; same reasoning as
+        // the library-rescan busy message (Settings' "Rescan library"):
+        // a blocking operation with zero visual feedback looks exactly
+        // like a hang. Draws directly, synchronously, before the actual
+        // blocking call -- same established pattern, not a new one.
+        Screens::showBusyMessage("Stopping Bluetooth...");
         BluetoothSource::end();
         state.btOn = false;
         state.btConnectedTo = "";
@@ -927,6 +976,7 @@ void openTrackMenu(const Track &track) {
                 Library::addToPlaylist(name, track2);
                 Serial.printf("[ui] created playlist \"%s\" with \"%s\"\n", name.c_str(), track2.title.c_str());
                 closeTrackMenu();
+                refreshPlaylistListIfPresent();
             };
             plItems.push_back(std::move(row));
         }
@@ -946,6 +996,10 @@ void openTrackMenu(const Track &track) {
                     Library::addToPlaylist(plName, track2);
                     Serial.printf("[ui] added to \"%s\"\n", plName.c_str());
                     closeTrackMenu();
+                    // Same staleness as "+ New Playlist" above, just
+                    // quieter (a wrong track COUNT on an existing row,
+                    // not a whole missing row) -- same fix.
+                    refreshPlaylistListIfPresent();
                 };
                 plItems.push_back(std::move(row));
             }
@@ -966,6 +1020,7 @@ void openTrackMenu(const Track &track) {
                     }
                     Serial.printf("[ui] added to \"%s\"\n", plName.c_str());
                     closeTrackMenu();
+                    refreshPlaylistListIfPresent();
                 };
                 plItems.push_back(std::move(row));
             }
@@ -1017,24 +1072,37 @@ void moveQueueSelection(int delta) {
     state.dirty = true;
 }
 
-// While a queue row is "grabbed" (see the RIGHT-tap toggle in
-// InputRouter, gated by queueSelectionIsQueueItem() so this can only ever
-// be called with the cursor already inside the queue segment), UP/DOWN
-// swap it with its neighbor and move the cursor along with it, instead of
-// just moving the cursor -- the drag-and-drop equivalent for a device
-// with no touchscreen. state.queueSelected is a combined-list index now,
-// so it has to be translated to/from a plain state.queue index here --
-// dragging stays confined to the queue segment itself (can't drag a row
-// back into history or past "now", which wouldn't mean anything).
+// While a row is "grabbed" (see the RIGHT-tap toggle in InputRouter,
+// gated by canGrabSelectedRow() so this is never called on the "now"
+// row), UP/DOWN swap it with its neighbor and move the cursor along
+// with it, instead of just moving the cursor -- the drag-and-drop
+// equivalent for a device with no touchscreen. Originally confined to
+// the queue segment only; now works within EITHER segment (history or
+// queue), wrapping at that segment's own edges -- dragging still can't
+// cross the "now" boundary (moving a history row into the upcoming
+// queue, or vice versa, isn't a simple swap: the two segments are
+// different-length containers, and sliding something past the
+// currently-playing track has no clear meaning), so a grab started in
+// one segment stays confined to it, same as before, just now true for
+// history too instead of only queue.
 void moveGrabbedQueueItem(int delta) {
-    int queueStart = (int)state.history.size() + (state.now.hasTrack ? 1 : 0);
-    int n = (int)state.queue.size();
-    if (n < 2) return;
-    int from = state.queueSelected - queueStart;
-    if (from < 0 || from >= n) return;
-    int to = ((from + delta) % n + n) % n;
-    std::swap(state.queue[from], state.queue[to]);
-    state.queueSelected = queueStart + to;
+    int histN = (int)state.history.size();
+    int sel = state.queueSelected;
+    if (sel == histN) return; // "now" row -- nothing to grab
+    if (sel < histN) {
+        if (histN < 2) return;
+        int to = ((sel + delta) % histN + histN) % histN;
+        std::swap(state.history[sel], state.history[to]);
+        state.queueSelected = to;
+    } else {
+        int queueStart = histN + (state.now.hasTrack ? 1 : 0);
+        int n = (int)state.queue.size();
+        if (n < 2) return;
+        int from = sel - queueStart;
+        int to = ((from + delta) % n + n) % n;
+        std::swap(state.queue[from], state.queue[to]);
+        state.queueSelected = queueStart + to;
+    }
     state.dirty = true;
 }
 

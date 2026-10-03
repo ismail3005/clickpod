@@ -3263,6 +3263,221 @@ shows up under Playlists; open Settings -> Set Time, confirm the clock
 face and readout track the encoder/buttons correctly and the statusbar
 reflects the saved time after confirming).
 
+## First real `pio run` of this whole round, real build error caught and fixed
+
+User's first actual build after the "ooga booga" round failed with
+`error: reference to 'map' is ambiguous`. Real, well-known GCC quirk,
+not a logic bug: `Library.h`'s `#include <map>` (for its playlist
+overlay, `std::map<String, std::vector<Track>>`) puts `std::map`'s
+class template in scope in every file that includes it; GCC can't
+disambiguate a plain `map(...)` call between that and Arduino's global
+`long map(long,long,long,long,long)` function when both are visible
+unqualified, even though the class template isn't actually callable.
+Fixed by qualifying the two affected call sites to `::map(...)` (forces
+global-scope resolution) -- `main.cpp`'s `syncBluetoothToUi()`,
+`Screens.cpp`'s `applyBrightness()`. Checked every other `map()` call
+site in the codebase (`AudioBridge.cpp`'s two) -- neither transitively
+includes `<map>`, so they're unaffected and were left alone.
+
+**Also added**: `platformio.ini` gained `monitor_filters =
+esp32_exception_decoder` -- a real, documented PlatformIO/Espressif32
+feature that automatically resolves a crash backtrace's raw addresses
+against the just-built `.elf` right in the serial monitor. Added after
+two real crashes this project could only reason about from unresolved
+hex addresses (no PlatformIO in the cloud sandbox that wrote most of
+this firmware) -- closes that gap for every future crash on whatever
+machine actually runs `pio device monitor` from here on.
+
+## Thirty-fifth real hardware bug (found, fixed): analog clock hands/ticks weren't quite centered -- truncation, not a geometry bug
+
+User reported the Set Time screen's "12 and 00 aren't on the exact
+center, there's a bit of an offset." Real, found cause in
+`Screens.cpp`'s `drawSetTime()`: every tick-mark/hand endpoint used a
+plain `(int)(...)` cast on a trig result -- C-style truncation toward
+zero, not rounding to the nearest pixel. This shortens/shifts every
+line by a fractional-pixel amount that varies per angle, producing
+exactly the described "slightly off, not dramatically" asymmetry
+across the 12 ticks and both hands.
+
+**Fixed**: replaced every `(int)(...)` cast on a trig result with
+`(int)lroundf(...)` (rounds to nearest, not truncates) -- `lroundf()`
+is standard C99 `<math.h>`, already included. While in there, factored
+the whole analog-face drawing (ticks + both hands + center dot) out
+into a shared `drawAnalogClockFace()` helper, since the AOD screen
+needed the identical drawing below -- see the next entry.
+
+## Thirty-sixth real hardware bug/decision: AOD/locked screen gained the analog clock face it was missing, not just the digital readout
+
+User explicitly asked: the powered-off/AOD screen showed a digital
+clock but no analog face to "accompany" it, unlike the Set Time screen.
+`Screens.cpp`'s `drawOffClock()` now draws a real analog face (via the
+same `drawAnalogClockFace()` helper the previous entry introduced,
+read-only here -- no highlighted hand) above the digital readout,
+parsing `TimeSync::currentTimeString()`'s `"HH:MM"` back into integer
+hour/minute (same parsing `MenuEngine::enterSetTime()` already does).
+Still fires on the same once-a-minute lightweight-redraw path
+(`state.statusbarDirty`) as before -- redraws the whole face region on
+each tick rather than tracking/erasing just the previous hand
+positions, since this only fires once a minute and the simpler
+approach is plenty cheap at that rate. `drawOff()`'s "hold CENTER to
+power on"/playing-paused lines shifted down to make room.
+
+**Not yet hardware-confirmed, same caveat as everything in this
+section** -- no PlatformIO in the cloud sandbox that wrote this. Next
+real step: flash, confirm the clock face now looks properly centered on
+BOTH screens, and that the AOD screen's new analog face appears and
+advances correctly once a minute while locked.
+
+## Thirty-seventh real hardware bug/decision: queue drag-to-reorder extended to history rows, not just the upcoming queue
+
+User explicitly asked: "I can only pick up upcoming songs... I want it
+to work" for history rows too. `MenuEngine.cpp`'s `queueSelectionIsQueueItem()`
+(renamed `canGrabSelectedRow()`) previously only allowed grabbing a row
+inside the queue segment; now allows grabbing ANY row except the "now"
+row itself (which has no position to move to/from). `moveGrabbedQueueItem()`
+now branches on which segment the selected combined-list index falls
+in and reorders WITHIN that segment (wrapping at its own edges, same
+as the original queue-only behavior) -- deliberately does NOT support
+dragging a row ACROSS the "now" boundary (history into queue or vice
+versa): the two are different-length containers, so that would be a
+real move/splice, not a simple swap, and sliding something past the
+currently-playing track has no obvious meaning anyway. A grab started
+in history stays confined to history; a grab started in queue stays
+confined to queue, exactly mirroring the pre-existing queue-only
+behavior just now also available on the other side of "now".
+
+**Not yet hardware-confirmed**. Next real step: flash, grab a history
+row (RIGHT-tap) and confirm UP/DOWN reorders it within history, and
+confirm a grab still refuses to start on the "now" row itself.
+
+## Thirty-eighth real hardware bug (reported, NOT the one the stack-size mitigation targeted -- new evidence, next step is a real backtrace): scrubbing over Bluetooth crashed again, this time explicitly on Core 0
+
+User hit another crash scrubbing/playing over Bluetooth --
+`Guru Meditation Error: Core 0 panic'ed (LoadProhibited)`,
+`EXCVADDR: 0xbc285320` (a garbage-looking address, not a small offset
+from null) -- different from the thirty-second bug's `spinlock_acquire`
+assert, though the lead-up looks similar (a `stream ready` resync with
+no further decode-info lines printed before the crash). **Important
+new data point**: this crash is explicitly on **Core 0**. The thirty-
+second bug's mitigation (`getArduinoLoopTaskStackSize()`, bumping the
+Arduino `loop()` task's stack) only affects whichever core `loop()`
+itself runs on -- by default Core 1 on a dual-core ESP32 Arduino setup,
+NOT Core 0. If this crash is genuinely happening inside a Core-0-pinned
+task (the BT/Bluedroid stack's own tasks commonly are), that mitigation
+could not have addressed it, and -- a real structural limit worth
+being honest about -- **the Bluedroid task's own stack size is baked
+into Arduino-ESP32's precompiled libraries for this PlatformIO
+framework**, not something a build flag or sketch-level override can
+change the way `getArduinoLoopTaskStackSize()` changes the Arduino
+core's OWN loop task. If the real cause turns out to be a stack
+overflow on a Bluedroid-internal task specifically, there is no
+application-level fix available for that from here.
+
+Separately observed in the same session: reconnecting to a speaker
+took noticeably longer than usual, and stopping Bluetooth afterward
+"froze for a good second" before completing -- consistent with real,
+if not fully diagnosed, resource pressure around the BT stack under
+heavier use, matching this project's long heap-exhaustion history, but
+not confirmed as the crash's cause specifically.
+
+**Not fixed blind this round** -- guessing at a second mitigation with
+no symbolized trace would be exactly the kind of guess this project
+avoids; the one concrete action taken is adding `esp32_exception_decoder`
+(see the top of this section) so the literal next crash, whatever it
+is, gives a real function-and-line backtrace instead of raw hex. The
+busy-message fix for the "froze for a second" UX complaint (see
+`MenuEngine.cpp`'s "Turn Bluetooth Off" action, now shows "Stopping
+Bluetooth..." before the blocking `end()` call, same established
+pattern as the library-rescan busy message) is a real, separate, low-
+risk UX fix made this round regardless of the crash investigation --
+it doesn't address the crash, just stops a real teardown delay from
+looking like a hang.
+
+**Next real step**: get a FRESH crash with the exception decoder now
+active -- that resolves this ambiguity immediately (which function, on
+which task, is actually faulting) instead of needing another round of
+hypothesis-from-raw-hex.
+
+## Manual "Sync Time Now" button added
+
+User's explicit ask, on top of the existing 6h-plus-boot WiFi sync
+cadence (confirmed working as designed -- the "resyncing pretty
+frequently" report in the same session was almost certainly just an
+artifact of the device crashing and rebooting several times in that
+test session, each reboot legitimately triggering its own boot-time
+sync attempt by design, not a sign the interval itself regressed):
+Settings gained a "Sync Time Now" row that forces an immediate attempt
+instead of waiting for the next scheduled cycle or a reboot -- e.g.
+right after fixing `/clickpod_wifi.txt`, no reason to wait up to 6h.
+
+`TimeSync.cpp`'s background task used to sleep via one long
+`vTaskDelay(kResyncIntervalMs)` between cycles; `requestManualSync()`
+sets an atomic flag, and the wait is now sliced into 1-second polls
+(`waitUpToWithEarlyWake()`) that check it and return early the instant
+it's set -- negligible cost (a flag check + a short sleep) for
+something fired at most a few times a session. The manual request
+still goes through the exact same `radioHeapOk()`/`RadioLock` checks
+every other attempt does -- this requests an attempt, it doesn't
+bypass the safety guards around one, so it can still be legitimately
+skipped (and retried per the normal rules) if the radio isn't available
+right now.
+
+**Not yet hardware-confirmed**. Next real step: flash, press "Sync Time
+Now" with a known network in range, confirm it attempts immediately
+(serial log should show the scan starting right away) rather than
+waiting.
+
+## Thirty-ninth real hardware bug (found, fixed): new playlist / added-to playlist didn't show up until navigating away and back
+
+User reported: create a playlist from a track's "..." menu, go back to
+Playlists, the new one isn't there yet -- leave to the main menu and
+back in, and now it is. Real cause: `state.menuStack` holds frozen
+snapshots of each menu level, built once at the moment it's entered
+-- navigating back to an already-open level (a plain pop/stack-restore,
+which is what `closeTrackMenu()` does to return to wherever you were)
+never re-invokes `buildPlaylistList()`, so it kept showing whatever the
+Playlists screen looked like BEFORE the new playlist was created (or,
+for the quieter version of the same bug, before a track was added to
+an EXISTING one, which left its "N tracks" sub-label stale too).
+
+**Fixed**: factored `buildPlaylistList()`'s row-building logic out into
+`buildPlaylistItems()`, and added `refreshPlaylistListIfPresent()` --
+scans `state.menuStack` (right after `closeTrackMenu()` has restored
+it) for any frame titled "Playlists" and rebuilds its items in place
+(preserving the selection index where it still fits), instead of
+leaving the stale snapshot sitting there until the user happens to
+navigate away and back. Called after all three playlist-mutating
+actions in `openTrackMenu()`'s "Add to Playlist" submenu: "+ New
+Playlist", and both the index-backed and mock-fallback "add to an
+existing playlist" rows.
+
+**Not yet hardware-confirmed**. Next real step: flash, create a new
+playlist, go straight back to Playlists (no detour through the main
+menu) and confirm it's already there; separately add a track to an
+existing playlist and confirm its track count updates immediately too.
+
+## Deferred: playlist rename/delete, and vaguer "menus were a bit confusing" feedback on playlist creation
+
+User also flagged, not started this round:
+
+- **No way to rename or delete a playlist once created** -- only
+  creation (and adding tracks to one) exists. User's own suggestion:
+  reuse the existing drag-and-drop grab mechanism's general pattern for
+  the UI gesture, though rename specifically still needs real text
+  entry (the same no-keyboard constraint `nextNewPlaylistName()`'s auto-
+  naming was built around -- see the "Ooga booga" round's writeup above)
+  and delete needs a real confirmation step (destructive, no undo) and
+  a decision about what happens to the real on-SD index data for a
+  playlist that ALSO exists there (vs. the session-only
+  `extraPlaylistTracks` overlay for brand-new ones) -- not scoped yet.
+- **"Playlist creation menus were a bit confusing"** -- flagged without
+  enough specifics to act on; the one CONCRETE bug inside that
+  complaint (new/updated playlists not showing up without navigating
+  away and back) is fixed above, but if the menu FLOW itself (which
+  screen you land on, what the rows are labeled, etc.) still feels
+  wrong after that, needs more specific description (or the usual
+  simulator-first UX pass) to actually improve rather than guess at.
+
 ## Next session plan (as of 2026-10-01, agreed in a planning-only conversation, nothing below built yet)
 
 A lot got discussed/decided in conversation without any code written this

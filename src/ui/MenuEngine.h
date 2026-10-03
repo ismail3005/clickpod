@@ -21,6 +21,12 @@ void buildAlbumListFromIndex(const String &artist);   // real on-SD-index path
 void buildTrackListFromIndex(const String &artist, const String &album);
 void buildPlaylistTrackListFromIndex(const String &name);
 void buildPlaylistList();
+// Rebuilds any "Playlists" frame still sitting in state.menuStack in
+// place -- call after closeTrackMenu() wherever playlist contents may
+// have just changed (a new playlist created, a track added to one),
+// so navigating back to that screen doesn't show stale data. See
+// MenuEngine.cpp's big comment on it.
+void refreshPlaylistListIfPresent();
 void buildSettings();
 
 // AppMode::SET_TIME -- see MenuEngine.cpp's big comment on enterSetTime().
@@ -47,7 +53,7 @@ void playFromQueueIndex(int idx);
 void playFromHistoryIndex(int idx);  // jump back to something already played
 void playFromCombinedIndex(int idx); // dispatches to history/now/queue based on idx
 Track trackAtCombinedIndex(int idx); // for opening "..." track menu on any row
-bool queueSelectionIsQueueItem();    // only upcoming-queue rows can be grabbed/reordered
+bool canGrabSelectedRow();           // true for any row except "now" (history or queue)
 
 String btStatusLabel();
 void enterBluetooth();
