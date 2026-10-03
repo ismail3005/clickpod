@@ -27,7 +27,7 @@ Treat every section as a hard requirement unless marked "nice to have" or
 | SD storage | Standalone microSD reader module (SPI) | SPI | Separate physical module, not integrated with the display. Shares SPI bus (MOSI/MISO/SCK) with the display via its own independent CS pin — same bus-sharing principle as before, just two physically separate boards instead of one combined board. |
 | microSD card | SanDisk Ultra 128GB + adapter | — | Genuine card, no fake-capacity risk. Speed class irrelevant for this use case (audio streaming needs far less throughput than card provides). |
 | Input | Adafruit ANO Rotary Navigation Encoder | Rotary encoder (quadrature) + 5 momentary buttons (up/down/left/right/center) | This is the ONLY physical input device on the device (see section 5 for full mapping). No other buttons planned besides possibly a separate hardware power/reset consideration — TBD, currently planned to be handled entirely through the ANO center button (long-press). |
-| Battery | LiPo, 906090 size code (90×60×9mm), ~6000mAh, bare wire leads | — | Chosen over a 505080/3000mAh option because real energy-density math confirmed the 505080 listing's 3000mAh claim was inflated (~1350-2200mAh realistic for that volume), whereas 6000mAh is plausible and consistent for the 906090 volume. |
+| Battery | LiPo, 906090 size code (90×60×9mm), ~6000mAh, JST-PH connector | — | Chosen over a 505080/3000mAh option because real energy-density math confirmed the 505080 listing's 3000mAh claim was inflated (~1350-2200mAh realistic for that volume), whereas 6000mAh is plausible and consistent for the 906090 volume. **Amendment:** originally assumed bare wire leads; battery actually terminates in a JST-PH connector -- see section 3.1 for how this changes the physical wiring (no cutting/soldering directly to the battery leads required).|
 | Charge IC | TP4056 + boost module (steps battery's 3.0-4.2V up to stable 5V) | — | Deliberately NOT using power-path management (MCP73871/PowerBoost-style simultaneous charge+use) — user decided this adds unnecessary cost/complexity for a personal device; user will simply avoid using the device while it's charging, similar to how iPod-era devices were typically used. |
 | Fuel gauge | MAX17048 | I2C | Sits in parallel across the battery's raw +/- terminals (NOT inline with the charge/boost power path) — purely a sensing tap, reports battery % to ESP32 over I2C. Independent of whichever charge circuit is used. |
 | Bluetooth audio | None — uses ESP32's built-in Classic Bluetooth via A2DP source profile (`ESP32-A2DP` library) | — | No additional BT hardware. AVRCP (via the same library) handles remote control events (though in this project, physical device controls take priority — see BT section). |
@@ -69,6 +69,62 @@ Battery (bare wires, 3.0-4.2V) ──┬── TP4056+boost module ── stable
 - MAX17048 reports state-of-charge % via I2C; this should be surfaced in the
   UI (see section 6).
 
+### 3.1 Physical Wiring (confirmed on actual hardware -- amendment)
+
+The original text above described the power architecture conceptually
+("battery connects to both in parallel"); this section captures how that's
+actually implemented with the real parts in hand, confirmed during
+breadboard bring-up.
+
+**Battery connector:** the battery does NOT have bare wire leads as
+originally assumed in section 2 -- it terminates in a JST-PH connector.
+
+**MAX17048 board (Adafruit clone) has two battery JST-PH ports, wired in
+parallel internally** -- not two different circuits, just a convenience
+pass-through so the battery connection can be handed on to the next stage
+without splicing wires. This is what makes the "parallel tap" in the
+diagram above physically simple:
+
+```
+Battery (JST-PH) ── MAX17048 battery port 1
+                     MAX17048 battery port 2 ── (wired to) ── TP4056+boost B+/B-
+```
+
+Since the TP4056+boost module in use here only has solder pads (B+/B-,
+OUT+/OUT-), not its own JST port, the link from MAX17048 port 2 to the
+TP4056's B+/B- pads is two wires soldered directly onto MAX17048 port 2's
+PCB pads (no JST housing needed) and onto the TP4056's B+/B- pads. Polarity
+was verified with a multimeter continuity check against the already-known
+polarity of battery port 1 before connecting the battery -- getting this
+backwards is a real fire-risk mistake, not just a "doesn't work" one.
+
+**Clarifying B+/B- vs OUT+/OUT- on the TP4056+boost module**, since this was
+a point of confusion during bring-up: `B+`/`B-` is the bidirectional battery
+terminal -- current flows INTO the battery through these pins while USB is
+connected (charging), and OUT of the battery through the same pins while
+running on battery power (discharging, feeding the internal boost
+converter). It is not a charge-only connection. `OUT+`/`OUT-` is the
+boosted ~5V output that actually feeds the ESP32 and rest of the circuit --
+this is the pin pair described as "TP4056's OUT+/OUT-" above.
+
+**MAX17048 header pins** (VIN, GND, SCL, SDA, INT, QSTART -- separate from
+the two battery JST ports):
+- `VIN` -> ESP32 3.3V (powers the sensor IC's own logic; distinct from the
+  battery-sense connection on the JST ports)
+- `GND` -> common ground
+- `SCL` -> GPIO 27, `SDA` -> GPIO 21 (see `src/config/Pins.h`)
+- `INT` -> left unconnected for now (optional low-battery alert interrupt,
+  not needed for basic percentage polling)
+- `QSTART` -> left unconnected (forces a manual fuel-gauge quick-start
+  calibration; the chip already does this automatically on power-up)
+
+**Open item carried forward, not yet resolved:** some TP4056+boost combo
+modules have a physical push-button power switch on the boost output
+(double-tap to cut power entirely), which would add a second, non-firmware
+"off" state on top of the deep-sleep-based power on/off described in
+section 5.4. Need to confirm whether this specific module has that button
+before finalizing the power on/off design.
+
 ---
 
 ## 4. Firmware Bring-Up Order (recommended sequence — already partially in progress)
@@ -108,10 +164,11 @@ sort views, settings, BT device list, etc.)
 | Rotate (CW/CCW) | Fast scroll through list items |
 | Up / Down (single press) | Move one item at a time (slower, precise scroll) |
 | Up / Down (long press) | Fast scroll (same effective behavior as rotating) |
-| Left / Right | Navigate menu levels — Left = back/up a level, Right = enter/forward (dpad-style navigation) |
+| Left / Right | Navigate menu levels — Left = back/up a level, Right = enter/forward (dpad-style navigation). **AMENDED**: on a slider or choice settings row (Brightness, Sort tracks by, Appearance — see section 6 item 9), Left/Right instead decrement/increment that row's value, mirroring Center's increment. Without this there was no way to bring a slider back down once raised, since Left always meant "back". Only rows that aren't currently adjustable fall through to the normal back/forward navigation. |
 | Center (single tap) | Select / confirm current item |
 | Center (long press) | Power on/off (see section 5.4) |
 | Right (long press) | Enter Bluetooth pairing/discoverable mode (see 5.4 — RESOLVED: dedicated to Right specifically, chosen because it has no other long-press assignment anywhere in the app, unlike Up/Down which are used for Queue/Lyrics in NOW_PLAYING mode). Available globally, not just from a BT settings screen. |
+| Left (long press) | **ADDED.** On a track row specifically (file browser, playlist contents) — open the track context menu (see 5.5). No-op on non-track rows (Artist/Album/Settings/etc). |
 
 ### 5.2 In NOW_PLAYING mode (a track is loaded/active, whether playing or paused)
 
@@ -119,19 +176,22 @@ sort views, settings, BT device list, etc.)
 |---|---|
 | Rotate (CW/CCW) | Scrub through current track position |
 | Up / Down | Volume up/down |
-| Left / Right | Fast-forward / rewind (seek) |
+| Left / Right (single tap) | Skip to next/previous track. **AMENDED** (was originally fast-forward/rewind on tap) -- rotate already covers scrubbing position, so tap L/R is free for track skip instead, matching classic iPod physical-button behavior (tap to skip, as opposed to touch-wheel seek). Right long press stays reserved globally for BT pairing (5.4), never reassigned here. |
 | Center (single tap) | Play/Pause toggle |
-| Center (double tap, within ~300-400ms window) | Return to menu — music CONTINUES PLAYING in background, does not pause |
+| Center (double tap, within ~300-400ms window) | Return to menu — music CONTINUES PLAYING in background, does not pause. **AMENDED (reverse direction)**: the same double-tap gesture, performed from anywhere else (MENU at any depth, Lyrics, Queue, Bluetooth, the track context menu) while a track is loaded, jumps straight back to Now Playing. Without this, once you left Now Playing there was no way back to it except starting a new track — which reset the queue, breaking the common case of browsing to a different album/playlist to queue something up and then wanting to return to what was already playing. |
 | Center (long press) | Power on/off (see section 5.4) |
 | Down (long press) | Show lyrics screen (see section 6.5) |
 | Up (long press) | Show queue screen (see section 6.6) |
+| Left (long press) | **ADDED.** Open the track context menu (see 5.5) for the currently playing track. |
 
 ### 5.3 Center button state machine (most complex single input)
 
 Center button must distinguish THREE distinct behaviors:
 1. **Single tap** → Play/Pause (in NOW_PLAYING) or Select (in MENU)
 2. **Double tap** (second press-release within ~300-400ms of first
-   release) → Return to menu without pausing (NOW_PLAYING mode only)
+   release) → Return to menu without pausing (NOW_PLAYING mode only).
+   **AMENDED**: the same gesture also works in reverse from anywhere else
+   back to Now Playing, if a track is loaded — see 5.2.
 3. **Long press** (hold beyond a threshold, e.g. 600-800ms — tune by feel) →
    Power on/off
 
@@ -165,6 +225,32 @@ fire a spurious single/double tap on release).
   is a single, unambiguous, globally-available gesture with no conflicts
   anywhere in the app.
 
+### 5.5 Track context menu ("..." menu) — ADDED
+
+Not in the original spec; worked out and validated in the UI simulator once
+"add to playlist / play next / add to queue, like most phone music players"
+came up as a real want.
+
+**Trigger:** long-press Left. Scoped to wherever a specific track is
+contextually meaningful:
+- A track row in a file/library browser or playlist contents list (not on
+  non-track rows like Artist/Album/Settings entries)
+- The currently playing track, from NOW_PLAYING
+- The highlighted entry in the Queue screen (see 6.7 below)
+
+**Menu contents:**
+1. **Play Next** — insert at the front of the queue
+2. **Add to Queue** — append to the end of the queue
+3. **Add to Playlist** — pushes a submenu listing existing playlists; selecting
+   one appends the track to it
+4. **Cancel** — dismiss, no action
+
+**Navigation within the menu:** identical to normal MENU mode (rotate/Up/Down
+to move, Center to select, Left to go back a level or dismiss entirely if
+already at the top of the context menu). Dismissing (by any path) returns
+to exactly where the menu was opened from — the underlying screen/selection
+state isn't disturbed.
+
 ---
 
 ## 6. Screens / UI Modes Required
@@ -186,6 +272,11 @@ fire a spurious single/double tap on release).
    - Battery percentage (from MAX17048)
    - Current volume level indicator
 6. **Lyrics screen** — accessed via long-press Down from Now Playing.
+   **AMENDED (return gesture):** exits back to Now Playing via CENTER tap,
+   LEFT tap (the app's normal back gesture), or holding Down again --
+   symmetric with how the screen was opened. Not specified in the original
+   text; caught as a real dead-end (no way out once in) while validating
+   the flow in the UI simulator.
    RESOLVED, and confirmed via direct file inspection (`metaflac --list`
    on a real track): lyrics live in the Vorbis comment field **`LYRICS`**,
    and — better than initially assumed — they are **full LRC-format synced
@@ -265,9 +356,55 @@ MP3/ID3v2), so flagging explicitly:
   more manual work). Flag this to the user as a checkpoint once explored,
   since it affects implementation approach/time estimate.
 7. **Queue screen** — accessed via long-press Up from Now Playing. Shows
-   upcoming tracks in the current playback queue.
+   upcoming tracks in the current playback queue. **AMENDED (return
+   gesture):** CENTER no longer exits this screen -- see selection behavior
+   below. LEFT tap, or holding Up again, return to Now Playing.
+   **AMENDED (selection):** the queue is a selectable list like everywhere
+   else -- rotate/Up/Down move a cursor, and Center jumps playback straight
+   to the highlighted track (same as tapping a track in the queue view of
+   most phone music players). Tracks skipped over land in playback history
+   (so "previous" from Now Playing can still walk back through them);
+   everything after the selected track stays queued behind it. Long-press
+   Left on a queue entry opens the track context menu (5.5) for it, same as
+   everywhere else a track appears. **AMENDED (reordering)**: since the
+   device has no touchscreen to drag-and-drop with, Right tap toggles
+   "grabbing" the highlighted entry — a physical-button equivalent to
+   picking it up. While grabbed, Up/Down move the entry itself up/down the
+   queue (instead of moving the selection cursor), and Left/Center are
+   ignored so a drag can't be interrupted by accidentally exiting or
+   playing mid-reorder; a second Right tap drops it back in place. The
+   grabbed row is shown with a three-bar "grip" glyph in place of its
+   index number, echoing the drag-handle convention from touch-based
+   reorderable lists.
 8. **Bluetooth menu** — list of paired/available devices, connect/disconnect,
-   pairing mode trigger
+   pairing mode trigger. **AMENDED (real hardware constraint)**: the
+   `ESP32-A2DP` library's source mode connects to ONE hardcoded target
+   sink by name (see section 7) -- it doesn't enumerate discoverable
+   devices the way a phone's Bluetooth settings does, so there's no real
+   "list of paired/available devices" to show. The screen instead shows a
+   single row for the configured target device with its real connection
+   status (Off / Connecting... / Connected), plus a Turn Bluetooth Off
+   row. Firmware: `src/bt/BluetoothSource.h`'s `kTargetDeviceName`,
+   wired into the UI via `MenuEngine::enterBluetooth()`.
+   **AMENDED AGAIN (correction, not a new decision)**: the "doesn't
+   enumerate discoverable devices" premise above was wrong -- actually
+   cloned and read the real `ESP32-A2DP` source
+   (`BluetoothA2DPSource.h`) and confirmed it genuinely supports
+   discovery: `start()` with no name begins scanning,
+   `set_ssid_callback()` fires per discovered device,
+   `is_discovery_active()`/`cancel_discovery()` control the scan. The
+   capability was there all along in the dependency already in
+   `lib_deps`; this was never actually verified against the real source
+   when the original amendment above was written. A real device-picker
+   screen (back to the original, un-amended intent of this section --
+   "list of paired/available devices") is planned, not yet built -- see
+   CLAUDE.md's "Real Bluetooth toggle" section for the implementation
+   notes (callback runs on the BT stack's own context, needs the same
+   stash-for-main-loop pattern as the encoder ISR; worth remembering the
+   last-picked device for auto-reconnect on power-on, generalizing the
+   current hardcoded-target auto-resume). Until that's built, the
+   single-row behavior described above is still what's actually
+   flashed.
 9. **Settings menu** — general device settings (exact contents TBD/flexible,
    at minimum should include something like Bluetooth management, maybe
    display brightness, sort preferences)

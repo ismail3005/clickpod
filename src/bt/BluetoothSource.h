@@ -1,0 +1,159 @@
+#pragma once
+
+#include <Arduino.h>
+
+// Bring-up step 5 -> now wired into the real UI's Bluetooth screen
+// (src/ui/MenuEngine.cpp's enterBluetooth()/exitBluetooth()) instead of
+// being an isolated test-only path. Still streams a 440Hz test tone, NOT
+// real FLAC playback -- routing ESP32-audioI2S's decoded PCM into the A2DP
+// source's callback instead of out to the I2S DAC is a separate, bigger
+// piece of work (a real dual-output audio pipeline), not done here. This
+// only makes the UI's on/off + connection status REAL instead of a mock
+// device list -- see docs/SPEC.md section 7 for the wired/BT output
+// split this still respects.
+namespace BluetoothSource {
+
+// In A2DP SOURCE mode this is the name of the target SINK device to scan
+// for and auto-connect to (e.g. your headphones/speaker) -- NOT the
+// ESP32's own advertised name. Source actively seeks out a known sink by
+// name, the reverse of how a peripheral you'd pair to from a phone's
+// Bluetooth settings works. Used as the fallback target when no device
+// has ever been picked from the real device-picker screen (see below) --
+// once the user picks one, Persist remembers it and this default is no
+// longer used on that board.
+constexpr const char *kTargetDeviceName = "ULT WEAR";
+
+// targetDeviceName is the name of the SINK device to scan for and connect
+// to (your headphones/speaker's actual BT name) -- source mode actively
+// seeks out a known target, it doesn't advertise itself to be paired with.
+//
+// allowAutoReconnect (default true): ESP32-A2DP has real NVS-backed
+// bonding already built in (set_last_connection()/get_last_connection(),
+// confirmed by reading the real library source) -- with it enabled, a
+// connect to a device that's already bonded skips the name-based
+// discovery scan entirely and reconnects straight to the stored address,
+// which is also why it doesn't need the device back in pairing/
+// discoverable mode (that's only required to be FOUND during a scan, not
+// to accept a direct reconnect from an already-bonded peer). Previously
+// never enabled, which is why every reconnect -- even to a device that
+// had connected successfully several times before -- still required
+// pairing mode again. Pass false specifically when the user is
+// explicitly picking a device from the real picker screen (see
+// connectToDiscovered() below): that path needs a genuine scan by name,
+// not a silent reconnect to whatever was bonded before, since the user
+// may be choosing a DIFFERENT device than the last one.
+void begin(const char *targetDeviceName, bool allowAutoReconnect = true);
+
+// Stops the A2DP source and disconnects. Safe to call even if never
+// begun/already stopped.
+void end();
+
+bool isConnected();
+bool isRunning(); // true once begin() has been called and not yet end()'d
+
+// The name last passed to begin() (whatever's currently being sought/
+// connected), or "" if never begun this session. Used by main.cpp's
+// syncBluetoothToUi() to show the real connected name instead of always
+// assuming kTargetDeviceName, now that the target can be a user-picked
+// device.
+const char *currentTargetName();
+
+// --- Device discovery (picker screen) ---
+//
+// ESP32-A2DP's source mode genuinely supports discovery: start() with no
+// name begins a scan instead of connecting to a fixed target, and
+// set_ssid_callback() fires once per compatible device found during that
+// scan, on the BT stack's OWN task context -- not the main loop, so it
+// can't touch UI/MenuEngine state directly (same constraint AnoInput's
+// encoder ISR has). startDiscovery() installs a callback that just
+// stashes each newly-seen device's name into a small fixed-size array
+// (never allocates from that callback context) for the main loop to
+// drain via discoveredCount()/discoveredName() -- MenuEngine builds the
+// picker screen's rows from those, polling for new arrivals while the
+// screen is open (see UI.cpp).
+void startDiscovery();
+void cancelDiscovery();
+bool isDiscoveryActive();
+int discoveredCount();
+const char *discoveredName(int index);
+
+// Stops discovery and connects to exactly this (already-discovered)
+// device name, reusing begin()'s existing heap-guard/RadioLock path --
+// equivalent to begin(name), just named for the picker call site's
+// clarity.
+void connectToDiscovered(const char *name);
+
+// Real audio output -- replaces the old 440Hz test tone. Called from
+// AudioBridge.cpp's audio_process_i2s() (a weak-symbol hook
+// ESP32-audioI2S itself exposes, literally commented "record audiodata
+// or send via BT" in its own header) with every decoded PCM buffer,
+// already 44.1kHz 16-bit stereo interleaved -- exactly what A2DP wants,
+// no conversion needed. Buffers into a small ring the A2DP data callback
+// (running on the BT stack's own task, not the caller's) drains from;
+// thread-safe via an internal mutex since producer and consumer run on
+// different tasks. Safe to call even when not connected (no-ops).
+void feedPcm(const uint8_t *data, size_t len);
+
+// Call once per main loop() iteration while BT is on. Two distinct
+// behaviors, both application-level (the library exposes no equivalent
+// knob for either):
+//   1. A real disconnect AFTER a real connection (headphones powered
+//      off, walked out of range, ...) -- turns Bluetooth off
+//      IMMEDIATELY, not auto-searching for that device again. This is
+//      also the fix for a real crash: calling end() while the
+//      library's own reconnect heartbeat has an esp_a2d_connect() in
+//      flight is unsafe (confirmed from source -- end() only waits out
+//      an in-flight discovery scan, not a connect attempt), and
+//      begin() now pins the library's own retry count to 0 specifically
+//      so a disconnect's first heartbeat tick can never reach that
+//      unsafe in-flight-connect state before this catches it.
+//   2. Still trying to land the FIRST connection of this begin()
+//      session (device simply wasn't in range/on yet) -- a real,
+//      bounded (kGiveUpMs) grace period before giving up, since that's
+//      an ordinary case, not a disconnect.
+// No-op when not running.
+void tick();
+
+// --- AVRCP absolute volume (real sync with the connected device) ---
+//
+// BluetoothA2DPSource::set_volume(0-127) does two real things at once
+// (confirmed from the real library source, BluetoothA2DPCommon.h): it
+// attenuates the audio WE send (via its own internal volume_control(),
+// applied on top of whatever providePcm() returns) AND sends an AVRCP
+// "set absolute volume" command so the connected device's own volume
+// readout/state updates to match. Separately, the library ALREADY
+// handles the other direction automatically and internally: when the
+// connected device reports its OWN volume changed (e.g. its hardware
+// buttons were pressed), BluetoothA2DPSource::bt_av_notify_evt_handler()
+// calls its own set_volume() with the reported value -- nothing we need
+// to wire up for that half, it happens regardless of whether app code
+// ever calls setVolume() itself. What the library does NOT expose is a
+// callback for US to learn that happened -- getVolume() is for polling
+// that (see BluetoothSource::tick()'s call site in main.cpp) so the
+// on-screen UI can mirror a headphone-side volume change instead of
+// silently drifting out of sync with it, which is the exact bug this
+// was built to fix ("two volume controls that don't agree").
+void setVolume(uint8_t volume0to127);
+uint8_t getVolume(); // last known value, ours or the remote's
+
+// --- Transport controls from the connected device's own buttons ---
+//
+// Real, public ESP32-A2DP API (BluetoothA2DPSource::
+// set_avrc_passthru_command_callback(), confirmed from the real library
+// source): fires on every AVRCP passthrough command the connected
+// device sends (the same protocol/role already confirmed above for
+// volume, just a different event type) -- this is the standard way a
+// headset/headphones' own play/pause/skip buttons reach a SOURCE
+// device, the same mechanism a phone receives them through. Runs on the
+// BT stack's own task context, same constraint as every other BT
+// callback in this file (ssidCallback, providePcm) -- can't touch
+// MenuEngine/state directly from it. Stashes the latest command into a
+// single volatile slot instead (last-command-wins -- acceptable since
+// these are human-paced, one-at-a-time button presses, not a stream
+// that needs preserving, same reasoning already accepted for the
+// encoder delta accumulator); drainTransportCommand() is what the main
+// loop calls once per tick to pick it up and act on it.
+enum class TransportCmd : uint8_t { None, Play, Pause, Next, Previous };
+TransportCmd drainTransportCommand(); // returns and clears the pending command
+
+} // namespace BluetoothSource

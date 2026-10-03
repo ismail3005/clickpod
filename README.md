@@ -13,18 +13,141 @@ mapping, and UI behavior; this README just tracks build status.
 
 Following the bring-up order from spec section 4:
 
-- [x] 1. ESP32 + PSRAM verification
-- [x] 2. ESP32 + SD card file listing over serial
-- [ ] 3. ESP32 + PCM5102A playback via `ESP32-audioI2S` (highest-risk step —
-      isolate before adding anything else)
-- [ ] 4. ILI9341 display alongside SD on shared SPI bus
-- [ ] 5. ESP32-A2DP Bluetooth output as a separate playback path
-- [ ] 6. ANO encoder + buttons
-- [ ] 7. MAX17048 battery monitoring
+- [x] 1. ESP32 + PSRAM verification — hardware-confirmed (4194304 bytes)
+- [x] 2. ESP32 + SD card init — hardware-confirmed on the rebuilt board,
+      real pin assignment (18/19/23/15). Card **must be formatted FAT32**,
+      not exFAT/NTFS — large SanDisk cards ship exFAT by default, which the
+      Arduino `SD` library can't mount. Windows' built-in formatter caps
+      FAT32 at 32GB; use Rufus (or similar) to force FAT32 on larger cards.
+      **Hardware note:** the SD breakout module in use had appeared low
+      quality/intermittently unreliable during earlier debugging (CRC
+      errors, failed mount handshakes) independent of wiring/pins -- turned
+      out fine on the rebuild. Keep an eye on it; swap the module if
+      flakiness reappears.
+- [x] 3. ESP32 + PCM5102A playback via `ESP32-audioI2S` (highest-risk step)
+      — hardware-confirmed on the rebuilt board, real audio out of the DAC.
+      `ESP32-audioI2S` is pinned to `3.0.12` (default branch needs C++20
+      `std::span`, not available on this platform's GCC 8.4 toolchain).
+- [x] 4. ILI9341 display alongside SD on shared SPI bus — hardware-confirmed
+      on the rebuilt board. `TFT_eSPI` config is set via `platformio.ini`
+      build flags rather than editing the library's `User_Setup.h`.
+- [x] 5. ESP32-A2DP Bluetooth output, tested in isolation — hardware-confirmed,
+      connected to a real BT headset and played the 440Hz test tone. No
+      wiring needed, pure software/pairing. **A2DP source mode scans for
+      and auto-connects to a named target SINK device -- it does not
+      advertise itself to be paired with the other way around**; that was
+      a real gotcha during bring-up (the device name passed to `start()`
+      is the target to find, not the ESP32's own name). Per spec section
+      7, wired and BT are mutually exclusive outputs; `kTestWiredPlayback`
+      in `main.cpp` picks which one a given build exercises (currently
+      `true` / wired, the default). **Hardware note:** classic BT
+      overflowed the default partition scheme's app slot (build came in at
+      1.72MB vs. ~1.25MB available) -- switched `board_build.partitions`
+      to `huge_app.csv` (~3MB single app partition, no OTA) to fix it.
+- [x] 6. ANO encoder + buttons — hardware-confirmed on the rebuilt board.
+      Encoder rotation, all 5 buttons, and the tap/double-tap/long-press
+      state machine for CENTER (spec 5.3) all correct. Board has no
+      onboard pull-ups, so all 7 signal lines (encoder A/B + 5 buttons)
+      need external 10k pull-ups to 3.3V. Button-to-GPIO mapping is
+      hardware-order-dependent (not fixed by the board's SWn silkscreen
+      labels) -- confirm/refix in `Pins.h` after any rewiring.
+- [ ] 7. MAX17048 battery monitoring — wiring fully done (spec section
+      3.1: battery, TP4056+boost's `OUT+`/`OUT-` correctly on the ESP32's
+      5V pin -- an earlier miswiring to the 3.3V rail has been fixed --
+      and the MAX17048's I2C header all connected) and firmware
+      implemented and flashed (`src/power/Battery.*`, polls cell % every
+      2s over I2C, SDA=GPIO21/SCL=GPIO27, wired into the UI's status bar
+      via `main.cpp`'s `syncBatteryToUi()`). Checkbox stays unchecked
+      until an actual on-screen reading has been confirmed sane, but the
+      hardware side is done.
 
 Open technical risk to validate early (spec section 10): how deep
 `ESP32-audioI2S`'s FLAC metadata support goes (Vorbis comments, PICTURE
 block, STREAMINFO) vs. needing manual FLAC metadata-block parsing.
+
+## UI/UX
+
+The real UI layer (menus, Now Playing, Lyrics, Queue, Bluetooth screen,
+Settings, track context menu, dark mode -- spec section 6) is implemented
+in `src/ui/`, ported directly from an interactive browser simulator used
+to iterate on the UX before committing it to firmware. It's wired into
+`main.cpp` and drives the real TFT + ANO input.
+
+**Library data** (`src/ui/Library.*`) is no longer just a hand-written
+mock set, and no longer holds the whole card's contents in RAM for the
+whole session either. `Library::ensureIndex()` builds a compact index
+file on the SD card itself (`/clickpod.idx`) the first time it doesn't
+already exist -- each top-level folder becomes an Artist (subfolders are
+Albums, files are Tracks), except folder names recognized as playlist
+folders (currently just `funky times`, see `isPlaylistFolderName()` in
+`Library.cpp`), whose Artist/Album/track tree becomes one named Playlist
+instead of separate Music entries. Every boot after the first just reads
+that index file back (fast) instead of re-walking the SD card (slow) --
+a manual "Rescan library" row in Settings forces a rebuild if the card's
+contents change. Menus read from the index lazily and boundedly: only
+the one album or playlist actually being opened gets materialized into
+memory, not the whole library, freed again once you navigate away -- see
+CLAUDE.md's "on-SD compact index" section for the full design. Selecting
+a track plays that exact file (`src/audio/AudioBridge.*`), not just
+"whatever's first on the card." Track titles start out from filenames,
+but real per-track metadata -- exact duration, real artist/title/album
+tags, embedded lyrics, and embedded cover art -- is read directly from
+each FLAC file's metadata blocks (`src/audio/FlacMeta.*`, a hand-written
+parser against the open FLAC spec) the moment a track becomes Now
+Playing. Album art is decoded via `src/ui/AlbumArt.*` (JPEG only). The
+mock placeholder set is kept as a fallback for bench-testing with no SD
+card inserted, or a card the index build finds nothing playable on.
+
+**Bluetooth** is also no longer a placeholder. The Bluetooth screen is a
+real on/off toggle wired to `src/bt/BluetoothSource.*`
+(`MenuEngine::enterBluetooth()`), showing the real connection status
+(Off / Connecting... / Connected) synced from the actual A2DP link each
+loop iteration (`main.cpp`'s `syncBluetoothToUi()`). It's a single row
+for one configured target device (`BluetoothSource::kTargetDeviceName`),
+not a multi-device picker -- the underlying `ESP32-A2DP` source library
+connects to one named sink, it doesn't enumerate discoverable devices
+the way a phone's Bluetooth settings does (see spec section 8's
+amendment). Turning it on still only streams a 440Hz test tone, not real
+decoded audio -- routing `ESP32-audioI2S`'s output into the A2DP source
+instead of the I2S DAC is separate, not-yet-done work.
+
+Battery % (`state.battery`) is also no longer a placeholder -- see step 7
+above, now synced from the real MAX17048 each loop iteration.
+
+The statusbar clock is real too, without any RTC hardware -- see
+`src/net/TimeSync.*`. There's no RTC chip in the BOM, so instead of
+faking elapsed-boot-time as if it were wall clock, it grabs real time
+"for free": scans for an open (no-password) WiFi network nearby, joins
+briefly, fetches NTP time, then disconnects and keeps time locally via
+`millis()` afterward, re-syncing every 6h. Entirely on a background task
+so it never blocks boot. If no open network is ever in range, the clock
+just stays at "--:--" -- an inherent limit of "no configuration needed",
+not a bug. Settings gained a "Time zone" row (UTC offset, whole hours
+only) since NTP gives UTC with no way to auto-detect the user's zone.
+
+Scrubbing and the progress bar now reflect real audio decoder state
+(`AudioBridge::seekTo()`/`currentTimeSec()`, checked against
+`ESP32-audioI2S`'s actual header -- not guessed) instead of a purely
+simulated position that had no real relationship to what was playing.
+Lyrics lines are spread evenly across the track's real duration so the
+highlight actually advances over the song (embedded FLAC lyrics tags
+have no real per-line timestamps to sync to -- this is an approximation,
+not frame-accurate sync). Settings (brightness, dark mode, sort
+preference, time zone) and whether Bluetooth was left on now persist
+across reboots via the ESP32's NVS flash (`src/state/Persist.*`).
+
+This has been flashed and run on real hardware through several rounds of
+fixes -- see `CLAUDE.md`'s gotcha list for what's been found/fixed so
+far. Most recently: a real Bluetooth-start crash turned out to be heap
+exhaustion (not the WiFi/BT radio-timing race first suspected), and
+because Bluetooth-on state persists across reboots, it was silently
+bricking the device into an infinite reboot loop before it could ever
+reach a playable, interactive state -- fixed with a boot-crash guard
+(`src/state/Persist.*`) that refuses to repeat an auto-resume that never
+confirmed it finished, plus a best-effort (not fully confirmed) mitigation
+for the crash itself. Separately, unrelated: a FLAC decode failure on at
+least one file that's an internal limitation of the pinned
+`ESP32-audioI2S` version, not something fixable from this codebase.
 
 ## Build
 
@@ -41,13 +164,28 @@ Board: ESP32-WROVER-B (N4), 4MB flash / 4MB PSRAM.
 ## Layout
 
 ```
-platformio.ini      PlatformIO project + dependency config
-src/main.cpp         entry point; currently implements bring-up steps 1-2
-src/config/Pins.h    pin assignments (placeholders — confirm against wiring)
-src/state/AppState.h UI mode enum (MENU, NOW_PLAYING, BT_PAIRING, ...)
-docs/SPEC.md         full project specification
+platformio.ini        PlatformIO project + dependency config
+src/main.cpp            entry point; bring-up steps 1-7 + wires up the UI layer
+src/config/Pins.h       pin assignments, cross-checked against the WROVER-B datasheet
+src/state/AppState.h    full app state (mode, menu stack, now playing, queue, settings)
+src/input/AnoInput.*    ANO encoder + button input logic (step 6)
+src/bt/BluetoothSource.* real on/off Bluetooth toggle (test tone only, not real audio yet)
+src/power/Battery.*     MAX17048 fuel gauge polling over I2C (step 7)
+src/net/TimeSync.*      WiFi NTP clock (no RTC hardware) -- background task
+src/net/RadioLock.h     mutex between TimeSync (WiFi) and BluetoothSource (BT radio)
+src/state/Persist.*     NVS-backed settings + Bluetooth-on persistence
+src/audio/AudioBridge.* bridges UI playback intent to real ESP32-audioI2S output
+src/audio/FlacMeta.*    FLAC metadata parser: duration, tags, lyrics, embedded art
+src/ui/UiTypes.h        shared data shapes (Track, Menu, MenuItem, ...)
+src/ui/Library.*        on-SD compact index (Library::ensureIndex(), /clickpod.idx),
+                         read lazily/boundedly per screen, mock fallback
+src/ui/MenuEngine.*     menu-stack construction + navigation (ported from the simulator)
+src/ui/InputRouter.*    ANO events -> state transitions (ported from the simulator)
+src/ui/AlbumArt.*       decodes embedded FLAC cover art for Now Playing
+src/ui/Screens.*        TFT_eSPI rendering for every screen
+src/ui/UI.*             top-level glue: boot sequence, playback clock, redraw dispatch
+docs/SPEC.md            full project specification
 ```
 
-Subsystem modules (audio/, ui/, input/, bt/, power/, storage/) get added as
-each bring-up step above is tackled, per the spec's stated order — don't
-build multiple subsystems simultaneously.
+All 7 bring-up steps are now implemented in firmware; step 7 (power) is
+the only one not yet flashed/hardware-confirmed.
