@@ -94,6 +94,22 @@ struct AppState {
     // of the hardcoded BluetoothSource::kTargetDeviceName default. Empty
     // means "never picked one" -- falls back to that default.
     String btDeviceName;
+    // Small, bounded most-recent-first list of device NAMES ever picked
+    // from the device picker or the Bluetooth status row -- a real
+    // "Recent devices" convenience list, persisted (see Persist.*).
+    // Capped at kMaxKnownBtDevices in MenuEngine.cpp.
+    //
+    // Honest limitation this does NOT remove, confirmed from reading the
+    // real ESP32-A2DP library source (see CLAUDE.md): classic A2DP bonds
+    // to exactly ONE peer address at a time -- there's no OS-level
+    // multi-device bonding table the way a phone has. Picking a NAME from
+    // this list that isn't the device currently bonded still means a
+    // real discovery scan + that device back in pairing mode (same as
+    // the picker always required) -- this list only saves you from
+    // forgetting/re-scanning for the NAME, it can't make an old device
+    // reconnect silently the way the single most-recently-connected one
+    // does.
+    std::vector<String> btKnownDevices;
 
     int brightness = 70;
     String sortPref = "Artist";

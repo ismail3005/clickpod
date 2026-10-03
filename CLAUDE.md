@@ -4337,6 +4337,59 @@ check (a) whether the panel now shows black/blank instead of white
 boot afterward -- the GPIO-hold release needs to not interfere with
 normal display init.
 
+## Fifty-first real hardware bug/decision (found, fixed, not yet hardware-confirmed): pairing a new device made the previously-paired one disappear -- a real single-slot limitation, now a persisted "Recent devices" list
+
+User reported: pairing a new device makes the previously-paired one
+disappear from the Bluetooth screen. Confirmed from code, not guessed:
+`state.btDeviceName` was a single `String` -- the whole "paired device"
+concept was one slot, unconditionally overwritten by
+`chooseBluetoothDevice()`/the status row's connect action every time a
+device was picked. There was never a list to begin with, so "disappeared
+from the list" was literally correct -- picking device B always meant
+forgetting device A's name entirely, by design (see the now-superseded
+comment this replaced in `Persist.cpp`/the "Settings + Bluetooth-on
+persistence" section above, which explicitly said "only ever one
+configured target device... no per-device list to persist yet").
+
+**Added a real, persisted "Recent devices" list** -- `state.btKnownDevices`
+(`AppState.h`, new `std::vector<String>`), a most-recently-used-first,
+deduped, capped-at-5 list of device NAMES, persisted via `Persist.*` as
+one newline-joined NVS string (`Preferences` has no native array type).
+`MenuEngine.cpp`'s new `rememberBtDevice()` maintains it (move-to-front +
+cap + save), called from both places a device gets connected to: the
+Bluetooth screen's per-device row action, and `chooseBluetoothDevice()`
+(the real device-picker's selection callback). `enterBluetooth()` now
+builds one row PER remembered device (falling back to the single
+hardcoded `kTargetDeviceName` default only if the list is still empty --
+a fresh board that's never connected to anything), instead of the old
+single current-target row -- so a previously-used device's NAME stays
+visible and tappable after a different one gets picked, rather than
+being silently forgotten.
+
+**Honest limitation, confirmed from the real library source (see the
+twentieth/twenty-first-bug writeups above), NOT removed by this fix**:
+classic Bluetooth A2DP -- and this specific library -- bonds to exactly
+ONE peer address at a time; there is no OS-level multi-device bonding
+table the way a phone has. Only whichever device is the CURRENT
+single bonded address (the twenty-first bug's NVS shadow,
+`"cpod_bt"`/`"last_bda"`) can silently reconnect without pairing mode.
+Tapping an older row from this new list still means a real discovery
+scan + that device back in pairing mode -- exactly like "Choose
+device..." already required, same real protocol-level constraint, just
+now with the name remembered instead of needing a rescan to find it
+again. This list is a naming convenience, not a fix for "freely switch
+between two paired devices with zero repairing" -- that would need a
+genuinely different Bluetooth stack/profile, not something reachable
+from this library. Said plainly to the user rather than oversold as
+"full paired-device memory."
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: flash, connect to device A, connect to device B, open the
+Bluetooth screen and confirm BOTH rows are now present (A showing "Tap
+to reconnect", B showing its live status) instead of A having vanished;
+separately confirm tapping A does attempt a real connect (scan +
+pairing mode needed, as expected) rather than silently failing.
+
 ## Working style this project has used (carry forward)
 
 - User is terse and direct; they'll correct behavior that doesn't match

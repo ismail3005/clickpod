@@ -19,12 +19,26 @@ void load() {
     state.sortPref = prefs.getString("sortPref", state.sortPref).c_str();
     state.utcOffsetHours = prefs.getInt("utcOffset", state.utcOffsetHours);
     // Whether Bluetooth was left on -- main.cpp resumes it at boot if so.
-    // There's only ever one configured target device right now
-    // (BluetoothSource::kTargetDeviceName), so there's no per-device
-    // "paired devices" list to persist yet -- if/when the UI supports
-    // choosing a different target device, that name belongs here too.
+    // btDeviceName is the single currently-active target (whatever
+    // actually gets auto-resumed/reconnected to); btKnownDevices below is
+    // the separate bounded "recent devices" convenience list -- see
+    // AppState.h's big comment on it for why these are different things.
     state.btOn = prefs.getBool("btOn", false);
     state.btDeviceName = prefs.getString("btDeviceName", "").c_str();
+    // Recent-devices list: stored as one newline-joined string (NVS/
+    // Preferences has no native array type), split back out here. Empty
+    // string -> empty list, same as a fresh/never-saved device.
+    {
+        String joined = prefs.getString("btKnown", "").c_str();
+        state.btKnownDevices.clear();
+        int start = 0;
+        while (start < (int)joined.length()) {
+            int nl = joined.indexOf('\n', start);
+            if (nl < 0) nl = joined.length();
+            if (nl > start) state.btKnownDevices.push_back(joined.substring(start, nl));
+            start = nl + 1;
+        }
+    }
     bool btPending = prefs.getBool("btPending", false);
     bool timeSyncPending = prefs.getBool("tsPending", false);
     prefs.end();
@@ -78,6 +92,14 @@ void save() {
     prefs.putInt("utcOffset", state.utcOffsetHours);
     prefs.putBool("btOn", state.btOn);
     prefs.putString("btDeviceName", state.btDeviceName.c_str());
+    {
+        String joined;
+        for (size_t i = 0; i < state.btKnownDevices.size(); i++) {
+            if (i) joined += '\n';
+            joined += state.btKnownDevices[i];
+        }
+        prefs.putString("btKnown", joined.c_str());
+    }
     prefs.end();
 }
 

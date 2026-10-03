@@ -950,6 +950,26 @@ int activeLyricIndex(const std::vector<LyricLine> &lines) {
     return activeIdx;
 }
 
+constexpr size_t kMaxKnownBtDevices = 5;
+
+// Moves (or inserts) name to the front of state.btKnownDevices -- MRU
+// order, deduped, capped at kMaxKnownBtDevices -- and persists it. See
+// AppState.h's big comment on what this list can and can't do (it's a
+// name-memory convenience, not a multi-device bonding table -- classic
+// A2DP only ever bonds to one peer address at a time).
+void rememberBtDevice(const String &name) {
+    auto &list = state.btKnownDevices;
+    for (size_t i = 0; i < list.size(); i++) {
+        if (list[i] == name) {
+            list.erase(list.begin() + i);
+            break;
+        }
+    }
+    list.insert(list.begin(), name);
+    if (list.size() > kMaxKnownBtDevices) list.resize(kMaxKnownBtDevices);
+    Persist::save();
+}
+
 void enterBluetooth() {
     // Bluetooth is reachable globally (long-press RIGHT from any mode), so
     // it needs its own way back to wherever the user actually was --
@@ -961,35 +981,58 @@ void enterBluetooth() {
     }
     state.mode = AppMode::BT;
 
-    // Real device picker now exists (see enterBluetoothDevicePicker()
-    // below) -- ESP32-A2DP's source mode genuinely supports discovery,
-    // this screen just used to assume otherwise. This row still shows ONE
-    // target -- whatever was last picked (state.btDeviceName), or the
-    // hardcoded default if nothing's been picked yet -- plus a row to go
-    // pick a different one.
-    String targetName = state.btDeviceName.length() > 0 ? state.btDeviceName
-                                                          : String(BluetoothSource::kTargetDeviceName);
-    std::vector<MenuItem> items(3);
-    items[0].label = targetName;
-    items[0].icon = "bt";
-    items[0].subFn = btStatusLabel;
-    items[0].action = [targetName]() {
-        if (!state.btOn) {
-            BluetoothSource::begin(targetName.c_str());
-            state.btOn = true; // optimistic; syncBluetoothToUi() corrects this next loop if begin() actually declined
-            Persist::save();
-            Serial.println(F("[ui] Bluetooth on, connecting..."));
-            state.dirty = true;
+    // Real fix for "pairing a new device makes the previous one
+    // disappear": that used to be exactly true -- state.btDeviceName was
+    // a single slot, overwritten every time. Now shows one row PER
+    // remembered device (state.btKnownDevices, most-recently-used
+    // first), not just the single current target. Still only ONE of
+    // these can silently reconnect without pairing mode at any given
+    // time -- whichever is the actual currently-bonded address, classic
+    // A2DP's own single-peer-bonding model (confirmed from the real
+    // ESP32-A2DP source, see CLAUDE.md) -- tapping an older row still
+    // means a fresh scan + that device back in pairing mode, exactly
+    // like "Choose device..." always required. This list just remembers
+    // the NAMES so you don't have to rescan to find them again.
+    std::vector<String> names = state.btKnownDevices;
+    if (names.empty()) {
+        // Nothing ever picked/connected on this board yet -- fall back
+        // to the one hardcoded default, same as before this list existed.
+        names.push_back(String(BluetoothSource::kTargetDeviceName));
+    }
+
+    std::vector<MenuItem> items(names.size() + 2);
+    for (size_t i = 0; i < names.size(); i++) {
+        String name = names[i];
+        bool isActiveTarget = state.btDeviceName.length()
+                                   ? (name == state.btDeviceName)
+                                   : (i == 0);
+        items[i].label = name;
+        items[i].icon = "bt";
+        if (isActiveTarget) {
+            items[i].subFn = btStatusLabel; // live status, see its own comment
+        } else {
+            items[i].sub = "Tap to reconnect";
         }
-    };
+        items[i].action = [name]() {
+            if (!state.btOn) {
+                BluetoothSource::begin(name.c_str());
+                state.btDeviceName = name;
+                state.btOn = true; // optimistic; syncBluetoothToUi() corrects this next loop if begin() actually declined
+                rememberBtDevice(name); // also calls Persist::save()
+                Serial.printf("[ui] Bluetooth on, connecting to \"%s\"...\n", name.c_str());
+                state.dirty = true;
+            }
+        };
+    }
 
-    items[1].label = "Choose device...";
-    items[1].icon = "bt";
-    items[1].action = []() { enterBluetoothDevicePicker(); };
+    size_t chooseIdx = names.size();
+    items[chooseIdx].label = "Choose device...";
+    items[chooseIdx].icon = "bt";
+    items[chooseIdx].action = []() { enterBluetoothDevicePicker(); };
 
-    items[2].label = "Turn Bluetooth Off";
-    items[2].icon = "bt";
-    items[2].action = []() {
+    items[chooseIdx + 1].label = "Turn Bluetooth Off";
+    items[chooseIdx + 1].icon = "bt";
+    items[chooseIdx + 1].action = []() {
         // Real teardown latency reported ("froze for a good second") --
         // BluetoothSource::end()'s own disconnect/AVRC-deinit work is a
         // real, blocking cost, not a bug to fix away; same reasoning as
@@ -1065,9 +1108,9 @@ void chooseBluetoothDevice(const String &name) {
     BluetoothSource::connectToDiscovered(name.c_str());
     state.btDeviceName = name;
     state.btOn = true; // optimistic, same as the status row's own action -- syncBluetoothToUi() corrects it next loop if it declined
-    Persist::save();
+    rememberBtDevice(name); // also calls Persist::save() -- see its own comment
     Serial.printf("[ui] picked Bluetooth device \"%s\", connecting...\n", name.c_str());
-    enterBluetooth(); // rebuild the status screen (now showing the newly-picked target) and pop back to it
+    enterBluetooth(); // rebuild the screen (now showing this device too) and pop back to it
 }
 
 // Track context menu ("..." menu on a song: Play Next / Add to Queue / Add
