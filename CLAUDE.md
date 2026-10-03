@@ -4275,11 +4275,7 @@ action the way Power Off or a playlist delete is). Zero hardware
 dependency, unlike Power Off -- `ESP.restart()` is a real, standard
 Arduino-ESP32 core call.
 
-**Not yet hardware-confirmed** (the Restart row specifically -- Power
-Off itself is now confirmed per above). Next real step: flash, open
-Settings -> Restart, confirm it shows the busy message then reboots
-clean (splash screen, library index reused, no re-scan) same as a
-physical reset would.
+**UPDATE, confirmed on real hardware.** Restart works as designed.
 
 **Status as of this entry: user has declared the firmware feature set
 done** -- "time to make it into a usable device," further sessions
@@ -4331,11 +4327,12 @@ hardware. Real zero-light-output needs the parked backlight-GPIO
 rewiring (see the dedicated AOD/backlight section) -- flagging this
 honestly rather than claiming this fix makes Power Off look fully dark.
 
-**Not yet hardware-confirmed**. Next real step: flash, Power Off, and
-check (a) whether the panel now shows black/blank instead of white
-(even if dimly backlit) and (b) that CENTER still wakes it with a clean
-boot afterward -- the GPIO-hold release needs to not interfere with
-normal display init.
+**UPDATE, superseded and confirmed.** The "known, unavoidable residual"
+above (backlight stays lit regardless) is no longer true -- see the
+real backlight-control section further down this file: GPIO4 now
+actually drives the backlight, and Power Off drives it to 0% and holds
+it there through sleep. Confirmed on real hardware: Power Off now
+looks genuinely dark, not lit-white.
 
 ## Fifty-first real hardware bug/decision (found, fixed, not yet hardware-confirmed): pairing a new device made the previously-paired one disappear -- a real single-slot limitation, now a persisted "Recent devices" list
 
@@ -4383,12 +4380,9 @@ genuinely different Bluetooth stack/profile, not something reachable
 from this library. Said plainly to the user rather than oversold as
 "full paired-device memory."
 
-**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
-real step: flash, connect to device A, connect to device B, open the
-Bluetooth screen and confirm BOTH rows are now present (A showing "Tap
-to reconnect", B showing its live status) instead of A having vanished;
-separately confirm tapping A does attempt a real connect (scan +
-pairing mode needed, as expected) rather than silently failing.
+**UPDATE, confirmed on real hardware.** User tested the extended
+Bluetooth screen -- recent-devices list works as designed, both
+devices stay listed instead of the previous single-slot overwrite.
 
 ## Real backlight control shipped: TFT_RST moved to GPIO12, GPIO4 now drives the backlight
 
@@ -4461,12 +4455,16 @@ trusting an untested "0% PWM duty + hold" combination -- same
 discipline as everywhere else in this file that flags an unverified
 library/API interaction instead of presenting a guess as confirmed.
 
-**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
-real step: wire RST to GPIO12 and BL to GPIO4 for real (per the above),
-flash, and confirm (a) the Settings brightness slider now visibly dims
-the screen, (b) CENTER long-press (AOD) dims to a low-but-readable
-level and restores the real brightness on wake, and (c) Power Off now
-looks genuinely dark instead of the fiftieth bug's lit-white screen.
+**UPDATE, confirmed on real hardware -- all three.** User wired RST to
+GPIO12 and BL to GPIO4 for real and flashed: the Settings brightness
+slider genuinely dims the screen, AOD (CENTER long-press) dims to a
+low-but-readable level and restores real brightness on wake, and Power
+Off now looks properly dark instead of the fiftieth bug's lit-white
+screen. The RST-probe-before-wiring discipline (GPIO36 test sketch,
+above) paid off -- no strapping-pin surprise this time, first real
+attempt worked end to end. This closes out the backlight-hardware saga
+("Next session plan" item 7) and the fiftieth hardware bug's residual
+both at once.
 
 ## Working style this project has used (carry forward)
 
