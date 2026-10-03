@@ -180,7 +180,48 @@ constexpr uint8_t kLogoPixels[kLogoH][kLogoW] = {
 // code 1=black, 2=(48,48,48), 3=(70,70,70), 4=(180,180,180), in RGB565.
 constexpr uint16_t kLogoColors[5] = {0x0000, 0x0000, 0x3186, 0x4228, 0xB5B6};
 
+// Dark-mode variant of the same art, user-supplied, decoded the same
+// programmatic way (not traced) from a SEPARATE PNG export -- the user
+// added a 1px white trim ring around the original art so it reads
+// against a dark background without inverting any of the original
+// shades, which grew the grid from 15x12 to 17x14 to fit the ring.
+// Real decoded colors: 1=black(0,0,0), 2=(48,48,48), 3=(84,84,84),
+// 4=(120,120,120), 5=white(255,255,255) (the trim) -- one single-pixel
+// outlier, (161,161,161), folded into its nearest neighboring shade
+// (120,120,120), same anti-aliasing-noise reasoning as the light grid's
+// own two outliers above. kLogoColorsDark maps code->RGB565.
+constexpr uint8_t kLogoWDark = 17, kLogoHDark = 14;
+constexpr uint8_t kLogoPixelsDark[kLogoHDark][kLogoWDark] = {
+    {0,0,0,0,0,0,5,5,5,5,0,0,0,0,0,0,0},
+    {0,0,0,5,5,5,1,1,1,1,5,0,5,5,0,0,0},
+    {0,0,5,1,1,1,3,4,4,3,1,5,1,1,5,0,0},
+    {0,5,1,3,3,4,4,4,4,4,3,1,3,2,1,5,0},
+    {5,1,3,4,4,4,3,1,1,1,2,3,4,3,1,5,0},
+    {5,1,3,3,2,2,1,2,3,2,1,3,3,4,2,1,5},
+    {0,5,1,2,3,4,3,1,1,1,1,2,3,3,3,1,5},
+    {5,1,2,3,2,3,4,4,1,5,5,1,2,3,2,1,5},
+    {0,5,1,2,3,2,2,2,1,5,1,5,1,1,1,5,0},
+    {0,0,5,1,1,2,3,3,1,5,1,1,1,5,5,0,0},
+    {0,0,0,5,5,1,1,1,5,5,1,3,4,1,5,0,0},
+    {0,0,0,0,0,5,5,5,0,5,1,4,3,1,5,0,0},
+    {0,0,0,0,0,0,0,0,0,0,5,1,1,5,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,5,5,0,0,0,0},
+};
+// code 1=black, 2=(48,48,48), 3=(84,84,84), 4=(120,120,120), 5=white, in RGB565.
+constexpr uint16_t kLogoColorsDark[6] = {0x0000, 0x0000, 0x3186, 0x52AA, 0x7BCF, 0xFFFF};
+
 void drawLogo(int16_t x, int16_t y, int16_t cell) {
+    if (state.darkMode) {
+        for (uint8_t ry = 0; ry < kLogoHDark; ry++) {
+            for (uint8_t rx = 0; rx < kLogoWDark; rx++) {
+                uint8_t code = kLogoPixelsDark[ry][rx];
+                if (code) {
+                    tftPtr->fillRect(x + rx * cell, y + ry * cell, cell, cell, kLogoColorsDark[code]);
+                }
+            }
+        }
+        return;
+    }
     for (uint8_t ry = 0; ry < kLogoH; ry++) {
         for (uint8_t rx = 0; rx < kLogoW; rx++) {
             uint8_t code = kLogoPixels[ry][rx];
@@ -196,7 +237,8 @@ void drawBoot() {
     tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
 
     constexpr int16_t kLogoCell = 4;
-    int16_t logoW = kLogoW * kLogoCell, logoH = kLogoH * kLogoCell;
+    int16_t logoW = (state.darkMode ? kLogoWDark : kLogoW) * kLogoCell;
+    int16_t logoH = (state.darkMode ? kLogoHDark : kLogoH) * kLogoCell;
     int16_t logoY = kBodyY + 26;
     drawLogo(kScreenW / 2 - logoW / 2, logoY, kLogoCell);
 

@@ -3880,6 +3880,27 @@ already corrected for guessing once in the same round.
 logo renders as the real Disc 11 art, matching the source PNG exactly
 now that it's pixel-decoded rather than traced.
 
+**Dark-mode variant added, same decode discipline, same caveats.** User
+asked how to make a dark-mode-compatible version without flipping any
+colors; landed on adding a 1px white trim ring around the outermost
+layer (done in pixilart.com, their own editing). Exported as a SEPARATE
+PNG (grid grew from 15x12 to 17x14 to fit the added ring) and decoded
+the same programmatic way -- Pillow read every one of the 238 pixels'
+real RGBA values, not a by-eye read. Decoded shades: black (0,0,0),
+(48,48,48), (84,84,84), (120,120,120), and white (255,255,255) for the
+trim, plus one single-pixel outlier, (161,161,161), folded into its
+nearest neighbor ((120,120,120)) -- same anti-aliasing-noise reasoning
+as the light grid's own outliers. `kLogoPixelsDark`/`kLogoColorsDark` in
+`Screens.cpp` hold this data; `drawLogo()` now branches on
+`state.darkMode` to pick which grid/color table to draw, and
+`drawBoot()`'s layout math uses whichever grid's real width/height
+applies so centering stays correct in both modes.
+
+**Not yet hardware-confirmed**. Next real step: flash, toggle dark mode
+in Settings, and confirm the boot splash logo switches to the
+white-trimmed 17x14 variant and is still centered correctly above
+"clickpod" in both themes.
+
 ## Forty-eighth real hardware bug (found and fixed -- a real regression introduced by the forty-sixth bug's own fix): the FLAC bitreader-underflow fix caused a genuine infinite-loop freeze
 
 Direct fallout from the forty-sixth bug's fix: user scrubbed back on a
