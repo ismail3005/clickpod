@@ -3839,6 +3839,26 @@ stale by the lightweight per-minute clock tick.
 shows under "playing"/"paused", and confirm it updates correctly if the
 track changes while still locked.
 
+## Boot splash gained a logo above the "clickpod" name
+
+User's explicit ask, the last item on the current punch list ("cherry
+on top"): a quick logo above the "clickpod" text on the boot splash.
+`Screens.cpp` gained `drawLogo()` -- a small mini-device silhouette
+(rounded-rect body, a "screen" near the top, a round click-wheel with a
+center button near the bottom) in the same deliberately-simple-
+primitives style every other hand-drawn glyph in this file already uses
+(`drawBtGlyph()`/`drawNoteGlyph()`/etc.) -- plain lines/circles/rounded-
+rects, nothing needing a curve library. Deliberately echoes this
+project's own actual input hardware (an ANO rotary encoder + 5 buttons,
+i.e. a real click wheel) rather than an unrelated mark. `drawBoot()`
+now draws it above the "clickpod" text, which shifted down slightly
+(and "booting..." with it) to make room -- centered the same way the
+text already was.
+
+**Not yet hardware-confirmed**. Next real step: flash and confirm the
+logo renders centered, proportioned sensibly above the text, and isn't
+clipped/misaligned on the real 320x240 panel.
+
 ## Deferred: vaguer "menus were a bit confusing" feedback on playlist creation
 
 Flagged without enough specifics to act on yet. The one CONCRETE bug
