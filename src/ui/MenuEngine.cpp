@@ -516,6 +516,31 @@ void refreshPlaylistListIfPresent() {
     }
 }
 
+// "Delete Playlist" -- LEFT long-press on a row in the Playlists list
+// specifically (see InputRouter.cpp's handleLongPress(), gated on
+// m->title == "Playlists" so this can't fire from the unrelated "Add
+// to Playlist" submenu, which uses the same row icon). A small confirm
+// screen, same shape as any other destructive-action confirm -- no
+// undo, so this isn't a single accidental LEFT-hold away.
+void openPlaylistDeleteConfirm(const String &name) {
+    std::vector<MenuItem> items(2);
+    String n = name;
+    items[0].label = "Delete \"" + name + "\"";
+    items[0].action = [n]() {
+        Library::deletePlaylist(n);
+        Serial.printf("[ui] deleted playlist \"%s\"\n", n.c_str());
+        if (!state.menuStack.empty()) state.menuStack.pop_back(); // leave this confirm screen
+        refreshPlaylistListIfPresent(); // the "Playlists" frame just revealed is now stale too
+        state.dirty = true;
+    };
+    items[1].label = "Cancel";
+    items[1].action = []() {
+        if (!state.menuStack.empty()) state.menuStack.pop_back();
+        state.dirty = true;
+    };
+    pushMenu("Delete Playlist?", std::move(items));
+}
+
 void buildSettings() {
     std::vector<MenuItem> items(8);
     items[0].label = "Bluetooth";

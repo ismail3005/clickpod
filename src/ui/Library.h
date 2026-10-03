@@ -69,6 +69,13 @@ std::vector<Track> indexTracksForPlaylist(const String &name);
 // ephemeral behavior under the new storage model.
 void addToPlaylist(const String &playlistName, const Track &t);
 
+// "Delete Playlist" (Playlists list, LEFT long-press). True, complete
+// removal for a session-created playlist (never had real data
+// elsewhere); for one backed by the real on-SD index, removes it from
+// this session's listing only -- see Library.cpp's big comment on
+// hiddenPlaylists for why a real on-SD removal isn't attempted.
+void deletePlaylist(const String &name);
+
 // Appends one line ("<path> -- <reason>") to /clickpod_failed.txt on SD
 // (creating it if needed) -- a plain-text, human-readable list of every
 // track that failed to play this session (or a previous one; never

@@ -238,11 +238,17 @@ void handleLongPress(AnoButton btn) {
         else if (btn == AnoButton::LEFT && state.mode == AppMode::MENU) {
             // "..." track menu (Play Next / Add to Queue / Add to
             // Playlist) -- only for rows that are actually a track, not
-            // e.g. "Music"/"Settings".
+            // e.g. "Music"/"Settings". On the Playlists list
+            // specifically (title check so this can't fire from the
+            // unrelated "Add to Playlist" submenu, which reuses the same
+            // row icon), LEFT long-press instead opens "Delete Playlist?"
+            // -- user's explicit ask, no rename (needs real text entry,
+            // dropped per the user's own call) but deletion is real.
             Menu *m = MenuEngine::currentMenu();
             if (m && !m->items.empty()) {
                 MenuItem &item = m->items[m->selected];
                 if (item.isTrack) MenuEngine::openTrackMenu(item.trackData);
+                else if (m->title == "Playlists") MenuEngine::openPlaylistDeleteConfirm(item.label);
             }
         }
     } else if (state.mode == AppMode::NOW_PLAYING) {

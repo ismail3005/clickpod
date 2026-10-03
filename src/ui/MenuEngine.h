@@ -27,6 +27,9 @@ void buildPlaylistList();
 // so navigating back to that screen doesn't show stale data. See
 // MenuEngine.cpp's big comment on it.
 void refreshPlaylistListIfPresent();
+// Pushes a small "Delete Playlist? / Cancel" confirm screen for the
+// named playlist -- see MenuEngine.cpp's big comment on it.
+void openPlaylistDeleteConfirm(const String &name);
 void buildSettings();
 
 // AppMode::SET_TIME -- see MenuEngine.cpp's big comment on enterSetTime().

@@ -3456,27 +3456,54 @@ playlist, go straight back to Playlists (no detour through the main
 menu) and confirm it's already there; separately add a track to an
 existing playlist and confirm its track count updates immediately too.
 
-## Deferred: playlist rename/delete, and vaguer "menus were a bit confusing" feedback on playlist creation
+## Fortieth real hardware bug/decision: playlist deletion added (rename explicitly dropped by the user)
 
-User also flagged, not started this round:
+User confirmed rename isn't needed (would need real text entry, which
+they agreed to drop), but explicitly wants deletion. Added:
 
-- **No way to rename or delete a playlist once created** -- only
-  creation (and adding tracks to one) exists. User's own suggestion:
-  reuse the existing drag-and-drop grab mechanism's general pattern for
-  the UI gesture, though rename specifically still needs real text
-  entry (the same no-keyboard constraint `nextNewPlaylistName()`'s auto-
-  naming was built around -- see the "Ooga booga" round's writeup above)
-  and delete needs a real confirmation step (destructive, no undo) and
-  a decision about what happens to the real on-SD index data for a
-  playlist that ALSO exists there (vs. the session-only
-  `extraPlaylistTracks` overlay for brand-new ones) -- not scoped yet.
-- **"Playlist creation menus were a bit confusing"** -- flagged without
-  enough specifics to act on; the one CONCRETE bug inside that
-  complaint (new/updated playlists not showing up without navigating
-  away and back) is fixed above, but if the menu FLOW itself (which
-  screen you land on, what the rows are labeled, etc.) still feels
-  wrong after that, needs more specific description (or the usual
-  simulator-first UX pass) to actually improve rather than guess at.
+`Library.cpp` gained `deletePlaylist(name)` and a new session-only
+`hiddenPlaylists` set. Two genuinely different cases, both presented
+identically to the user (the playlist just disappears either way):
+- **Session-created playlist** (exists only in `extraPlaylistTracks`,
+  from "+ New Playlist" -- never touched SD): `deletePlaylist()` erases
+  its real data outright. True, complete, permanent removal.
+- **Playlist backed by the real on-SD index** (e.g. "funky times"):
+  there's no safe way to strip its records out of `/clickpod.idx`
+  without a full index rebuild -- not attempted, too risky to improvise
+  against a file format other code trusts implicitly. `deletePlaylist()`
+  instead adds the name to `hiddenPlaylists`, which `indexPlaylists()`
+  now filters out -- removed from THIS SESSION's listing only; it
+  reappears after a reboot, same ephemeral-ness as every other session-
+  only overlay already in this file (`addToPlaylist()`'s own overlay
+  included). Not hidden from the user -- flagged honestly here, and
+  worth deciding later whether a REAL on-SD-backed deletion (full index
+  rebuild excluding that playlist's records) is ever wanted.
+
+**UI**: LEFT long-press on a row in the Playlists list (title-checked
+so it can't fire from the unrelated "Add to Playlist" submenu, which
+reuses the same row icon) opens `MenuEngine::openPlaylistDeleteConfirm()`
+-- a small "Delete \"name\"" / "Cancel" confirm screen, same shape as
+any other destructive, no-undo action deserves. Confirming reuses the
+thirty-ninth bug's `refreshPlaylistListIfPresent()` to rebuild the
+revealed Playlists frame in place, same as creating/adding to one.
+
+**Not yet hardware-confirmed**. Next real step: flash, delete a
+session-created playlist and confirm it's fully gone (re-add the same
+track elsewhere, it should behave like a brand-new name, not resurrect
+old data); separately delete "funky times" (or whatever real on-SD
+playlist exists) and confirm it disappears from the list for the rest
+of this session, then reboot and confirm it comes back (expected,
+given the session-only-hide design above -- not a bug if it does).
+
+## Deferred: vaguer "menus were a bit confusing" feedback on playlist creation
+
+Flagged without enough specifics to act on yet. The one CONCRETE bug
+inside that original complaint (new/updated playlists not showing up
+without navigating away and back) is fixed (thirty-ninth bug above),
+but if the menu FLOW itself (which screen you land on, row labeling,
+etc.) still feels wrong after that, needs a more specific description
+(or the usual simulator-first UX pass) to actually improve rather than
+guess at blind.
 
 ## Next session plan (as of 2026-10-01, agreed in a planning-only conversation, nothing below built yet)
 

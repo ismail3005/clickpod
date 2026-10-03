@@ -1,5 +1,7 @@
 #include "Library.h"
 
+#include <set>
+
 #include "Util.h"
 
 namespace Library {
@@ -70,6 +72,20 @@ bool indexReady = false;
 // name -> tracks added this session via addToPlaylist() -- never written
 // to the index file, see the header comment on addToPlaylist().
 std::map<String, std::vector<Track>> extraPlaylistTracks;
+
+// Playlists removed this session via "Delete Playlist" (Playlists list,
+// LEFT long-press -- see MenuEngine::openPlaylistDeleteConfirm()). For a
+// playlist backed by the real on-SD index (e.g. "funky times"), there's
+// no safe way to actually strip its records out of /clickpod.idx
+// without a full rebuild -- not attempted here, too risky to improvise
+// against a file format other code trusts implicitly. So "delete" for
+// an index-backed playlist means hide it from this session's listing
+// only -- it reappears after a reboot, same ephemeral-ness as every
+// other session-only overlay in this file. For a SESSION-CREATED
+// playlist (lives only in extraPlaylistTracks, never touched SD at
+// all), deletePlaylist() below also erases its real data, so that case
+// IS a true, complete, permanent removal.
+std::set<String> hiddenPlaylists;
 
 void writeStr(File &f, const String &s) {
     uint16_t len = (uint16_t)min((int)s.length(), (int)kMaxFieldLen);
@@ -355,14 +371,14 @@ std::vector<Track> indexTracksForAlbum(const String &artist, const String &album
 std::vector<std::pair<String, int>> indexPlaylists() {
     std::vector<std::pair<String, int>> out;
     forEachRecord([&](const IndexRecord &r) {
-        if (!r.isPlaylist) return;
+        if (!r.isPlaylist || hiddenPlaylists.count(r.playlistName)) return;
         for (auto &p : out) {
             if (p.first == r.playlistName) { p.second++; return; }
         }
         out.push_back({r.playlistName, 1});
     });
     for (auto &kv : extraPlaylistTracks) {
-        if (kv.second.empty()) continue;
+        if (kv.second.empty() || hiddenPlaylists.count(kv.first)) continue;
         bool found = false;
         for (auto &p : out) {
             if (p.first == kv.first) { p.second += (int)kv.second.size(); found = true; break; }
@@ -392,6 +408,25 @@ std::vector<Track> indexTracksForPlaylist(const String &name) {
 
 void addToPlaylist(const String &playlistName, const Track &t) {
     extraPlaylistTracks[playlistName].push_back(t);
+}
+
+void deletePlaylist(const String &name) {
+    // True removal for a session-created playlist -- never had any
+    // real data elsewhere to begin with. For an index-backed one, this
+    // alone does nothing (indexPlaylists() still reads real records
+    // from SD); the hiddenPlaylists insert below is what actually
+    // removes it from the listing, session-only -- see the big comment
+    // on hiddenPlaylists above for why that's the honest limit here.
+    extraPlaylistTracks.erase(name);
+    hiddenPlaylists.insert(name);
+    // Mock-fallback path: no SD-backing concept exists for this data at
+    // all, so a true, complete removal is safe and correct here too.
+    for (size_t i = 0; i < PLAYLISTS.size(); i++) {
+        if (PLAYLISTS[i].name == name) {
+            PLAYLISTS.erase(PLAYLISTS.begin() + i);
+            break;
+        }
+    }
 }
 
 String nextNewPlaylistName() {
