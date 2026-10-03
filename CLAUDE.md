@@ -3599,6 +3599,57 @@ scan (or let a reconnect attempt fall through to discovery), then
 immediately tap "Turn Bluetooth Off" mid-scan and confirm it completes
 near-instantly instead of stalling for several seconds.
 
+## Forty-fourth real hardware bug (reported, NOT root-caused -- flagged honestly as unresolved): WiFi resyncing every ~2 minutes instead of 6h, no crash/reboot involved
+
+User confirmed via a fresh log: no boot/crash lines between cycles (so
+not a reboot loop masquerading as one continuous session, which was the
+leading alternative theory) -- `[time] synced` genuinely repeats with a
+consistent ~128214ms gap (measured across 6 consecutive cycles, varying
+by at most 2ms), far too precise to be manual button presses.
+
+**Investigated thoroughly, found nothing**: read `TimeSync.cpp`'s
+`tryOnce()`/`tryUntilAttempted()`/`taskFn()`/`waitUpToWithEarlyWake()`
+line by line -- every path after a real attempt (success OR ordinary
+failure) waits the full `kResyncIntervalMs` (6h), and has since this
+file's very first commit (checked `git show` at the original revision
+that added it). The only code path that can end that wait early is
+`requestManualSync()`'s flag, called from exactly one place (Settings'
+"Sync Time Now" row) -- grepped the whole `src/` tree for any other
+caller, found none. Also grepped the whole tree for any other ~2-minute
+timer constant (`120000`, etc.) that could be an unrelated cause --
+nothing; every other timed loop in this codebase (`BluetoothSource`,
+`InputRouter`, `UI.cpp`) uses a different, unrelated interval.
+
+**Separately observed in the same log, likely unrelated**: `[ui] power
+off` printed 45 times in a tight burst with no alternating `[ui] power
+on` between them, before a single `[ui] power on` much later.
+`InputRouter.cpp`'s `togglePower()` is a plain if/else toggle --
+45 consecutive "off"s with nothing reverting it to "on" in between
+isn't explainable by the toggle logic itself misfiring; `AnoInput.cpp`'s
+long-press edge-detection (`longPressFired[i]`, only cleared on a fresh
+press edge) looks correct on inspection, not obviously capable of
+re-firing while held. Leading suspicion: a flaky physical connection on
+the CENTER button (intermittent contact bouncing in and out over a
+longer-than-normal-debounce timescale), not firmware -- this project has
+hit real breadboard-contact flakiness producing misleading symptoms
+before (see the backlight-GPIO attempt's "stuck in a reset loop, turned
+out to be a loose connection" note). Not confirmed either way.
+
+**Deliberately not fixed blind** -- no code path found that explains
+either symptom, and guessing at a "fix" with no confirmed mechanism
+risks papering over the real cause the way `WiFi.setSleep(false)` once
+did (twenty-sixth bug). Flagged honestly as open rather than claiming a
+fix. **Next real step**: a fresh boot's FULL serial log from power-on
+(not a mid-session paste) -- specifically whether the ~128s cadence
+starts immediately at boot or only after some trigger (e.g. after
+Bluetooth was turned on/off, after the power-off spam happened), and
+whether the power-off spam and the resync cadence are actually
+correlated in time or just coincidentally both present in the same
+test session. Also worth independently confirming the currently-
+flashed binary is actually built from this repo's current HEAD (not an
+older flash) before trusting the "this logic has always been 6h" read
+of the source.
+
 ## Deferred: vaguer "menus were a bit confusing" feedback on playlist creation
 
 Flagged without enough specifics to act on yet. The one CONCRETE bug
