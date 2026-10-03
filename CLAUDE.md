@@ -3570,6 +3570,32 @@ and watch for any NEW connection instability that wasn't there before --
 if the peer-connecting-mid-init race the library's comment describes is
 real, shortening this window is the first thing to suspect.
 
+**UPDATE, confirmed on real hardware.** A fresh real serial log (with
+`CORE_DEBUG_LEVEL=3`'s full library-internal trace visible) confirmed
+the fix directly: `[bt] Starting Bluetooth A2DP source...` to
+`"Reconnecting to ..."` was only ~500ms, not the ~10s it used to be.
+The slowness the user still saw after that was a SEPARATE, real thing,
+not this bug recurring: the device hadn't actually been paired to the
+target speaker on this exact flash yet (user confirmed -- "forgot to
+repair it since i reflashed"), so the direct reconnect-by-address
+attempt targeted a stale/never-bonded address, failed its ~5s real ACL
+connection timeout (BT-protocol-level, not ours to shorten), and fell
+back to repeating ~10-13s inquiry-scan windows per the existing
+`max_retries=0` design -- exactly the intended, working fallback
+behavior for "the stored address isn't reachable," not a bug. Re-
+pairing once resolved it.
+
+**Clarified for future reference**: the bonded-address shadow
+(`"cpod_bt"`/`"last_bda"` NVS, twenty-first bug) survives a normal
+`pio run -t upload` -- that only rewrites the app partition, not the
+separate NVS partition -- so routine reflashes should NOT require
+re-pairing. Only an explicit full erase (`pio run -t erase`/
+`esptool.py erase_flash`) or a `platformio.ini` partition-table change
+that moves/resizes where NVS lives would actually wipe it. The user's
+"forgot to repair after reflashing" this round was most likely this
+being the first-ever successful bond for THIS specific build/speaker
+combination, not evidence that ordinary reflashing wipes pairing.
+
 ## Forty-third real hardware bug (root cause confirmed from source, not yet mitigated): the reported multi-second freeze stopping Bluetooth, fixed at the actual cause
 
 Separately from the connecting-slowness investigation above: the
