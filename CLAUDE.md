@@ -4507,6 +4507,103 @@ an Artist folder named "Red Hot Chili Peppers") now shows just "Song"
 in the title column instead of the redundant full "Red Hot Chili
 Peppers - Song" cut off mid-prefix.
 
+## Fifty-second real hardware bug (root cause CONFIRMED from source, real fix shipped as a fork commit, not yet hardware-confirmed): a genuine FLAC decoder heap buffer overflow -- the real cause of the two Bluetooth-adjacent heap-corruption crashes
+
+User hit two real crashes in quick succession: one scrubbing near the
+end of a track over Bluetooth (heap corruption surfacing inside BT's
+own SBC-encoder `malloc()`, an unrelated allocator catching someone
+else's mess), and a worse one just letting a song end naturally with no
+scrubbing at all -- a fully-resolved backtrace this time, crashing
+inside `Track::Track(Track const&)` on a corrupted `String` sitting in
+`state.queue`, inside `MenuEngine::playNextInQueue()`. Same signature
+both times: corruption discovered later, far from wherever it actually
+happened -- an unrelated allocator or copy constructor just being the
+next thing to walk a damaged heap. User's explicit instruction: "you
+NEED to patch that shit" -- find and fix the real cause, not theorize
+again.
+
+**Traced to an exact, confirmed bug by reading the fork's FLAC decoder
+source directly** (`flac_decoder.cpp`), not guessed: `FLACDecoder_
+AllocateBuffers()` allocates `s_samplesBuffer[ch]` (the per-channel
+decoded-sample buffer every subframe write and the final PCM output
+copy both index into) at exactly `s_maxBlocksize` ints --
+`s_maxBlocksize` is a plain global initialized to the constant
+`MAX_BLOCKSIZE` (8192), and PSRAM only changes WHERE this buffer lives
+(`ps_malloc()` vs `malloc()`), never HOW BIG it is -- the size is 8192
+ints per channel either way.
+
+But `flacDecodeFrame()`'s own sanity check on the per-frame decoded
+`s_blockSize` (read straight from each frame's header, including a
+false-positive resync accept's garbage header) was:
+```cpp
+uint16_t maxBS = 8192;
+if(psramFound()) maxBS = 8192 * 4;   // 32768, with PSRAM
+if(s_blockSize > maxBS){ ... return ERR_FLAC_BLOCKSIZE_TOO_BIG; }
+```
+On this board (WROVER-B, PSRAM present), this let any block size up to
+32768 through -- a full 4x more than the 8192-sample buffer actually
+backing it. Any frame -- a genuine (if unusual) large block size, or
+more likely here a false-positive sync-word accept whose garbage header
+happens to decode a block-size field in the 8193-32768 range -- passes
+this check and then overflows `s_samplesBuffer` by up to 4x during
+`decodeSubframes()`'s per-sample writes (lines ~1085-1250) and the
+`OUT_SAMPLES` copy loop (~line 920) that follows it, corrupting whatever
+heap memory sits adjacent. This is a REAL, confirmed-from-source
+mismatch -- the PSRAM branch was clearly meant to let bigger blocks
+through once PSRAM made a bigger buffer affordable, but the buffer
+itself was never actually grown to match, leaving the check and the
+allocation silently out of sync since whenever that PSRAM branch was
+added.
+
+**Fixed at the real source** (fork, `clickpod-3.0.12-flac-patch`
+branch, commit `ad8ccf6`, re-pinned in `platformio.ini`): the check now
+bounds against `s_maxBlocksize` itself (the buffer's real, fixed
+capacity) instead of a PSRAM-presence guess disconnected from it --
+`if(s_blockSize > s_maxBlocksize){ ... }`. This closes the overflow
+regardless of what produces the oversized block size -- a genuine
+unusual file, or any future false-positive resync -- since it's now
+impossible for a decoded block size to exceed what the backing buffer
+can actually hold, full stop.
+
+**Why this is very likely the real root cause of BOTH crashes, not just
+a plausible one**: both crash signatures (heap corruption surfacing in
+an unrelated allocator/copy-constructor, not at the actual corruption
+site) are the textbook fingerprint of exactly this class of bug -- an
+out-of-bounds heap WRITE silently scribbling past a buffer's real end,
+with the actual crash only happening later when something else's heap
+metadata or data gets walked. The first crash's anomalous logged
+`BitRate` values (217571/903274/937727/1030923 against a real ~1550)
+are also consistent with a frame whose block-size-dependent compression-
+ratio math went through a decoded block size wildly different from what
+the file's real audio data implies -- exactly the shape a frame hitting
+this overflow would produce.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: flash, and specifically try to reproduce both original
+triggers (scrub aggressively near the end of a track over Bluetooth;
+let a full track play to a natural end) -- confirm no crash either way.
+If a crash of this same signature (heap corruption surfacing in an
+unrelated allocator or String/Track copy) still recurs after this,
+the next thing to check is whether some OTHER fixed-size buffer in the
+decoder has the same kind of check-vs-allocation mismatch this one did
+-- the same grep-for-a-mismatched-ceiling approach that found this one
+applies to any other buffer-indexed-by-a-header-derived-value in this
+file.
+
+## Reverted: track-transition fade-out/fade-in
+
+Implemented a sequential fade-out-then-fade-in across track transitions
+(ramping `AudioBridge::setVolumePercent()` down near a track's end, back
+up at the next track's start, via a new `computeFadeMultiplier()` in
+`UI.cpp`'s `tickPlaybackClock()`) after discussing it as an alternative
+to a true Spotify-style overlapping crossfade (ruled out as
+architecturally infeasible given `ESP32-audioI2S`'s single-decoder-
+pipeline design -- there's no second decode stream to overlap with the
+first). **User explicitly rejected it after it shipped**: "and i dont
+want the fade in thing, forget it, revert it." Reverted via `git revert`
+(commit `7d25ff9`) -- `UI.cpp` is back to its pre-fade state. Not a
+candidate to reintroduce unless the user asks again.
+
 ## Working style this project has used (carry forward)
 
 - User is terse and direct; they'll correct behavior that doesn't match
