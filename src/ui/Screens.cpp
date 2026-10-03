@@ -486,6 +486,7 @@ RowIcon rowIconFor(const String &icon) {
     if (icon == "theme") return {true, RowGlyph::kLetter, 'T', colors[2]};
     if (icon == "timezone") return {true, RowGlyph::kLetter, 'Z', colors[3]};
     if (icon == "rescan") return {true, RowGlyph::kLetter, 'R', colors[0]};
+    if (icon == "power") return {true, RowGlyph::kLetter, 'P', colors[3]};
     return {false, RowGlyph::kNone, 0, 0};
 }
 

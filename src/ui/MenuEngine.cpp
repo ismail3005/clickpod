@@ -1,5 +1,7 @@
 #include "MenuEngine.h"
 
+#include <driver/gpio.h>
+#include <esp_sleep.h>
 #include <memory>
 #include <set>
 #include <utility>
@@ -7,6 +9,7 @@
 #include "../audio/AudioBridge.h"
 #include "../audio/FlacMeta.h"
 #include "../bt/BluetoothSource.h"
+#include "../config/Pins.h"
 #include "../net/TimeSync.h"
 #include "../state/AppState.h"
 #include "../state/Persist.h"
@@ -563,8 +566,46 @@ void openPlaylistDeleteConfirm(const String &name) {
     pushMenu(sdBacked ? "Can't fully delete" : "Delete Playlist?", std::move(items));
 }
 
+// Real shutdown, user's explicit ask -- distinct from the existing
+// AppMode::OFF/AOD toggle (CENTER long-press), which deliberately keeps
+// the CPU/audio pipeline fully running ("pocketed, still playing").
+// This board has no physical power switch/load-switch MOSFET cutting
+// battery power (confirmed from the battery-circuit writeup in
+// CLAUDE.md -- B+/B- goes straight to the TP4056/boost chain, nothing
+// gates it), so the only real "off" available from software is ESP32
+// deep sleep: CPU/RAM/peripherals all lose power except the tiny RTC
+// domain. CENTER (GPIO39, PIN_ANO_BTN_CENTER) is wired with a real
+// external 10k pull-up like every other ANO line (idle HIGH, active
+// LOW on a press -- AnoInput.cpp's debouncers already read it that
+// way) and is RTC-capable, so it's configured as an ext0 wake source
+// right before sleeping -- a real press on the physical button wakes
+// the board with a full cold boot (RAM is NOT preserved across deep
+// sleep, unlike the AOD toggle's suspend-in-place), not a resume.
+// Bluetooth is torn down first (if connected) so the peer sees a clean
+// disconnect instead of the board just vanishing off the air.
+void openShutdownConfirm() {
+    std::vector<MenuItem> items(2);
+    items[0].label = "Power Off";
+    items[0].sub = "press CENTER to wake";
+    items[0].action = []() {
+        Serial.println(F("[ui] shutting down (deep sleep)"));
+        Screens::showBusyMessage("Powering off...");
+        if (BluetoothSource::isRunning()) {
+            BluetoothSource::end();
+        }
+        esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_ANO_BTN_CENTER, 0 /*wake on LOW*/);
+        esp_deep_sleep_start(); // never returns
+    };
+    items[1].label = "Cancel";
+    items[1].action = []() {
+        if (!state.menuStack.empty()) state.menuStack.pop_back();
+        state.dirty = true;
+    };
+    pushMenu("Power Off?", std::move(items));
+}
+
 void buildSettings() {
-    std::vector<MenuItem> items(8);
+    std::vector<MenuItem> items(9);
     items[0].label = "Bluetooth";
     items[0].icon = "bt";
     items[0].subFn = btStatusLabel;
@@ -659,6 +700,16 @@ void buildSettings() {
         TimeSync::requestManualSync();
         Serial.println(F("[ui] manual time sync requested"));
     };
+
+    // Real shutdown (deep sleep) -- see openShutdownConfirm()'s big
+    // comment above. A confirm screen, same shape as any other no-undo
+    // action -- unlike the AOD toggle (a quick CENTER long-press),
+    // getting back from this needs a physical press on a sleeping
+    // board, so this isn't a single accidental tap away.
+    items[8].label = "Power Off";
+    items[8].icon = "power";
+    items[8].sub = "";
+    items[8].action = []() { openShutdownConfirm(); };
 
     pushMenu("Settings", std::move(items));
 }

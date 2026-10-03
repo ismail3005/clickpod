@@ -31,6 +31,12 @@ void refreshPlaylistListIfPresent();
 // named playlist -- see MenuEngine.cpp's big comment on it.
 void openPlaylistDeleteConfirm(const String &name);
 void buildSettings();
+// "Power Off" (Settings) -- a real shutdown (ESP32 deep sleep, woken by
+// a CENTER press), distinct from the existing AppMode::OFF/AOD toggle
+// (CENTER long-press), which keeps the CPU/audio fully running and is
+// meant for "pocketed, still playing." See MenuEngine.cpp's big comment
+// on openShutdownConfirm().
+void openShutdownConfirm();
 
 // AppMode::SET_TIME -- see MenuEngine.cpp's big comment on enterSetTime().
 void enterSetTime();

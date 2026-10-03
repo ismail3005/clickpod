@@ -4216,6 +4216,63 @@ last"):
    Playlist" submenu in `MenuEngine.cpp` would need a real look before
    attempting this -- not scoped yet, not started.
 
+## Real "Power Off" added (deep sleep), separate from the existing AOD/CENTER-long-press toggle
+
+User's explicit ask: a legitimate way to fully shut the device down from
+the UI, not just the existing CENTER-long-press "off" (which is really
+AOD -- CPU, audio pipeline, and display controller all stay fully
+running, see the dedicated AOD section above) -- and explicit
+requirement that this NOT replace or change that existing toggle.
+
+This board has no physical power switch or load-switch MOSFET gating
+battery power to the regulator (confirmed from this file's own
+battery-circuit writeup -- B+/B- goes straight into the TP4056/boost
+chain with nothing in between), so the only real "off" reachable from
+software is ESP32 deep sleep -- CPU/RAM/peripherals lose power except
+the tiny RTC domain. `Pins.h` already flagged CENTER
+(`PIN_ANO_BTN_CENTER`, GPIO39) as "RTC-capable, valid ext0 deep-sleep
+wake source" from an earlier round, anticipating exactly this.
+
+**Added**: Settings gained a new "Power Off" row (`MenuEngine.cpp`'s
+`openShutdownConfirm()`) -- a small confirm screen ("Power Off" / sub-
+label "press CENTER to wake" / "Cancel"), same no-undo-action shape as
+the playlist-delete confirm, since getting back from a sleeping board
+needs a physical button press, not a UI action. Confirming: disconnects
+Bluetooth first if connected (`BluetoothSource::end()`, so the peer
+sees a clean disconnect instead of the board just vanishing off the
+air), shows a "Powering off..." busy message (same established
+pattern as the library-rescan/BT-stop busy messages -- a silent
+multi-second pause before sleep would look like a hang), then
+`esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_ANO_BTN_CENTER, 0)` +
+`esp_deep_sleep_start()`. The `0` (wake on LOW) matches CENTER's real
+wiring -- external 10k pull-up to 3.3V like every other ANO line
+(confirmed in the hardware-gotchas section), active-low on a press,
+same polarity `AnoInput.cpp`'s own debouncers already read it as.
+`esp_sleep.h`/`driver/gpio.h` are core ESP-IDF headers bundled with the
+Arduino-ESP32 framework, not a new dependency.
+
+**Honest limitation, inherent to deep sleep, not a bug**: waking from
+this is a full cold boot, not a resume -- RAM is not preserved across
+deep sleep the way the AOD toggle's in-place suspend is, so current
+track/queue/position are lost on wake, same as a normal power-cycle.
+This is the real, unavoidable tradeoff of "actually off" on a board
+with no hardware power switch -- flagged up front rather than
+discovered as a surprise.
+
+**AOD/CENTER-long-press is untouched** -- `InputRouter.cpp`'s
+`togglePower()`/`AppMode::OFF` path, and everything in the dedicated
+AOD section above, is exactly as it was; this is a wholly separate
+action reachable only from Settings, not a replacement for the
+existing toggle.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: flash, open Settings -> Power Off -> confirm, and check that
+(a) the board actually goes dark/draws near-zero, and (b) a CENTER
+press wakes it with a full fresh boot (splash screen, library index
+reused since `/clickpod.idx` already exists, no re-scan) -- and
+separately confirm the existing CENTER-long-press AOD toggle still
+works exactly as before, unaffected by this addition.
+
 ## Working style this project has used (carry forward)
 
 - User is terse and direct; they'll correct behavior that doesn't match
