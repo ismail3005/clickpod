@@ -4507,6 +4507,115 @@ an Artist folder named "Red Hot Chili Peppers") now shows just "Song"
 in the title column instead of the redundant full "Red Hot Chili
 Peppers - Song" cut off mid-prefix.
 
+## Track-transition fade ("Spotify-style" gap masking) -- sequential fade-out/fade-in, not a true overlapping crossfade
+
+User's explicit ask, after noticing a real couple-second gap between a
+track ending and the next one starting: wanted something Spotify-style.
+**A true overlapping crossfade was explicitly scoped out, not
+attempted** -- `ESP32-audioI2S`'s `Audio` object drives exactly ONE
+active decode pipeline; actually mixing two songs' PCM together would
+mean running two decoders concurrently (doubling SD/decode load on
+hardware with a real heap-pressure crash history all project) with no
+hook the library exposes for it. Not a "half-wire it" candidate.
+
+**What got built instead**: `UI.cpp`'s `tickPlaybackClock()` gained
+`computeFadeMultiplier()` -- a plain 0.0-1.0 factor, the MIN of a
+fade-in (ramping up over `kFadeDurationSec`=1.5s since
+`state.now.startedAtMs`) and a fade-out (ramping down over the same
+window as `state.now.durSec - posSec` approaches zero). Applied via
+the EXISTING volume control, `AudioBridge::setVolumePercent(state.volume
+* fadeMultiplier)` -- no new audio pipeline, no PCM mixing, just
+riding the real two-stage wired/BT attenuation already built (thirty-
+third hardware bug). Only calls `setVolumePercent()` when the
+multiplier actually changed, not every tick -- while Bluetooth is
+connected, every call sends a real AVRCP command over the air, so
+calling it unconditionally every 500ms would mean constant extra BT
+traffic for the ~97% of playback outside a fade window. Skipped
+entirely (multiplier forced to 1.0) for unknown-duration tracks
+(`durSec==0`, placeholder/mock data) and during an active scrub
+(`state.scrubPending` -- `posSec` isn't the real decoder position yet
+mid-scrub, same guard `tickPlaybackClock()` already uses elsewhere).
+
+**Applies to every track start, not just natural end-of-track
+transitions** -- a manual LEFT/RIGHT skip doesn't fade the OLD track
+out (no way to know in advance a skip is coming), but the NEW track
+still fades in from silence either way, which softens half of every
+transition, not just the "let it play to the end" case.
+
+**Not yet hardware-confirmed**. Next real step: flash, let a track
+play to its natural end, and listen for a smooth fade-out/fade-in
+around the transition instead of a hard cut -- then separately confirm
+a manual skip (LEFT/RIGHT) still fades the new track in.
+
+## Forty-ninth-and-a-half-ish real hardware crash (reported, reasoned hypothesis only, NOT fixed blind): a new FLAC resync false-accept, heap-corrupted a BT allocation, while scrubbing near a track's end over Bluetooth
+
+User hit a real crash scrubbing from the middle toward the very end of
+a track (Black Sabbath -- "Iron Man") while connected over Bluetooth --
+`Guru Meditation Error: Core 0 panic'ed (StoreProhibited)`, backtrace
+inside `tlsf_malloc`/`remove_free_block`, the actual allocation call
+being BT's own `btc_media_aa_prep_sbc_2_send()`'s `calloc()` -- the
+SAME class of signature as the forty-sixth hardware bug (heap
+corruption discovered by an unrelated allocator walking a now-bad free
+list, not a crash AT the real corruption site).
+
+**What the log shows, read closely**: a real decode error
+(`RESERVED CHANNEL ASSIGNMENT`) triggers the mid-stream resync path
+(`FLACFindSyncWord()`, sixteenth bug's fix target) -- it rejects a
+false candidate at pos 9751 correctly, then accepts a NEW candidate at
+pos 0 of the next buffer, logging `Channels: 2` / `SampleRate: 44100` /
+`BitsPerSample: 16` (all looking legitimate, correctly inherited from
+STREAMINFO per the nineteenth bug's fix) but `BitRate: 903274` -- an
+absurd value for a 16-bit 44.1kHz stereo FLAC (the same file's own
+earlier real bitrate, logged at track start, was 1550). That bitrate is
+DERIVED from the frame's decoded block-size/byte-length math, not part
+of what the fork's CRC-8 frame-header check (fourteenth/sixteenth bugs)
+directly validates -- meaning this candidate passed structural
+validation AND the CRC-8 check while still being internally
+inconsistent, strongly suggesting a FALSE POSITIVE that the CRC-8 check
+didn't catch. One `readUint(): error in bitreader` line follows (logged
+exactly ONCE, not spamming -- confirms the forty-eighth bug's sticky-
+error fix IS working, that class of bug is NOT what's happening here),
+then the crash.
+
+**Why this is plausible even with the CRC-8 fix in place, not a sign
+that fix is broken**: FLAC's frame-header CRC is only 8 bits -- a
+1-in-256 false-accept rate is an inherent property of an 8-bit
+checksum, not a mistake in how the fork implements it. Scrubbing
+aggressively (confirmed pattern since the forty-sixth bug) means many
+resync attempts in quick succession, each one a fresh roll against that
+1/256 odds -- not a certainty on any given scrub, but a real, nonzero
+residual risk that gets more likely to surface the more resyncs a
+session accumulates. A false-accepted header that LOOKS structurally
+valid can still drive corrupted-but-plausible block-size/sample-count
+math into the decode loop before the bitreader eventually runs out and
+errors -- by then, enough has potentially been computed/written to
+corrupt the heap, matching the forty-sixth bug's own established
+mechanism (corrupted decode values driving an out-of-bounds PCM-buffer
+write), just via a different root trigger (a false CRC-8 accept, not a
+bit-buffer-length underflow).
+
+**Deliberately NOT patched blind this round** -- this is a reasoned
+hypothesis from the log's evidence (the anomalous bitrate value,
+specifically), not something traced to an exact line in
+`flac_decoder.cpp` the way most of this file's other decoder fixes are.
+If confirmed, the real fix would be a frame-CHAINING check -- after a
+candidate header passes CRC-8, also verify a plausible next sync word
+exists at the byte offset the candidate's own decoded frame length
+implies, before fully trusting it (multiplies the false-accept odds
+down by roughly another 1/65536 for the 2-byte syncword alone, more if
+that second header's own CRC-8 is checked too) -- but this needs
+re-reading the real fork source (`flac_decoder.cpp`'s resync functions)
+first to confirm the hypothesis and implement it correctly, not guessed
+at from the log alone the way a `WiFi.setSleep(false)`-style "simple
+fix" burned this project once already (twenty-sixth bug).
+
+**Next real step**: re-clone the fork, re-read `FLACFindSyncWord()`/
+`flacFindSyncWordCrc8()` end to end with this specific failure mode in
+mind (an internally-inconsistent-but-CRC-8-valid header), and only then
+decide whether frame-chaining validation (or something else the source
+reveals) is the right fix -- not attempted this round given the effort
+level, flagged honestly as open rather than papered over.
+
 ## Working style this project has used (carry forward)
 
 - User is terse and direct; they'll correct behavior that doesn't match

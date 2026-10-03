@@ -15,6 +15,39 @@ namespace {
 
 int lastLyricsActiveIdx = -1; // see tickPlaybackClock()'s LYRICS branch
 
+// Track-transition fade ("Spotify-style" masking of the gap between
+// songs), user's explicit ask. Deliberately NOT a true overlapping
+// crossfade -- ESP32-audioI2S only ever drives ONE active decode
+// pipeline; running two decoders at once to actually mix two songs'
+// PCM together would double SD/decode load on hardware that's already
+// had real heap-pressure crashes this whole project, and the library
+// exposes no hook for it anyway. This is a sequential fade: volume
+// ramps down as the current track approaches its end, then ramps back
+// up as the next one starts -- using the volume control that already
+// exists (AudioBridge::setVolumePercent(), the real two-stage wired/BT
+// attenuation from the thirty-third hardware bug). Masks the hard cut
+// and the decoder-reopen latency without a new audio pipeline.
+constexpr float kFadeDurationSec = 1.5f;
+float lastFadeMultiplier = 1.0f;
+
+// 1.0 = full (on-screen) volume, 0.0 = silent. Takes the MIN of a
+// fade-in (since track start) and fade-out (until track end) factor,
+// not just whichever applies "first" -- a track shorter than 2x the
+// fade duration should still never exceed 1.0 or go negative, it just
+// fades in and immediately starts fading back out.
+float computeFadeMultiplier() {
+    // durSec==0 (unknown duration, placeholder/mock track) or an active
+    // scrub (state.scrubPending -- posSec isn't the real decoder
+    // position yet, see tickPlaybackClock()'s own big comment on it)
+    // both mean this math isn't trustworthy -- skip fading, not guess.
+    if (state.now.durSec == 0 || state.scrubPending) return 1.0f;
+    float elapsedSec = (millis() - state.now.startedAtMs) / 1000.0f;
+    float fadeIn = (elapsedSec < kFadeDurationSec) ? constrain(elapsedSec / kFadeDurationSec, 0.0f, 1.0f) : 1.0f;
+    float remainingSec = (float)state.now.durSec - state.now.posSec;
+    float fadeOut = (remainingSec < kFadeDurationSec) ? constrain(remainingSec / kFadeDurationSec, 0.0f, 1.0f) : 1.0f;
+    return min(fadeIn, fadeOut);
+}
+
 constexpr uint32_t kBootMs = 1100;   // matches the simulator's boot->MENU timeout
 constexpr uint32_t kClockMs = 500;   // matches the simulator's playback-clock setInterval
 // kPlaybackStartGraceMs itself now lives in UI.h (public) -- MenuEngine.cpp
@@ -95,6 +128,20 @@ void tickPlaybackClock() {
     } else {
         state.now.posSec += kClockMs / 1000.0f;
     }
+    // Apply the fade (see computeFadeMultiplier()'s own comment) --
+    // only actually calls AudioBridge::setVolumePercent() when the
+    // multiplier CHANGED, not on every tick regardless. Matters for
+    // real reasons, not just tidiness: while Bluetooth is connected,
+    // every call sends a real AVRCP "set absolute volume" command over
+    // the air (see the thirty-third hardware bug) -- calling this
+    // unconditionally every 500ms would mean constant extra BT traffic
+    // for the ~97% of playback that isn't within a fade window.
+    float fadeMultiplier = computeFadeMultiplier();
+    if (fadeMultiplier != lastFadeMultiplier) {
+        lastFadeMultiplier = fadeMultiplier;
+        AudioBridge::setVolumePercent((int)(state.volume * fadeMultiplier));
+    }
+
     // durSec==0 means unknown, not "already over" -- true for placeholder/
     // mock tracks, or a real track whose FlacMeta::readStreamInfo() call
     // in MenuEngine::setNowPlaying() failed. Without this guard playback
