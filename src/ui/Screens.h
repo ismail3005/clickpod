@@ -30,4 +30,14 @@ void showBusyMessage(const String &msg);
 // non-strapping pin is freed up instead. percent is 0-100, clamped.
 void applyBrightness(int percent);
 
+// Commands the ILI9341 into DISPLAY OFF + SLEEP IN (real controller
+// commands, same writecommand() mechanism applyBrightness() already
+// uses, not guessed) right before a real Power Off (deep sleep) --
+// see MenuEngine.cpp's openShutdownConfirm(). The backlight itself
+// stays lit regardless (hardwired to 3.3V, no GPIO control -- see
+// CLAUDE.md), but this blanks the panel's own output instead of
+// leaving whatever was last drawn on screen once the CPU stops
+// actively refreshing it.
+void prepareForDeepSleep();
+
 } // namespace Screens

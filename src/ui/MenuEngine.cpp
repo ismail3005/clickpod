@@ -583,6 +583,22 @@ void openPlaylistDeleteConfirm(const String &name) {
 // sleep, unlike the AOD toggle's suspend-in-place), not a resume.
 // Bluetooth is torn down first (if connected) so the peer sees a clean
 // disconnect instead of the board just vanishing off the air.
+//
+// Real reported bug, fixed here: the screen stayed fully lit/white the
+// whole time the board was "asleep" -- not real power saving. Two
+// compounding causes, both addressed: (1) nothing ever told the ILI9341
+// itself to blank/sleep, so whatever was last drawn (or worse, once the
+// CPU stops actively driving the SPI/control lines, a floating RST
+// pulled into a hardware reset -- the ILI9341's reset state commonly
+// shows as a bright, uninitialized white, not black) stayed on screen
+// indefinitely, with the backlight (always 3.3V, no GPIO control)
+// lighting it the whole time regardless. Fixed with real ILI9341
+// commands (Screens::prepareForDeepSleep() -- DISPOFF+SLPIN) plus
+// explicitly holding TFT_RST and TFT_CS HIGH through deep sleep
+// (gpio_hold_en()+gpio_deep_sleep_hold_en(), real ESP-IDF GPIO-driver
+// API) so neither line floats once the CPU stops driving them --
+// released again on the next boot by main.cpp's setup(), before
+// anything re-initializes the display.
 void openShutdownConfirm() {
     std::vector<MenuItem> items(2);
     items[0].label = "Power Off";
@@ -593,6 +609,12 @@ void openShutdownConfirm() {
         if (BluetoothSource::isRunning()) {
             BluetoothSource::end();
         }
+        Screens::prepareForDeepSleep();
+        digitalWrite(PIN_TFT_RST, HIGH); // stay out of reset while asleep
+        digitalWrite(PIN_TFT_CS, HIGH);  // stay deselected, ignore bus noise while asleep
+        gpio_hold_en((gpio_num_t)PIN_TFT_RST);
+        gpio_hold_en((gpio_num_t)PIN_TFT_CS);
+        gpio_deep_sleep_hold_en();
         esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_ANO_BTN_CENTER, 0 /*wake on LOW*/);
         esp_deep_sleep_start(); // never returns
     };

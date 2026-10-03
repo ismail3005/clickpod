@@ -4285,6 +4285,58 @@ physical reset would.
 done** -- "time to make it into a usable device," further sessions
 expected to be bug-fixing only, not new features, until further notice.
 
+## Fiftieth real hardware bug (found, fixed, not yet hardware-confirmed): Power Off left the screen fully lit/white -- not real power saving
+
+First real-hardware report after declaring the feature set done: Power
+Off's screen stayed "fully on," white, the whole time the board was
+supposedly asleep. Real bug, two compounding causes:
+
+1. Nothing ever told the ILI9341 controller itself to blank or sleep --
+   `openShutdownConfirm()` only drew a busy message then went straight
+   to `esp_deep_sleep_start()`. Once the CPU stops actively driving the
+   display's SPI/control lines, TFT_RST (GPIO4) is no longer held HIGH
+   by anything -- a floating RST pulled toward its hardware-reset state
+   is a well-known cause of an ILI9341 showing a bright, uninitialized
+   white screen (not black), which matches the exact symptom reported.
+2. The backlight is hardwired to 3.3V with no GPIO control (see the
+   hardware-gotchas section) -- so whatever was left on the panel's
+   GRAM (correctly blanked or not) stays fully lit regardless. This half
+   can't be fixed from software; only the panel's own output (cause 1)
+   can be.
+
+**Fixed**: `Screens::prepareForDeepSleep()` (new) sends the ILI9341's
+real DISPOFF (0x28) + SLPIN (0x10) commands via the same
+`writecommand()` mechanism `applyBrightness()` already uses (not
+guessed). `openShutdownConfirm()`'s action now calls this, then
+explicitly drives TFT_RST and TFT_CS HIGH and holds them there through
+deep sleep via `gpio_hold_en()` + `gpio_deep_sleep_hold_en()` (real
+ESP-IDF GPIO-driver API) -- so neither line floats once the CPU stops
+driving them, which should also rule out stray SPI-bus noise doing
+anything to the panel while asleep. `main.cpp`'s `setup()` releases
+that hold first thing on the next boot (`gpio_hold_dis()` +
+`gpio_deep_sleep_hold_dis()`, before `initDisplay()`) -- the hold lives
+in the RTC domain, which survives the ext0-wake-triggered reset, so
+without this release the pads would stay latched at their held level
+and ignore `initDisplay()`'s own `tft.init()`/pin writes. Both
+`gpio_hold_dis()` calls are safe no-ops on an ordinary power-on/reset
+where nothing was ever held, confirmed from the same real ESP-IDF
+GPIO-driver API read that justified using `gpio_hold_en()` in the first
+place.
+
+**Known, unavoidable residual**: the backlight stays lit the whole
+time regardless (cause 2 above) -- DISPOFF/SLPIN blank the actual
+image, but a lit backlight shining through a blanked panel will likely
+still look like faint/even illumination, not truly black, on real
+hardware. Real zero-light-output needs the parked backlight-GPIO
+rewiring (see the dedicated AOD/backlight section) -- flagging this
+honestly rather than claiming this fix makes Power Off look fully dark.
+
+**Not yet hardware-confirmed**. Next real step: flash, Power Off, and
+check (a) whether the panel now shows black/blank instead of white
+(even if dimly backlit) and (b) that CENTER still wakes it with a clean
+boot afterward -- the GPIO-hold release needs to not interfere with
+normal display init.
+
 ## Working style this project has used (carry forward)
 
 - User is terse and direct; they'll correct behavior that doesn't match

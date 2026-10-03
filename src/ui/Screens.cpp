@@ -839,6 +839,20 @@ void applyBrightness(int percent) {
     }
 }
 
+// Real ILI9341 commands (0x28 DISPLAY OFF, 0x10 SLEEP IN), same
+// writecommand() mechanism as applyBrightness() above -- blanks the
+// panel's own output and drops it into its low-power state. Doesn't
+// touch the backlight (can't -- hardwired to 3.3V) but fixes the real
+// reported symptom of a stale/white-looking screen staying lit the
+// whole time the board is "off": once Power Off calls this and the CPU
+// then stops driving anything, there's no active GRAM content left for
+// the panel to keep displaying.
+void prepareForDeepSleep() {
+    if (!tftPtr) return;
+    tftPtr->writecommand(0x28); // DISPOFF
+    tftPtr->writecommand(0x10); // SLPIN
+}
+
 // One-off direct draw for a blocking operation with no other visual
 // feedback (e.g. a manual library rescan) -- same reasoning as the boot
 // splash fix (CLAUDE.md's third hardware bug): a blocking call with

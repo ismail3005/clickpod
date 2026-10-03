@@ -3,6 +3,7 @@
 #include <SD.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
+#include <driver/gpio.h>
 #include <esp_bt.h>
 #include <esp_heap_caps.h>
 #include <utility>
@@ -138,6 +139,21 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println(F("\n=== clickpod firmware ==="));
+
+    // Releases the GPIO hold a real Power Off (MenuEngine::
+    // openShutdownConfirm()) placed on TFT_RST/TFT_CS before deep
+    // sleep -- that hold lives in the RTC domain, which survives the
+    // ext0-wake-triggered reset that brought us back here, so without
+    // this the pads would stay latched at their held level and ignore
+    // every pinMode()/digitalWrite() initDisplay() is about to do.
+    // gpio_hold_dis()/gpio_deep_sleep_hold_dis() are real ESP-IDF
+    // GPIO-driver API, safe to call even when nothing was ever held
+    // (e.g. a normal power-on or a plain reset) -- confirmed from the
+    // same source read that justified using gpio_hold_en() in the
+    // first place, not guessed.
+    gpio_hold_dis((gpio_num_t)PIN_TFT_RST);
+    gpio_hold_dis((gpio_num_t)PIN_TFT_CS);
+    gpio_deep_sleep_hold_dis();
 
     // This app only ever uses classic BT (A2DP source, via ESP32-A2DP) --
     // never BLE. The Arduino-ESP32 framework's default sdkconfig enables
