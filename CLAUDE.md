@@ -3819,6 +3819,26 @@ the outcome -- if reconnecting still fails the same way well after the
 speaker's had time to notice the stale link and reset, that would be
 real evidence against this theory and worth a fresh look.
 
+## Forty-seventh real hardware bug/decision: AOD screen said "playing" but never what
+
+User flagged: the AOD/locked screen's "playing"/"paused" line (added in
+the AOD section above) never said WHICH track. Fixed by printing
+`state.now.title` centered underneath it, using the exact same
+centering convention `drawNowPlaying()` already uses elsewhere
+(`kScreenW/2 - title.length()*3`, no truncation scheme -- matches how
+every other screen in this codebase handles a possibly-long title,
+just letting it run to the screen edge rather than inventing a new
+truncation helper). Confirmed this sits below the once-a-minute
+`drawOffClock()` partial-redraw rect (`kOffClockDigitalY+62` vs. that
+fillRect's bottom edge at ~152px), so it's only ever touched by the
+full `drawOff()` redraw (on a real mode/track change), never left
+stale by the lightweight per-minute clock tick.
+
+**Not yet hardware-confirmed**. Next real step: flash, lock the screen
+(CENTER long-press) while something's playing, confirm the track title
+shows under "playing"/"paused", and confirm it updates correctly if the
+track changes while still locked.
+
 ## Deferred: vaguer "menus were a bit confusing" feedback on playlist creation
 
 Flagged without enough specifics to act on yet. The one CONCRETE bug

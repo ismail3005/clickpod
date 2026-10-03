@@ -258,10 +258,17 @@ void drawOff() {
     tftPtr->print("hold CENTER to power on");
     // Real AOD requirement: playback keeps going while locked -- show that
     // it's still doing so, rather than a screen that looks fully "off"
-    // while music is actually still playing behind it.
+    // while music is actually still playing behind it. User-reported gap,
+    // fixed: this used to print just the bare word "playing"/"paused"
+    // with no indication of WHAT -- now shows the track title underneath,
+    // same centering convention drawNowPlaying() already uses elsewhere
+    // (kScreenW/2 - length*3, text size 1's ~6px-wide chars) rather than
+    // a new truncation scheme.
     if (state.now.hasTrack) {
         tftPtr->setCursor(kScreenW / 2 - 70, kOffClockDigitalY + 50);
         tftPtr->print(state.now.playing ? "playing" : "paused");
+        tftPtr->setCursor(kScreenW / 2 - (int)state.now.title.length() * 3, kOffClockDigitalY + 62);
+        tftPtr->print(state.now.title);
     }
 }
 
