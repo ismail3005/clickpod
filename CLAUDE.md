@@ -3847,28 +3847,38 @@ through a few AI-designed pixel-art directions via Artifact previews
 "broken disc fragment") -- none landed, user's call was to drop it
 entirely. That revert is no longer the current state -- see below.
 
-**Brought back, this time from the user's own art.** User supplied a
-real 15x12 pixel-art image and asked for it centered above "clickpod".
-`Screens.cpp` gained `drawLogo()` back, but structurally different from
-the earlier vector attempts: it's now a literal pixel-grid blit
-(`kLogoPixels[12][15]`, 1=ink/0=background), drawn as one real
-`fillRect` per cell at `kLogoCell=4` screen-pixels each -- not
-primitives reconstructing a shape, a direct blow-up of the actual grid.
-`drawBoot()` centers it above the "clickpod" text, which (along with
-"booting...") shifted down to make room, same pattern as the very first
-logo attempt.
+**First attempt at "bring back the user's own art" was traced by eye
+from the chat image and came out visibly wrong** -- user's own words:
+"you completely fucked up that logo." Right call: asked what format
+would let this be read exactly instead of visually guessed again.
 
-**Honest caveat, worth flagging plainly**: `kLogoPixels` was traced BY
-EYE from the user-supplied image -- this sandbox has no image-to-pixel-
-grid extraction tool, only this model's own visual reading of it, so
-it's a best-effort transcription, not a pixel-exact copy verified
-against the source file. If any cell is wrong after the next flash,
-it's a one-line fix to the array, not a redesign -- flag exactly which
-row/column looks off rather than starting over.
+**Real fix: decode the actual PNG file, don't look at it.** User
+exported their art from pixilart.com as a PNG at native 1x/15x12
+resolution (no upscaling) and attached it; a Python script (Pillow)
+opened the real file and read every one of the 180 pixels' actual RGBA
+values programmatically -- `kLogoPixels`/`kLogoColors` in `Screens.cpp`
+are built directly from that decoded data, not from this model's own
+reading of the image. The source had 4 real grayscale shades (plus two
+single-pixel outliers folded into their nearest neighbor, almost
+certainly export anti-aliasing noise on flat-shaded art, not an
+intentional 5th/6th shade) -- `drawLogo()` now takes no color
+parameter, it draws each cell in its own decoded shade (mapped to
+RGB565) instead of one flat color.
 
-**Not yet hardware-confirmed**. Next real step: flash and compare the
-rendered logo directly against the original art -- confirm the overall
-shape reads right and fix any individual cell that doesn't match.
+**Second mistake, separate from the pixel data, caught by the user**:
+the code comment described the art as "a shaded cat face" -- a guess
+about what the shape depicted, written despite the pixel values
+themselves being exact. **It's a 1:1 of Minecraft's Disc 11, not a cat
+face** -- the comment was wrong, the actual `kLogoPixels` array was
+NOT affected (it was already the real decoded data, unchanged by what
+the comment called it), but the mistake itself is worth internalizing:
+having exact pixel data doesn't license narrating what it depicts --
+state what was decoded, not an interpretation of it, especially once
+already corrected for guessing once in the same round.
+
+**Not yet hardware-confirmed**. Next real step: flash and confirm the
+logo renders as the real Disc 11 art, matching the source PNG exactly
+now that it's pixel-decoded rather than traced.
 
 ## Forty-eighth real hardware bug (found and fixed -- a real regression introduced by the forty-sixth bug's own fix): the FLAC bitreader-underflow fix caused a genuine infinite-loop freeze
 

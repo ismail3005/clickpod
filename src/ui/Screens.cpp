@@ -149,39 +149,43 @@ void drawStatusbar() {
     tftPtr->fillRect(shellX + 1, shellY + 1, fillW, shellH - 2, p.sbarFg);
 }
 
-// User-supplied 15x12 pixel-art boot logo, traced by hand from the
-// image they provided (not vector-drawn from primitives like this
-// file's other glyphs) -- a literal grid of ink/no-ink cells, drawn as
-// one real fillRect per cell at kLogoCell screen-pixels each, so what
-// ends up on the display is a direct, undistorted blow-up of their art
-// rather than a reconstruction. 1 = ink, 0 = left untouched (shows the
-// background already filled behind it).
-//
-// Traced by eye from the provided image, not extracted pixel-exact --
-// this sandbox has no image-to-pixel-grid tool, only this model's own
-// reading of it. Flag any cell that's wrong after the next flash and
-// it's a one-line array fix, not a redesign.
+// User-supplied 15x12 pixel-art boot logo (1:1 of Minecraft's Disc 11),
+// decoded PROGRAMMATICALLY from the real PNG file the user exported
+// from pixilart.com at native 1x/15x12 resolution -- a Python script
+// read the actual RGBA value of every one of the 180 pixels directly,
+// not a by-eye trace (an earlier attempt traced it from the chat image
+// by eye and got it visibly wrong -- this is the fix: exact pixel
+// data, not a visual guess). The file had 4 real grayscale shades (plus two
+// single-pixel outliers, (84,84,84) and (212,212,212), folded into
+// their nearest neighboring shade below -- almost certainly export
+// anti-aliasing noise on a flat-shaded pixel-art source, not an
+// intentional 5th/6th shade) -- kLogoColors maps code->RGB565 in the
+// same order. 0 = transparent in the source (left untouched, shows
+// whatever's already filled behind it).
 constexpr uint8_t kLogoW = 15, kLogoH = 12;
 constexpr uint8_t kLogoPixels[kLogoH][kLogoW] = {
-    {0,0,1,0,0,0,0,0,0,0,0,0,1,0,0},
-    {0,1,1,0,0,0,0,0,0,0,0,1,1,0,0},
-    {1,1,1,1,0,0,0,0,0,0,1,1,1,1,0},
-    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,0},
-    {1,0,1,1,1,1,1,1,1,1,1,1,0,1,0},
-    {1,0,1,0,1,1,1,1,1,1,0,1,0,1,0},
-    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,0},
-    {1,1,0,1,1,1,1,1,1,1,0,1,1,1,0},
-    {1,1,1,1,0,1,1,1,1,0,1,1,1,1,0},
-    {0,1,1,1,1,1,1,1,1,1,1,1,1,0,0},
-    {0,0,1,1,1,1,1,1,1,1,1,1,0,0,0},
-    {0,0,0,1,1,1,1,1,1,1,1,0,0,0,0},
+    {0,0,0,0,0,1,1,1,1,0,0,0,0,0,0},
+    {0,0,1,1,1,3,4,4,3,1,0,1,1,0,0},
+    {0,1,3,3,4,4,4,4,4,3,1,3,2,1,0},
+    {1,3,4,4,4,3,1,1,1,2,3,4,3,1,0},
+    {1,3,3,2,2,1,2,3,2,1,3,3,4,2,1},
+    {0,1,2,3,4,3,1,1,1,1,2,3,3,3,1},
+    {1,2,3,2,3,4,4,1,0,0,1,2,3,2,1},
+    {0,1,2,3,2,2,2,1,0,1,0,1,1,1,0},
+    {0,0,1,1,2,3,3,1,0,1,1,1,0,0,0},
+    {0,0,0,0,1,1,1,0,0,1,3,4,1,0,0},
+    {0,0,0,0,0,0,0,0,0,1,4,3,1,0,0},
+    {0,0,0,0,0,0,0,0,0,0,1,1,0,0,0},
 };
+// code 1=black, 2=(48,48,48), 3=(70,70,70), 4=(180,180,180), in RGB565.
+constexpr uint16_t kLogoColors[5] = {0x0000, 0x0000, 0x3186, 0x4228, 0xB5B6};
 
-void drawLogo(int16_t x, int16_t y, int16_t cell, uint16_t color) {
+void drawLogo(int16_t x, int16_t y, int16_t cell) {
     for (uint8_t ry = 0; ry < kLogoH; ry++) {
         for (uint8_t rx = 0; rx < kLogoW; rx++) {
-            if (kLogoPixels[ry][rx]) {
-                tftPtr->fillRect(x + rx * cell, y + ry * cell, cell, cell, color);
+            uint8_t code = kLogoPixels[ry][rx];
+            if (code) {
+                tftPtr->fillRect(x + rx * cell, y + ry * cell, cell, cell, kLogoColors[code]);
             }
         }
     }
@@ -194,7 +198,7 @@ void drawBoot() {
     constexpr int16_t kLogoCell = 4;
     int16_t logoW = kLogoW * kLogoCell, logoH = kLogoH * kLogoCell;
     int16_t logoY = kBodyY + 26;
-    drawLogo(kScreenW / 2 - logoW / 2, logoY, kLogoCell, p.fg);
+    drawLogo(kScreenW / 2 - logoW / 2, logoY, kLogoCell);
 
     tftPtr->setTextColor(p.fg, p.bg);
     tftPtr->setTextSize(3);
