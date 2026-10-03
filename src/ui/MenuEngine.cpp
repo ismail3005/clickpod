@@ -599,6 +599,12 @@ void openPlaylistDeleteConfirm(const String &name) {
 // API) so neither line floats once the CPU stops driving them --
 // released again on the next boot by main.cpp's setup(), before
 // anything re-initializes the display.
+//
+// SUPERSEDED, backlight now genuinely controllable: GPIO4 (PIN_TFT_BL,
+// see Pins.h) drives the backlight transistor directly now -- the "always
+// 3.3V, no GPIO control" line above describes the bug as it was at the
+// time, not current wiring. See the kept-asleep digitalWrite/gpio_hold_en
+// calls on PIN_TFT_BL further down in this same function.
 void openShutdownConfirm() {
     std::vector<MenuItem> items(2);
     items[0].label = "Power Off";
@@ -609,9 +615,19 @@ void openShutdownConfirm() {
         if (BluetoothSource::isRunning()) {
             BluetoothSource::end();
         }
-        Screens::prepareForDeepSleep();
+        Screens::prepareForDeepSleep(); // already drives the backlight to 0% duty
+        // Detach the backlight from the LEDC peripheral and drive it as a
+        // plain digital LOW before holding it -- gpio_hold_en() latches
+        // the pad's level, and a plain digitalWrite() is the one we've
+        // already verified behaves the way we expect with the hold API
+        // (same pattern as TFT_RST/TFT_CS below), rather than trusting an
+        // unverified interaction between LEDC's 0%-duty output and hold.
+        ledcDetachPin(PIN_TFT_BL);
+        pinMode(PIN_TFT_BL, OUTPUT);
+        digitalWrite(PIN_TFT_BL, LOW); // backlight off, and stay off while asleep
         digitalWrite(PIN_TFT_RST, HIGH); // stay out of reset while asleep
         digitalWrite(PIN_TFT_CS, HIGH);  // stay deselected, ignore bus noise while asleep
+        gpio_hold_en((gpio_num_t)PIN_TFT_BL);
         gpio_hold_en((gpio_num_t)PIN_TFT_RST);
         gpio_hold_en((gpio_num_t)PIN_TFT_CS);
         gpio_deep_sleep_hold_en();

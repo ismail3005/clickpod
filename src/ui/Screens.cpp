@@ -6,6 +6,7 @@
 #include "Library.h"
 #include "MenuEngine.h"
 #include "Util.h"
+#include "../config/Pins.h"
 #include "../net/TimeSync.h"
 #include "../state/AppState.h"
 
@@ -13,6 +14,15 @@ namespace Screens {
 namespace {
 
 TFT_eSPI *tftPtr = nullptr;
+
+// Backlight PWM (see begin()/applyBrightness() below) -- channel 0 isn't
+// used anywhere else in this codebase (grepped for ledc/analogWrite
+// before picking it). 5kHz/8-bit is a plain, safe default: well above
+// visible flicker, well below anything that would stress a small
+// switching transistor's base.
+constexpr int kBacklightLedcChannel = 0;
+constexpr int kBacklightLedcFreqHz = 5000;
+constexpr int kBacklightLedcResolutionBits = 8;
 
 // Physical screen is 320x240 landscape (ILI9341, rotation 1) -- same frame
 // the simulator's CSS aspect-ratio:320/240 was built against, so these
@@ -812,24 +822,42 @@ void drawSetTime() {
 
 } // namespace
 
-void begin(TFT_eSPI &tft) { tftPtr = &tft; }
+void begin(TFT_eSPI &tft) {
+    tftPtr = &tft;
+    // Real GPIO PWM backlight control -- GPIO4 drives the display
+    // module's OWN onboard backlight-switching transistor (this board
+    // has one dedicated to BL already; it was just hardwired straight
+    // to 3.3V before, bypassing its own control input). GPIO4 is free
+    // for this now that PIN_TFT_RST moved to GPIO12 (see Pins.h -- that
+    // move was only made after probing the display's real RST pin on a
+    // spare input-only GPIO and confirming no pull-up fights GPIO12
+    // there, not guessed). ledcSetup()/ledcAttachPin()/ledcWrite() are
+    // real, long-standing Arduino-ESP32 core LEDC (PWM) API, not a new
+    // dependency -- 5kHz is well above flicker-fusion and well below
+    // anything that would stress a small switching transistor's base.
+    ledcSetup(kBacklightLedcChannel, kBacklightLedcFreqHz, kBacklightLedcResolutionBits);
+    ledcAttachPin(PIN_TFT_BL, kBacklightLedcChannel);
+}
 
-// ILI9341 commands (0x51 WRDISBV, 0x53 WRCTRLD) -- CONFIRMED on real
-// hardware to be a no-op on this specific Waveshare module: its backlight
-// bypasses the controller's internal PWM driver, going straight to an
-// external transistor off the BL pin instead (see CLAUDE.md's backlight-
-// hardware section). Left in anyway, harmless, in case a future board
-// swap ever uses a module that DOES route brightness through the
-// controller. No GPIO PWM drive right now -- BL is back on the 3.3V
-// rail; both GPIO0 and GPIO12 failed real-hardware testing for this
-// signal (see Pins.h), parked until a non-strapping pin is freed up
-// instead of guessing at a third strapping pin.
+// Drives GPIO4 -> the display's own onboard backlight transistor with
+// real PWM -- see begin()'s comment on how this pin was freed up and
+// why it's trusted. This REPLACES the old WRDISBV/WRCTRLD controller
+// commands below (CONFIRMED a no-op on this module on real hardware --
+// its backlight bypasses the controller's internal PWM entirely) as the
+// real brightness path; those commands are left in too since they're
+// harmless and would help a future board swap that DOES route
+// brightness through the controller. percent is 0-100, clamped --
+// MenuEngine's Settings brightness slider and AOD dimming both funnel
+// through this one function, so there's one source of truth for what
+// "percent" maps to in real PWM duty.
 void applyBrightness(int percent) {
     percent = constrain(percent, 0, 100);
     // ::map() -- same std::map/Arduino-map() ambiguity as main.cpp's
     // syncBluetoothToUi(), here because this file also includes
     // Library.h (for its <map>-based playlist overlay).
     uint8_t level = ::map(percent, 0, 100, 0, 255);
+
+    ledcWrite(kBacklightLedcChannel, level);
 
     if (tftPtr) {
         tftPtr->writecommand(0x53); // WRCTRLD
@@ -841,13 +869,12 @@ void applyBrightness(int percent) {
 
 // Real ILI9341 commands (0x28 DISPLAY OFF, 0x10 SLEEP IN), same
 // writecommand() mechanism as applyBrightness() above -- blanks the
-// panel's own output and drops it into its low-power state. Doesn't
-// touch the backlight (can't -- hardwired to 3.3V) but fixes the real
-// reported symptom of a stale/white-looking screen staying lit the
-// whole time the board is "off": once Power Off calls this and the CPU
-// then stops driving anything, there's no active GRAM content left for
-// the panel to keep displaying.
+// panel's own output and drops it into its low-power state. Also drives
+// the backlight fully off now (applyBrightness(0)) -- unlike before,
+// this is no longer a no-op: GPIO4 genuinely cuts the backlight now, so
+// Power Off should actually look dark instead of a lit blank panel.
 void prepareForDeepSleep() {
+    applyBrightness(0);
     if (!tftPtr) return;
     tftPtr->writecommand(0x28); // DISPOFF
     tftPtr->writecommand(0x10); // SLPIN

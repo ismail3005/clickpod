@@ -33,7 +33,20 @@
 
 #define PIN_TFT_CS     5    // strapping pin, but only affects SDIO slave timing (unused here) — safe
 #define PIN_TFT_DC     2    // strapping pin, only matters combined with GPIO0=0 (joint download mode) — safe for normal boot
-#define PIN_TFT_RST    4
+// Moved from GPIO4 to free that pin for real backlight control (see
+// PIN_TFT_BL below) -- GPIO12 is the MTDI strapping pin (selects
+// VDD_SDIO voltage at reset), real risk if anything external biases it
+// HIGH during the boot-strap window. NOT guessed this time: probed the
+// display's actual RST line on GPIO36 (input-only, read-only) with a
+// standalone test sketch before committing this -- it read LOW
+// consistently, including across several real RST-button presses, so
+// there's no pull-up on this board fighting GPIO12's own internal weak
+// pull-down. Safe. (Two EARLIER guesses at GPIO12 -- see PIN_TFT_BL's
+// history below -- were for a DIFFERENT node, the backlight transistor's
+// own base, which is a separate circuit with its own bias; this probe
+// is specific to the display's RST pin and doesn't carry those failures
+// over.)
+#define PIN_TFT_RST    12
 
 #define PIN_SD_CS      15   // strapping pin (MTDO/U0TXD print enable) — worst case is quieter boot log, not a boot failure
 
@@ -59,24 +72,20 @@
 #define PIN_ANO_BTN_RIGHT  34   // input-only; also RTC-capable (fine if ever needed for wake)
 #define PIN_ANO_BTN_CENTER 39   // input-only, no internal pull — needs external/onboard pull resistor; RTC-capable, valid ext0 deep-sleep wake source
 
-// No backlight GPIO right now -- BL is back on the 3.3V rail (always
-// full brightness, no software control), matching physical reality.
-// Both GPIO0 and GPIO12 were tried for real on hardware and both failed
-// (GPIO0: wouldn't boot clean even with an external 10k pull-up forcing
-// it HIGH; GPIO12: upload itself started hanging, consistent with
-// VDD_SDIO reading wrong). Two failures on two different strapping-pin
-// polarities means this backlight circuit's behavior during the ESP32's
-// brief reset-sampling window just isn't reliably known from a DC
-// multimeter read or simple reasoning about pull directions -- possibly
-// a timing/capacitance interaction a steady-state reading wouldn't show,
-// possibly some of it was breadboard-contact flakiness from repeatedly
-// moving jumpers (one earlier false alarm this round WAS a loose
-// connection, not a real strap conflict). Either way: not safe to keep
-// guessing at more strapping pins. See CLAUDE.md's backlight-hardware
-// section for the full writeup. Next real attempt should free up an
-// ordinary, already-used, non-strapping GPIO instead (candidate:
-// PIN_TFT_RST (GPIO4) -- only toggled once, deliberately, by firmware
-// well after boot-strap sampling is over, lower-risk to relocate than
-// the backlight itself), not reach for GPIO0/12 again.
+// Real backlight control, finally. History: GPIO0 and GPIO12 were both
+// tried DIRECTLY for the backlight transistor's own base and both failed
+// on real hardware (GPIO0: wouldn't boot clean even with an external 10k
+// pull-up; GPIO12: upload itself hung, consistent with VDD_SDIO reading
+// wrong) -- see CLAUDE.md's backlight-hardware section for the full
+// history. Those were real failures on that specific node's own bias,
+// not evidence against strapping pins in general. The actual fix:
+// relocate TFT_RST off GPIO4 (see above) and give GPIO4 -- an ordinary,
+// zero-boot-strap-risk pin -- to the backlight instead. GPIO4 drives the
+// display module's OWN onboard backlight-switching transistor (this
+// board has one dedicated to BL already; it was just hardwired straight
+// to 3.3V before, bypassing its own control input entirely) via real PWM
+// (ledcWrite), not just a plain digitalWrite -- see Screens::
+// applyBrightness() for the real dimming implementation this enables.
+#define PIN_TFT_BL     4
 
 // Spare, unused for now: GPIO36 (input-only; candidate for a MAX17048 ALERT line later)

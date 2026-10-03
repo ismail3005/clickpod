@@ -153,6 +153,7 @@ void setup() {
     // first place, not guessed.
     gpio_hold_dis((gpio_num_t)PIN_TFT_RST);
     gpio_hold_dis((gpio_num_t)PIN_TFT_CS);
+    gpio_hold_dis((gpio_num_t)PIN_TFT_BL); // backlight, held LOW through sleep -- see openShutdownConfirm()
     gpio_deep_sleep_hold_dis();
 
     // This app only ever uses classic BT (A2DP source, via ESP32-A2DP) --
@@ -251,7 +252,7 @@ void setup() {
     // visual proof-of-life on screen right away instead of a black screen
     // for however long the scan takes.
     UI::begin(tft);
-    Screens::applyBrightness(state.brightness); // real-hardware test, see Screens.h
+    Screens::applyBrightness(state.brightness); // real GPIO PWM now -- see Screens.cpp's begin()
 
     if (sdOk) {
         // Read ONCE here, synchronously, on this thread -- NOT from inside

@@ -85,10 +85,11 @@ void AnoInput::begin() {
     for (uint8_t i = 0; i < kButtonCount; i++) {
         // External 10k pull-ups on every ANO line (board has none onboard),
         // so plain INPUT here, not INPUT_PULLUP. (LEFT's resistor was
-        // briefly borrowed to test GPIO0 for the backlight -- see Pins.h's
-        // PIN_TFT_BL comment -- and is back in place now that the
-        // backlight moved to GPIO12 instead, which needs no pull-up at
-        // all. No more INPUT_PULLUP exception needed here.)
+        // briefly borrowed during an earlier, abandoned attempt to test
+        // GPIO0 for the backlight signal -- back in place since then.
+        // The backlight now lives on GPIO4 (PIN_TFT_BL, see Pins.h),
+        // driven with real PWM, needing no pull-up of its own either.
+        // No INPUT_PULLUP exception needed here.)
         pinMode(kButtonPins[i], INPUT);
         debouncers[i].attach(kButtonPins[i]);
         debouncers[i].interval(kDebounceMs);

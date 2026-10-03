@@ -4390,6 +4390,84 @@ to reconnect", B showing its live status) instead of A having vanished;
 separately confirm tapping A does attempt a real connect (scan +
 pairing mode needed, as expected) rather than silently failing.
 
+## Real backlight control shipped: TFT_RST moved to GPIO12, GPIO4 now drives the backlight
+
+The long-parked backlight-GPIO item (see the "Next session plan" item 7
+writeup's full history of two earlier failed strapping-pin attempts) is
+done, and this time with a real measurement backing the pin choice
+instead of a third blind guess.
+
+**User had physical access again and wanted to settle this properly.**
+Instead of touching GPIO12 directly (burned twice already on a
+DIFFERENT node -- the backlight transistor's own base), the user built
+a free, zero-risk diagnostic: temporarily rewired the display's RST pin
+to GPIO36 (input-only, read-only, can't affect anything) and flashed a
+tiny standalone Arduino IDE sketch (not part of this repo) that just
+`digitalRead()`s it in a loop while physically pressing the board's RST
+button a few times. Result: **consistently LOW**, including across real
+reset-button presses -- no pull-up on this board fighting GPIO12's own
+internal weak pull-down. That's the real answer the earlier GPIO0/12
+attempts never had for the backlight's own base, and it's specific to a
+different net (the display's RST line), so it doesn't inherit those
+earlier failures.
+
+**Wiring (done)**: `PIN_TFT_RST` moved from GPIO4 to GPIO12 (`Pins.h`,
+`platformio.ini`'s `-DTFT_RST=` build flag). The display's physical RST
+wire moved to GPIO12; the backlight (BL) wire moved off the 3.3V rail
+onto the now-free GPIO4 (`PIN_TFT_BL`, new).
+
+**Firmware (done, not yet hardware-confirmed)**:
+- `Screens::begin()` sets up real PWM on GPIO4 (`ledcSetup`/
+  `ledcAttachPin`, channel 0, 5kHz/8-bit -- plain, standard
+  Arduino-ESP32 LEDC API, not guessed).
+- `Screens::applyBrightness(percent)` now actually drives that PWM
+  (`ledcWrite`) in addition to the already-existing (confirmed no-op on
+  this module, kept harmless) ILI9341 WRDISBV/WRCTRLD commands. This
+  function was ALREADY wired to both Settings' Brightness slider
+  (`MenuEngine.cpp`'s `buildSettings()`) and the boot-time restore
+  (`main.cpp`'s `setup()`) from earlier work -- so the brightness slider
+  needed zero new code to start actually dimming the screen, it just
+  needed the hardware + PWM backend to exist underneath it.
+- `Screens::prepareForDeepSleep()` now also calls
+  `applyBrightness(0)` -- Power Off genuinely kills the backlight now,
+  not just the panel's own GRAM output (closing out the fiftieth
+  hardware bug's "known, unavoidable residual" for real, not just
+  blanking the image while a lit backlight shines through it).
+  `MenuEngine.cpp`'s `openShutdownConfirm()` additionally detaches
+  GPIO4 from the LEDC peripheral, drives it LOW as a plain digital
+  output, and holds it there through deep sleep
+  (`gpio_hold_en`/`gpio_deep_sleep_hold_en`, same mechanism already used
+  for TFT_RST/TFT_CS) so it can't float back toward "on" -- released
+  again on the next boot by `main.cpp`'s existing hold-release code
+  (now covering `PIN_TFT_BL` too, alongside RST/CS).
+- `InputRouter.cpp`'s `togglePower()` (the CENTER-long-press AOD
+  toggle, completely separate from Power Off) now calls
+  `Screens::applyBrightness()` too -- a new `kAodBrightnessPercent`
+  (8%, low but nonzero so the locked clock face stays readable) on
+  entering AOD, and `state.brightness` (the user's own real setting,
+  not some other default) restored exactly on waking. This is the
+  actual "dim" half of AOD that was blocked on this exact hardware work
+  since the plan was first written.
+
+**Honest confidence note**: `ledcSetup`/`ledcAttachPin`/`ledcWrite`/
+`ledcDetachPin` are the classic Arduino-ESP32 core LEDC API (pre-3.x
+core, consistent with this project's GCC 8.4 toolchain constraint
+elsewhere in this file) -- real, long-standing, not guessed. The
+specific interaction between an LEDC-driven pin and `gpio_hold_en()`
+was NOT independently verified from source, which is why
+`openShutdownConfirm()` explicitly detaches the LEDC channel and drives
+GPIO4 as a plain `digitalWrite()` before holding it, rather than
+trusting an untested "0% PWM duty + hold" combination -- same
+discipline as everywhere else in this file that flags an unverified
+library/API interaction instead of presenting a guess as confirmed.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: wire RST to GPIO12 and BL to GPIO4 for real (per the above),
+flash, and confirm (a) the Settings brightness slider now visibly dims
+the screen, (b) CENTER long-press (AOD) dims to a low-but-readable
+level and restores the real brightness on wake, and (c) Power Off now
+looks genuinely dark instead of the fiftieth bug's lit-white screen.
+
 ## Working style this project has used (carry forward)
 
 - User is terse and direct; they'll correct behavior that doesn't match

@@ -4,11 +4,20 @@
 #include "../bt/BluetoothSource.h"
 #include "../state/AppState.h"
 #include "MenuEngine.h"
+#include "Screens.h"
 
 namespace InputRouter {
 namespace {
 
 constexpr uint32_t kFastScrollRepeatMs = 120; // matches the simulator's FAST_SCROLL_REPEAT_MS
+
+// Real backlight dimming for AOD, now that GPIO4 actually drives the
+// backlight (see Pins.h/Screens.cpp) -- low but not zero, so the locked
+// clock face is still genuinely readable, just dim enough to not be a
+// bright screen in a dark pocket. state.brightness (the user's own
+// Settings slider value) is restored exactly on wake, not just set back
+// to some other default.
+constexpr int kAodBrightnessPercent = 8;
 
 AnoButton repeatButton = AnoButton::COUNT; // COUNT = "no button currently fast-scrolling"
 uint32_t repeatLastMs = 0;
@@ -58,11 +67,13 @@ void startHoldRepeat(AnoButton b, int dir) {
 void togglePower() {
     if (state.mode == AppMode::OFF) {
         state.mode = state.lastActiveMode;
+        Screens::applyBrightness(state.brightness); // back to the user's real setting
         Serial.println(F("[ui] power on"));
     } else {
         state.lastActiveMode = state.mode;
         state.mode = AppMode::OFF;
         state.queueGrabbed = false;
+        Screens::applyBrightness(kAodBrightnessPercent); // dim, not off -- see its comment
         Serial.println(F("[ui] power off"));
     }
     state.dirty = true;
