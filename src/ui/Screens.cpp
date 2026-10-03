@@ -149,16 +149,60 @@ void drawStatusbar() {
     tftPtr->fillRect(shellX + 1, shellY + 1, fillW, shellH - 2, p.sbarFg);
 }
 
+// User-supplied 15x12 pixel-art boot logo, traced by hand from the
+// image they provided (not vector-drawn from primitives like this
+// file's other glyphs) -- a literal grid of ink/no-ink cells, drawn as
+// one real fillRect per cell at kLogoCell screen-pixels each, so what
+// ends up on the display is a direct, undistorted blow-up of their art
+// rather than a reconstruction. 1 = ink, 0 = left untouched (shows the
+// background already filled behind it).
+//
+// Traced by eye from the provided image, not extracted pixel-exact --
+// this sandbox has no image-to-pixel-grid tool, only this model's own
+// reading of it. Flag any cell that's wrong after the next flash and
+// it's a one-line array fix, not a redesign.
+constexpr uint8_t kLogoW = 15, kLogoH = 12;
+constexpr uint8_t kLogoPixels[kLogoH][kLogoW] = {
+    {0,0,1,0,0,0,0,0,0,0,0,0,1,0,0},
+    {0,1,1,0,0,0,0,0,0,0,0,1,1,0,0},
+    {1,1,1,1,0,0,0,0,0,0,1,1,1,1,0},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,0},
+    {1,0,1,1,1,1,1,1,1,1,1,1,0,1,0},
+    {1,0,1,0,1,1,1,1,1,1,0,1,0,1,0},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,0},
+    {1,1,0,1,1,1,1,1,1,1,0,1,1,1,0},
+    {1,1,1,1,0,1,1,1,1,0,1,1,1,1,0},
+    {0,1,1,1,1,1,1,1,1,1,1,1,1,0,0},
+    {0,0,1,1,1,1,1,1,1,1,1,1,0,0,0},
+    {0,0,0,1,1,1,1,1,1,1,1,0,0,0,0},
+};
+
+void drawLogo(int16_t x, int16_t y, int16_t cell, uint16_t color) {
+    for (uint8_t ry = 0; ry < kLogoH; ry++) {
+        for (uint8_t rx = 0; rx < kLogoW; rx++) {
+            if (kLogoPixels[ry][rx]) {
+                tftPtr->fillRect(x + rx * cell, y + ry * cell, cell, cell, color);
+            }
+        }
+    }
+}
+
 void drawBoot() {
     const Palette &p = pal();
     tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
+
+    constexpr int16_t kLogoCell = 4;
+    int16_t logoW = kLogoW * kLogoCell, logoH = kLogoH * kLogoCell;
+    int16_t logoY = kBodyY + 26;
+    drawLogo(kScreenW / 2 - logoW / 2, logoY, kLogoCell, p.fg);
+
     tftPtr->setTextColor(p.fg, p.bg);
     tftPtr->setTextSize(3);
-    tftPtr->setCursor(kScreenW / 2 - 60, kBodyY + kBodyH / 2 - 20);
+    tftPtr->setCursor(kScreenW / 2 - 60, logoY + logoH + 18);
     tftPtr->print("clickpod");
     tftPtr->setTextSize(1);
     tftPtr->setTextColor(p.muted, p.bg);
-    tftPtr->setCursor(kScreenW / 2 - 24, kBodyY + kBodyH / 2 + 14);
+    tftPtr->setCursor(kScreenW / 2 - 24, logoY + logoH + 52);
     tftPtr->print("booting...");
 }
 

@@ -3839,17 +3839,36 @@ stale by the lightweight per-minute clock tick.
 shows under "playing"/"paused", and confirm it updates correctly if the
 track changes while still locked.
 
-## Boot splash logo -- tried, reverted
+## Boot splash logo -- tried, reverted, then brought back with the user's own pixel art
 
-Added a small hand-drawn logo (`drawLogo()`) above the "clickpod" text,
-then iterated through a few pixel-art directions (a tilted vinyl record,
-a flat Minecraft-style disc, a traced Minecraft "broken disc fragment")
-with the user via Artifact previews, since nothing in this sandbox can
-render the real TFT_eSPI output directly. None of the directions landed
--- user's call: drop it entirely, back to plain text. `drawBoot()` is
-reverted to exactly its pre-logo form (no `drawLogo()` function, no call
-site, original spacing). If a logo is wanted again later, start from a
-fresh direction rather than re-trying any of the three explored here.
+First attempt (a small hand-drawn vector logo above "clickpod") went
+through a few AI-designed pixel-art directions via Artifact previews
+(a tilted vinyl record, a flat Minecraft-style disc, a traced Minecraft
+"broken disc fragment") -- none landed, user's call was to drop it
+entirely. That revert is no longer the current state -- see below.
+
+**Brought back, this time from the user's own art.** User supplied a
+real 15x12 pixel-art image and asked for it centered above "clickpod".
+`Screens.cpp` gained `drawLogo()` back, but structurally different from
+the earlier vector attempts: it's now a literal pixel-grid blit
+(`kLogoPixels[12][15]`, 1=ink/0=background), drawn as one real
+`fillRect` per cell at `kLogoCell=4` screen-pixels each -- not
+primitives reconstructing a shape, a direct blow-up of the actual grid.
+`drawBoot()` centers it above the "clickpod" text, which (along with
+"booting...") shifted down to make room, same pattern as the very first
+logo attempt.
+
+**Honest caveat, worth flagging plainly**: `kLogoPixels` was traced BY
+EYE from the user-supplied image -- this sandbox has no image-to-pixel-
+grid extraction tool, only this model's own visual reading of it, so
+it's a best-effort transcription, not a pixel-exact copy verified
+against the source file. If any cell is wrong after the next flash,
+it's a one-line fix to the array, not a redesign -- flag exactly which
+row/column looks off rather than starting over.
+
+**Not yet hardware-confirmed**. Next real step: flash and compare the
+rendered logo directly against the original art -- confirm the overall
+shape reads right and fix any individual cell that doesn't match.
 
 ## Forty-eighth real hardware bug (found and fixed -- a real regression introduced by the forty-sixth bug's own fix): the FLAC bitreader-underflow fix caused a genuine infinite-loop freeze
 
