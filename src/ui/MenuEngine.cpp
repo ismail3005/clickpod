@@ -1125,20 +1125,34 @@ void moveQueueSelection(int delta) {
 // with it, instead of just moving the cursor -- the drag-and-drop
 // equivalent for a device with no touchscreen. Originally confined to
 // the queue segment only; now works within EITHER segment (history or
-// queue), wrapping at that segment's own edges -- dragging still can't
+// queue), CLAMPING at that segment's own edges -- dragging still can't
 // cross the "now" boundary (moving a history row into the upcoming
 // queue, or vice versa, isn't a simple swap: the two segments are
 // different-length containers, and sliding something past the
 // currently-playing track has no clear meaning), so a grab started in
 // one segment stays confined to it, same as before, just now true for
 // history too instead of only queue.
+//
+// Real hardware bug, fixed: this used to WRAP (modulo) at the segment's
+// edges instead of clamping -- harmless at the FAR edge (top of
+// history / bottom of queue, where wrapping back into the same segment
+// at least stays sensible), but at the edge RIGHT NEXT TO "now" it
+// teleported the grabbed row to the opposite end of the same segment
+// instead of just stopping: pushing a queue row "up" past the first
+// upcoming track wrapped it to the very BOTTOM of the queue, and
+// pushing a history row "down" past the last history entry wrapped it
+// to the OLDEST history entry (reported as "sends me just above -31",
+// i.e. the most-negative history index). Clamping instead of wrapping
+// at both edges matches how a drag-and-drop list is actually expected
+// to behave -- it just stops, it doesn't jump to the far end.
 void moveGrabbedQueueItem(int delta) {
     int histN = (int)state.history.size();
     int sel = state.queueSelected;
     if (sel == histN) return; // "now" row -- nothing to grab
     if (sel < histN) {
         if (histN < 2) return;
-        int to = ((sel + delta) % histN + histN) % histN;
+        int to = constrain(sel + delta, 0, histN - 1);
+        if (to == sel) return; // already at this segment's edge
         std::swap(state.history[sel], state.history[to]);
         state.queueSelected = to;
     } else {
@@ -1146,7 +1160,8 @@ void moveGrabbedQueueItem(int delta) {
         int n = (int)state.queue.size();
         if (n < 2) return;
         int from = sel - queueStart;
-        int to = ((from + delta) % n + n) % n;
+        int to = constrain(from + delta, 0, n - 1);
+        if (to == from) return; // already at this segment's edge
         std::swap(state.queue[from], state.queue[to]);
         state.queueSelected = queueStart + to;
     }

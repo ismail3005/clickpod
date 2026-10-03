@@ -3676,6 +3676,32 @@ flashed binary is actually built from this repo's current HEAD (not an
 older flash) before trusting the "this logic has always been 6h" read
 of the source.
 
+## Forty-fifth real hardware bug (found, fixed): grabbed queue/history rows teleported to the opposite end of their segment instead of stopping at "now"
+
+User report: picking up ("grabbing") a row and moving it UP past the
+currently-playing track sent it all the way to the BOTTOM of the queue;
+moving a grabbed row DOWN past "now" sent it to just above -31 (the
+oldest history entry). Root cause in `MenuEngine.cpp`'s
+`moveGrabbedQueueItem()`: it wrapped (`% n`) at each segment's edges
+instead of clamping -- harmless at the far edge of either segment, but
+at the edge immediately adjacent to "now" (queue index 0, or the last
+history index) wrapping teleports the grabbed row to the FAR opposite
+end of the same segment instead of just refusing to move further,
+exactly matching both reported symptoms.
+
+**Fixed**: both branches now use `constrain(... , 0, segmentSize-1)`
+instead of modulo wrap, and no-op (return without swapping) if the
+clamped destination equals the current position -- a grabbed row now
+just stops at either edge of its segment (can't cross into "now" or
+the other segment, same restriction as before; can't wrap around to
+the far end either, which is the actual fix) instead of jumping
+somewhere unexpected.
+
+**Not yet hardware-confirmed**. Next real step: flash, grab a row right
+next to "now" on both sides (last history row, first queue row) and
+confirm pushing it toward "now" just stops it there instead of moving
+it anywhere.
+
 ## Deferred: vaguer "menus were a bit confusing" feedback on playlist creation
 
 Flagged without enough specifics to act on yet. The one CONCRETE bug
