@@ -4590,6 +4590,67 @@ decoder has the same kind of check-vs-allocation mismatch this one did
 applies to any other buffer-indexed-by-a-header-derived-value in this
 file.
 
+**UPDATE -- this fix alone was NOT sufficient, a SECOND confirmed bug
+found and fixed in the same area.** User pulled the `ad8ccf6` fix,
+rebuilt, and hit the same crash signature again: `Guru Meditation
+Error: Core 0 panic'ed (LoadProhibited)`, `EXCVADDR: 0xbaaeb748` (a wild
+garbage pointer), backtrace resolving cleanly to
+`flac_decoder.cpp:922` -- `s_samplesBuffer[j][i + s_offset]` inside
+`FLACDecodeNative()`'s `OUT_SAMPLES` output loop. Right before it, the
+log showed the same anomalous-BitRate signature (`BitRate: 765376`
+against a real ~1550) immediately after TWO resyncs in a row: `"stream
+ready" / "syncword found at pos 7903"` then immediately another
+`"stream ready" / "syncword found at pos 0"`.
+
+**That second "found at pos 0" was the real clue.** Reading
+`FLACFindSyncWord()` directly found a second, independent, confirmed
+bug: `if(i) FLACDecoderReset();` -- the reset that clears all the
+decoder's mid-frame state (critically `s_offset`, the running position
+within a frame's output that may still be mid-way through across
+several `OUT_SAMPLES` calls for one large block) was only called when
+the verified sync word landed at a NONZERO offset into the resync
+buffer. Landing at offset 0 is common -- a decode error often leaves
+the read pointer already sitting right at the next frame boundary --
+and that case skipped the reset entirely, leaving a stale nonzero
+`s_offset` from whatever frame was interrupted. The next frame's own
+`s_blockSize` (now established fresh, possibly smaller than that stale
+leftover `s_offset`) feeds straight into
+`FLACDecodeNative()`'s `blockSize = s_blockSize - s_offset` -- a plain
+`uint16_t` subtraction that underflows to a huge garbage value when
+`s_offset > s_blockSize`, which then drives the `for(i=0;i<blockSize;i++)`
+output loop wildly out of bounds reading `s_samplesBuffer[j][i +
+s_offset]` -- exactly the crash, exactly the anomalous-bitrate
+fingerprint (the compression-ratio math a few lines above reads the
+same corrupted `blockSize`/`s_offset`).
+
+**Fixed at the real source** (fork, commit `27dccf3`, re-pinned in
+`platformio.ini`): `FLACFindSyncWord()` now calls `FLACDecoderReset()`
+unconditionally on every verified sync match, regardless of `i`. A
+sync word being confirmed at all means a fresh frame boundary is being
+declared after something already went wrong -- that always needs a
+clean decoder state, whether or not any bytes needed skipping to reach
+it.
+
+**Both fixes are needed together, confirmed as two separate bugs, not
+one bug found twice**: the first (`ad8ccf6`) closes a genuine buffer
+overflow when a frame's own declared block size exceeds the backing
+buffer; the second (`27dccf3`) closes a stale-state corruption on the
+resync path that's independent of block-size validity entirely -- a
+perfectly in-bounds `s_blockSize` can still underflow `s_offset`'s
+subtraction if the reset that should have zeroed `s_offset` never ran.
+
+**Not yet hardware-confirmed** -- this second fix hasn't been tested on
+real hardware yet. Next real step: flash with commit `27dccf3`,
+reproduce the same scenario (skip to the end of a track, or whatever
+reliably triggers a `UNKNOWN CHANNEL ASSIGNMENT`/`RESERVED CHANNEL
+ASSIGNMENT`-class decode error mid-playback) and confirm no crash. If
+this STILL recurs, get a fresh log and check specifically whether
+`FLACDecoderReset()`'s own log line (if any) or the resync sequence
+looks different now -- and consider that `s_offset` might also need
+resetting at the `DECODE_FRAME`-state entry in `FLACDecodeNative()`
+itself as defense in depth, not just at the one `FLACFindSyncWord()`
+call site, if a third path to a stale `s_offset` turns up.
+
 ## Reverted: track-transition fade-out/fade-in
 
 Implemented a sequential fade-out-then-fade-in across track transitions
