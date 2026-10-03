@@ -368,6 +368,20 @@ std::vector<Track> indexTracksForAlbum(const String &artist, const String &album
     return out;
 }
 
+// Whether `name` has any REAL records in the on-SD index, as opposed
+// to existing only in the session-only extraPlaylistTracks overlay --
+// used by the UI to visually flag which playlists can't be truly,
+// permanently deleted from the device (see deletePlaylist()'s own big
+// comment on hiddenPlaylists for why). Scans the whole index per call
+// -- fine for an occasional UI-build-time check, not a hot path.
+bool isSdBackedPlaylist(const String &name) {
+    bool found = false;
+    forEachRecord([&](const IndexRecord &r) {
+        if (r.isPlaylist && r.playlistName == name) found = true;
+    });
+    return found;
+}
+
 std::vector<std::pair<String, int>> indexPlaylists() {
     std::vector<std::pair<String, int>> out;
     forEachRecord([&](const IndexRecord &r) {

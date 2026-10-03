@@ -76,6 +76,11 @@ void addToPlaylist(const String &playlistName, const Track &t);
 // hiddenPlaylists for why a real on-SD removal isn't attempted.
 void deletePlaylist(const String &name);
 
+// True if `name` has real records in the on-SD index (not just the
+// session-only overlay) -- used by the UI to visually flag which
+// playlists can't be truly/permanently deleted. See Library.cpp.
+bool isSdBackedPlaylist(const String &name);
+
 // Appends one line ("<path> -- <reason>") to /clickpod_failed.txt on SD
 // (creating it if needed) -- a plain-text, human-readable list of every
 // track that failed to play this session (or a previous one; never

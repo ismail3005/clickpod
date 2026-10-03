@@ -456,6 +456,15 @@ std::vector<MenuItem> buildPlaylistItems() {
             it.label = kv.first;
             it.icon = "playlist";
             it.sub = String(kv.second) + " tracks";
+            // User's explicit ask: make it visually obvious BEFORE
+            // trying to delete, not just at confirm time, that an
+            // SD-backed playlist can't be fully/permanently removed
+            // the same way a device-created one can (see
+            // deletePlaylist()'s big comment). Kept short and plain
+            // ASCII (the loaded GLCD font isn't guaranteed to render
+            // extended characters cleanly) -- shares row width with
+            // the playlist name.
+            if (Library::isSdBackedPlaylist(kv.first)) it.sub += " (SD)";
             String plName = kv.first;
             it.action = [plName]() { buildPlaylistTrackListFromIndex(plName); };
             items.push_back(std::move(it));
@@ -523,9 +532,22 @@ void refreshPlaylistListIfPresent() {
 // screen, same shape as any other destructive-action confirm -- no
 // undo, so this isn't a single accidental LEFT-hold away.
 void openPlaylistDeleteConfirm(const String &name) {
+    // SD-backed playlists (e.g. "funky times") can't actually be
+    // stripped out of the real on-SD index -- see deletePlaylist()'s
+    // big comment. The Playlists list already flags this up front (the
+    // "(SD)" sub-label), but the confirm screen itself should say the
+    // real, different thing that's about to happen, not just reuse the
+    // same "Delete" wording either way.
+    bool sdBacked = Library::usingIndex() && Library::isSdBackedPlaylist(name);
     std::vector<MenuItem> items(2);
     String n = name;
-    items[0].label = "Delete \"" + name + "\"";
+    if (sdBacked) {
+        items[0].label = "Hide \"" + name + "\"";
+        items[0].sub = "from SD -- reappears on reboot";
+    } else {
+        items[0].label = "Delete \"" + name + "\"";
+        items[0].sub = "permanent, no undo";
+    }
     items[0].action = [n]() {
         Library::deletePlaylist(n);
         Serial.printf("[ui] deleted playlist \"%s\"\n", n.c_str());
@@ -538,7 +560,7 @@ void openPlaylistDeleteConfirm(const String &name) {
         if (!state.menuStack.empty()) state.menuStack.pop_back();
         state.dirty = true;
     };
-    pushMenu("Delete Playlist?", std::move(items));
+    pushMenu(sdBacked ? "Can't fully delete" : "Delete Playlist?", std::move(items));
 }
 
 void buildSettings() {

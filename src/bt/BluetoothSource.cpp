@@ -297,6 +297,29 @@ void BluetoothSource::end() {
     // the number to check first instead of guessing blind again.
     Serial.printf("[bt] Stopping Bluetooth A2DP source... (free internal heap: %u bytes)\n",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    // Real fix for the reported multi-second freeze on "Turn Bluetooth
+    // Off" (the busy-message was only ever a cosmetic cover for this,
+    // not a fix) -- confirmed from the real library source:
+    // BluetoothA2DPSource::end() does `while(discovery_active)
+    // delay_ms(100);` before tearing anything down, and critically,
+    // that flag only clears when the CURRENT inquiry window ends
+    // naturally (ESP_BT_GAP_DISC_STATE_CHANGED_EVT ->
+    // ESP_BT_GAP_DISCOVERY_STOPPED) -- end() sets `is_end=true` so a
+    // NEW scan won't start after that, but does nothing to cut the
+    // one already running short. Each scan is started with
+    // `esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10,
+    // 0)` -- a ~10-unit (~12.8s) inquiry window -- so calling end()
+    // mid-scan means waiting out however much of that window is left,
+    // exactly matching the observed ~9s stall. Cancelling the scan
+    // FIRST (a real, already-used-elsewhere library call,
+    // esp_bt_gap_cancel_discovery() under the hood) makes discovery_active
+    // clear almost immediately instead of waiting for the window to
+    // expire on its own. Guarded by is_discovery_active() so this is a
+    // no-op (not an extra GAP call) on the much more common case where
+    // discovery isn't running at all.
+    if (a2dpSource.is_discovery_active()) {
+        a2dpSource.cancel_discovery();
+    }
     a2dpSource.end();
     running = false;
     // No RadioLock::release() here -- begin() no longer holds the lock

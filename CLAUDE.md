@@ -3495,6 +3495,110 @@ playlist exists) and confirm it disappears from the list for the rest
 of this session, then reboot and confirm it comes back (expected,
 given the session-only-hide design above -- not a bug if it does).
 
+## Forty-first real hardware bug/decision: SD-backed playlists weren't visually flagged before a user tries to delete them
+
+Follow-up to the fortieth bug above -- user's explicit ask: make it
+obvious BEFORE attempting delete that a "core" (SD-backed) playlist
+can't be hot-deleted, not just at confirm time. `Library.cpp` gained
+`isSdBackedPlaylist(name)` (scans the on-SD index for any real record
+under that name -- cheap enough for UI-build-time use, not a hot path).
+`MenuEngine.cpp`'s `buildPlaylistItems()` appends `" (SD)"` to the
+sub-label of any such row in the Playlists list (plain ASCII, not a
+middle-dot/extended character -- the loaded GLCD font isn't guaranteed
+to render those). `openPlaylistDeleteConfirm()` now branches on the
+same check: an SD-backed playlist's confirm screen reads "Hide
+\"name\"" / "from SD -- reappears on reboot" under a "Can't fully
+delete" title, instead of "Delete \"name\"" / "permanent, no undo" --
+telling the user the real thing that's about to happen (a session-only
+hide, per the fortieth bug's design) rather than reusing delete wording
+that would overstate it.
+
+**Not yet hardware-confirmed**. Next real step: flash, open Playlists
+and confirm the SD-backed one(s) show "(SD)" in their sub-label, and
+confirm LEFT-long-pressing one shows the "Hide"/"Can't fully delete"
+wording while a session-created playlist still shows plain "Delete".
+
+## Forty-second real hardware bug (root cause confirmed from source, build-time patch shipped, not yet hardware-confirmed): "Bluetooth connecting slowness" traced to a hardcoded 10-second sleep in the library itself
+
+User's explicit ask: find the real cause of BT connect slowness, not
+just patch around it. Cloned the real pinned `ESP32-A2DP` source
+(commit `35bace5`) and read `BluetoothA2DPSource.cpp`'s
+`av_hdl_stack_evt()` directly -- its `BT_APP_EVT_STACK_UP` handler,
+which runs once per `start()` call (i.e. every single "Bluetooth On" /
+reconnect, not just the first ever), does:
+```cpp
+// esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+delay_ms(10000);
+set_scan_mode_connectable(false);
+```
+A flat, unconditional 10-second blocking sleep, BEFORE the library even
+decides whether to reconnect-by-address or start a discovery scan, and
+before the heartbeat timer that drives either starts. The comment above
+it explains the intent (avoid a peer connecting mid-init and confusing
+`s_a2d_state`) but the real enforcement (the commented-out
+`esp_bt_gap_set_scan_mode` call) was never wired up -- what's left is
+just blindly sleeping instead. This isn't radio/network time, isn't
+anything our own `RadioLock`/heap guards could see or shorten -- it's
+baked into the library's own stack-up handler on the BT stack's own
+task, no public API to configure or skip it.
+
+**Fixed via a build-time patch** (`scripts/patch_a2dp_startup_delay.py`,
+wired in via `platformio.ini`'s new `extra_scripts`, same technique this
+project used for the FLAC maxFrameSize fix before that became a real
+fork commit): string-replaces the downloaded library's `delay_ms(10000)`
+with `delay_ms(500)` -- shortened, not removed outright, to keep
+whatever margin the library's own comment says it wants before a peer
+could land mid-init, while cutting ~9.5s off every single connect
+attempt. 500ms is a reasoned, conservative guess at "clearly long enough
+for `esp_a2d_source_init()`/`esp_avrc_ct_init()`'s own internal async
+setup to settle," not an independently verified minimum -- there isn't
+one documented in the source.
+
+**Why a build script, not a fork**: this project already has a real
+fork for `ESP32-audioI2S` (the user forked it themselves and handed over
+the URL) -- no equivalent fork of `ESP32-A2DP` exists yet, and this
+session can't create one unprompted. If this helps, worth asking the
+user to fork `ESP32-A2DP` the same way, same reasoning as the audioI2S
+precedent, so this becomes a real commit instead of a re-applied patch
+script.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: flash, confirm "Bluetooth On" (and a reconnect after a
+disconnect) now takes meaningfully less time to actually start
+connecting/discovering (closer to ~0.5s of dead time instead of ~10s),
+and watch for any NEW connection instability that wasn't there before --
+if the peer-connecting-mid-init race the library's comment describes is
+real, shortening this window is the first thing to suspect.
+
+## Forty-third real hardware bug (root cause confirmed from source, not yet mitigated): the reported multi-second freeze stopping Bluetooth, fixed at the actual cause
+
+Separately from the connecting-slowness investigation above: the
+"stopping bluetooth altogether... froze for a good second" complaint
+from an earlier round had only ever gotten a cosmetic busy-message
+cover (thirty-eighth bug), not a real fix. Read `BluetoothA2DPSource::
+end()`'s real source directly: it does `while(discovery_active)
+delay_ms(100);` before tearing anything down -- a real, working guard
+for an in-flight DISCOVERY scan -- but that flag only clears when the
+CURRENT inquiry window ends naturally. Every scan starts with
+`esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0)` --
+a ~10-unit (~12.8s) inquiry window -- so calling `end()` mid-scan means
+waiting out however much of that window is left, which lines up exactly
+with the observed ~9s stall. `end()` sets `is_end=true` so a NEW scan
+won't start after that, but does nothing to cut the one already running
+short.
+
+**Fixed**: `BluetoothSource::end()` now calls `a2dpSource.
+cancel_discovery()` FIRST (guarded by `is_discovery_active()`, so it's a
+no-op on the much more common case where no scan is running) -- this
+clears `discovery_active` almost immediately instead of waiting for the
+window to expire on its own, so the library's own `while(discovery_
+active)` wait in `end()` falls through right away.
+
+**Not yet hardware-confirmed**. Next real step: flash, start a device
+scan (or let a reconnect attempt fall through to discovery), then
+immediately tap "Turn Bluetooth Off" mid-scan and confirm it completes
+near-instantly instead of stalling for several seconds.
+
 ## Deferred: vaguer "menus were a bit confusing" feedback on playlist creation
 
 Flagged without enough specifics to act on yet. The one CONCRETE bug
