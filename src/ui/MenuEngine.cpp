@@ -605,7 +605,7 @@ void openShutdownConfirm() {
 }
 
 void buildSettings() {
-    std::vector<MenuItem> items(9);
+    std::vector<MenuItem> items(10);
     items[0].label = "Bluetooth";
     items[0].icon = "bt";
     items[0].subFn = btStatusLabel;
@@ -710,6 +710,23 @@ void buildSettings() {
     items[8].icon = "power";
     items[8].sub = "";
     items[8].action = []() { openShutdownConfirm(); };
+
+    // Plain software reboot -- the other half of "a legitimate way to
+    // reboot or power off without the ESP32's own physical buttons."
+    // Unlike Power Off, this needs no hardware cooperation at all
+    // (ESP.restart() is a real, standard Arduino-ESP32 core call) --
+    // comes back up on its own in a couple seconds, same cold-boot path
+    // as any reset, so no confirm screen needed, same as how a plain
+    // "Restart" action usually behaves on other devices.
+    items[9].label = "Restart";
+    items[9].icon = "power";
+    items[9].sub = "";
+    items[9].action = []() {
+        Serial.println(F("[ui] restart requested"));
+        Screens::showBusyMessage("Restarting...");
+        delay(300); // let the message actually reach the display over SPI
+        ESP.restart();
+    };
 
     pushMenu("Settings", std::move(items));
 }

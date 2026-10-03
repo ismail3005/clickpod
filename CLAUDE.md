@@ -4265,13 +4265,25 @@ AOD section above, is exactly as it was; this is a wholly separate
 action reachable only from Settings, not a replacement for the
 existing toggle.
 
-**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
-real step: flash, open Settings -> Power Off -> confirm, and check that
-(a) the board actually goes dark/draws near-zero, and (b) a CENTER
-press wakes it with a full fresh boot (splash screen, library index
-reused since `/clickpod.idx` already exists, no re-scan) -- and
-separately confirm the existing CENTER-long-press AOD toggle still
-works exactly as before, unaffected by this addition.
+**UPDATE, confirmed on real hardware: Power Off works.** User confirmed
+it. Also added the other half originally proposed alongside it but
+never actually shipped: a plain "Restart" row right below "Power Off"
+in Settings -- just `ESP.restart()` after a brief "Restarting..." busy
+message (long enough for the SPI write to actually land before the
+reset happens), no confirm screen (an ordinary reboot, not a no-undo
+action the way Power Off or a playlist delete is). Zero hardware
+dependency, unlike Power Off -- `ESP.restart()` is a real, standard
+Arduino-ESP32 core call.
+
+**Not yet hardware-confirmed** (the Restart row specifically -- Power
+Off itself is now confirmed per above). Next real step: flash, open
+Settings -> Restart, confirm it shows the busy message then reboots
+clean (splash screen, library index reused, no re-scan) same as a
+physical reset would.
+
+**Status as of this entry: user has declared the firmware feature set
+done** -- "time to make it into a usable device," further sessions
+expected to be bug-fixing only, not new features, until further notice.
 
 ## Working style this project has used (carry forward)
 
