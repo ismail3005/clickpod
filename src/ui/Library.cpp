@@ -48,6 +48,30 @@ String stripExtension(const String &filename) {
     return dot > 0 ? filename.substring(0, dot) : filename;
 }
 
+// User-reported bug: many ripped/downloaded files are named
+// "Artist - Title.ext" even though they already live under that exact
+// artist's own folder. Shown as-is (just the filename minus extension),
+// that duplicates the artist name -- once baked into the title text,
+// once in the row's own separate artist sub-label -- and for anything
+// with a long artist name (their example: "Red Hot Chili Peppers - "
+// eating the whole row before the real title even starts) the actual
+// title never becomes visible at all. Strips exactly that redundant
+// "<artist> - " prefix when it matches the track's own known artist
+// (the folder name, case-insensitive) -- leaves anything else (a
+// differently-spelled embedded name, a feature/collab credit, no
+// prefix at all) completely untouched, rather than guessing at a
+// generic "any text before the first ' - '" rule that could eat real
+// title text which happens to contain " - " for an unrelated reason.
+String cleanTrackTitle(const String &filename, const String &artistName) {
+    String title = stripExtension(filename);
+    String prefix = artistName + " - ";
+    if ((int)title.length() > (int)prefix.length() &&
+        title.substring(0, prefix.length()).equalsIgnoreCase(prefix)) {
+        return title.substring(prefix.length());
+    }
+    return title;
+}
+
 // ---- On-SD compact index (/clickpod.idx) --------------------------------
 //
 // Format: 4-byte magic "CPX1" (also a version tag -- a future format
@@ -132,7 +156,7 @@ void indexAlbumFolder(File albumDir, const String &albumPath, const String &arti
         if (!entry.isDirectory()) {
             String fname = entry.name();
             if (hasAudioExtension(fname)) {
-                writeMusicRecord(idx, artistName, albumName, stripExtension(fname), albumPath + "/" + fname);
+                writeMusicRecord(idx, artistName, albumName, cleanTrackTitle(fname, artistName), albumPath + "/" + fname);
                 count++;
             }
         }
@@ -170,7 +194,7 @@ void indexPlaylistFolder(File plDir, const String &plPath, const String &plName,
                             String fname = fileEntry.name();
                             if (hasAudioExtension(fname)) {
                                 writePlaylistRecord(idx, plName, artistName, albumName,
-                                                     stripExtension(fname), albumPath + "/" + fname);
+                                                     cleanTrackTitle(fname, artistName), albumPath + "/" + fname);
                                 count++;
                             }
                         }

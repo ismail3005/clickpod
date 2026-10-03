@@ -4466,6 +4466,47 @@ attempt worked end to end. This closes out the backlight-hardware saga
 ("Next session plan" item 7) and the fiftieth hardware bug's residual
 both at once.
 
+## Track titles stripped of a redundant "Artist - " prefix baked into the filename
+
+User flagged: Music/Playlists track rows show the title column and a
+separate artist sub-label side by side, and for files named
+"Artist - Title.ext" (common for ripped/downloaded files, even though
+they already live under that exact artist's own folder), the title
+column just showed the raw filename-minus-extension -- i.e. the artist
+name AGAIN, baked into the title text. For a long artist name (their
+example: "Red Hot Chili Peppers - Song.flac") that redundant prefix
+alone was wide enough to run the row out of space before the real
+title ever became visible, while the artist sub-label next to it shows
+the exact same name a second time.
+
+**Fixed** in `Library.cpp`, at the actual source of the title text --
+the on-SD index BUILD, not a display-time string hack. New
+`cleanTrackTitle(filename, artistName)` strips exactly a leading
+`"<artist> - "` prefix when it case-insensitively matches the track's
+own known artist (the folder it's being indexed under) -- both
+`indexAlbumFolder()`'s and `indexPlaylistFolder()`'s record-writing
+call sites now call this instead of the older bare `stripExtension()`.
+Deliberately narrow: only strips when the prefix matches the REAL known
+artist name exactly, not a generic "cut everything before the first
+' - '" rule -- a title that genuinely contains " - " for an unrelated
+reason (a featured artist credit, a subtitle) is left completely
+alone, since guessing at that pattern could eat real title text instead
+of just the redundant duplicate.
+
+**Only affects a freshly-built index** -- the on-SD index
+(`/clickpod.idx`) is only ever rebuilt on the FIRST boot or a manual
+"Rescan library" (Settings), per the existing on-SD-index design (see
+that dedicated section above) -- existing users need to run "Rescan
+library" once to pick up cleaned titles for files already indexed; a
+fresh/first-ever scan gets this automatically.
+
+**Not yet hardware-confirmed**. Next real step: Rescan library (or a
+fresh boot on a card with no index yet), open Playlists/Music, and
+confirm a file like "Red Hot Chili Peppers - Song.flac" (indexed under
+an Artist folder named "Red Hot Chili Peppers") now shows just "Song"
+in the title column instead of the redundant full "Red Hot Chili
+Peppers - Song" cut off mid-prefix.
+
 ## Working style this project has used (carry forward)
 
 - User is terse and direct; they'll correct behavior that doesn't match
