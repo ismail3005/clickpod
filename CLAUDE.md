@@ -3839,25 +3839,85 @@ stale by the lightweight per-minute clock tick.
 shows under "playing"/"paused", and confirm it updates correctly if the
 track changes while still locked.
 
-## Boot splash gained a logo above the "clickpod" name
+## Boot splash logo -- tried, reverted
 
-User's explicit ask, the last item on the current punch list ("cherry
-on top"): a quick logo above the "clickpod" text on the boot splash.
-`Screens.cpp` gained `drawLogo()` -- a small mini-device silhouette
-(rounded-rect body, a "screen" near the top, a round click-wheel with a
-center button near the bottom) in the same deliberately-simple-
-primitives style every other hand-drawn glyph in this file already uses
-(`drawBtGlyph()`/`drawNoteGlyph()`/etc.) -- plain lines/circles/rounded-
-rects, nothing needing a curve library. Deliberately echoes this
-project's own actual input hardware (an ANO rotary encoder + 5 buttons,
-i.e. a real click wheel) rather than an unrelated mark. `drawBoot()`
-now draws it above the "clickpod" text, which shifted down slightly
-(and "booting..." with it) to make room -- centered the same way the
-text already was.
+Added a small hand-drawn logo (`drawLogo()`) above the "clickpod" text,
+then iterated through a few pixel-art directions (a tilted vinyl record,
+a flat Minecraft-style disc, a traced Minecraft "broken disc fragment")
+with the user via Artifact previews, since nothing in this sandbox can
+render the real TFT_eSPI output directly. None of the directions landed
+-- user's call: drop it entirely, back to plain text. `drawBoot()` is
+reverted to exactly its pre-logo form (no `drawLogo()` function, no call
+site, original spacing). If a logo is wanted again later, start from a
+fresh direction rather than re-trying any of the three explored here.
 
-**Not yet hardware-confirmed**. Next real step: flash and confirm the
-logo renders centered, proportioned sensibly above the text, and isn't
-clipped/misaligned on the real 320x240 panel.
+## Forty-eighth real hardware bug (found and fixed -- a real regression introduced by the forty-sixth bug's own fix): the FLAC bitreader-underflow fix caused a genuine infinite-loop freeze
+
+Direct fallout from the forty-sixth bug's fix: user scrubbed back on a
+track and the device froze solid, serial log spamming `readUint():
+error in bitreader` continuously (thousands of times, ~5-6ms apart,
+never stopping) until power-cycled. This was NOT the heap-corruption
+crash that fix targeted -- this was a new failure mode the fix itself
+introduced.
+
+**Root cause, traced precisely**: the forty-sixth bug's fix made
+`readUint()` return `0` immediately once `s_f_bitReaderError` is set,
+without touching `s_flacBitBufferLen` (correctly, to avoid the uint8_t-
+underflow corruption that fix targeted) -- but that also means
+`s_flacBitBufferLen` stays permanently BELOW whatever `nBits` the next
+caller asks for, so the very next `readUint()` call re-enters its own
+while loop, re-checks `*bytesLeft <= 0` (still true, never recovers),
+re-logs the error, and returns 0 again -- forever, once per call,
+explaining both the log spam and the freeze. The real trigger:
+`readRiceSignedInt()`'s unary-coded-value loop,
+`while (readUint(1, bytesLeft) == 0) val++;` -- this loop has NO bound
+of its own, it trusts `readUint()` to eventually return nonzero (a
+real `1` bit terminating the unary run). Once `readUint()` can only
+ever return `0` again, this loop runs forever, incrementing `val`
+infinitely, never reaching the code after it that would have checked
+`s_f_bitReaderError` and bailed out cleanly (the forty-sixth bug's own
+"every caller already checks this" reasoning was wrong for exactly
+this one call site -- the caller never gets a chance to check anything
+because it never returns).
+
+A second, identical hazard was found and fixed at the same time: the
+"wasted bits-per-sample" unary-coded flag read in `decodeSubframe()`
+(`while (readUint(1, bytesLeft) == 0) { shift++; }`) has the exact same
+unbounded shape -- not yet reported as triggering this round, but
+provably capable of the same hang given the same underlying cause, so
+fixed alongside rather than waiting for a second crash report to find
+it.
+
+**Fixed at the real source** (fork, `clickpod-3.0.12-flac-patch`,
+commit `c6173f7`, re-pinned in `platformio.ini`), two parts:
+1. `readUint()` now checks `s_f_bitReaderError` as its very FIRST line
+   and returns `0` immediately -- stops the repeated re-entry/re-log
+   (only the original underflow logs once, not every subsequent call).
+2. Both unbounded unary-read loops (`readRiceSignedInt()`, and the
+   "wasted bits" read in `decodeSubframe()`) now check
+   `!s_f_bitReaderError` as part of their own loop condition, and bail
+   out (returning a value the caller chain already discards on error)
+   the instant the flag is set -- this is the actual fix for the hang;
+   part 1 alone stops the log spam but NOT the infinite loop, since the
+   loop's termination condition is "readUint() returns nonzero," which
+   a permanently-0-returning `readUint()` can never satisfy on its own.
+
+**Lesson, worth remembering for the next bitreader-adjacent patch**: a
+"return a safe dummy value on error" fix is only actually safe once
+EVERY caller that loops on that function's return value has its own
+bound independent of what the callee returns -- checking that a value
+IS eventually consumed by an error check (as the forty-sixth bug's
+writeup did, correctly, for the `decodeResidual()` call site) isn't the
+same as checking that every loop calling the function can actually
+REACH that check. An unbounded `while (f() == x) ...` loop is a red
+flag worth specifically grepping for after any change to what `f()`
+returns on an error path.
+
+**Not yet hardware-confirmed** -- no PlatformIO in this sandbox. Next
+real step: flash, and specifically repeat the scrub-back action that
+froze it -- confirm no hang and no `readUint(): error in bitreader`
+spam loop, while playback either recovers cleanly or the track gets
+skipped (per the existing decode-failure auto-skip), not frozen.
 
 ## Deferred: vaguer "menus were a bit confusing" feedback on playlist creation
 

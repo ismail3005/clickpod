@@ -149,41 +149,16 @@ void drawStatusbar() {
     tftPtr->fillRect(shellX + 1, shellY + 1, fillW, shellH - 2, p.sbarFg);
 }
 
-// Small mini-device logo for the boot splash -- a rounded-rect body with
-// a "screen" near the top and a round click-wheel (+ center button) near
-// the bottom, echoing this project's own ANO-rotary-encoder-plus-5-
-// buttons input (the actual hardware this whole UI navigates with)
-// rather than an unrelated mark. Same deliberately-simple-primitives
-// style every other hand-drawn glyph in this file already uses
-// (drawBtGlyph()/drawNoteGlyph()/etc.) -- plain lines/circles/rounded-
-// rects from a normalized size, nothing needing a curve library, so it
-// can be reasoned about for correctness without a way to preview it
-// before a flash.
-void drawLogo(int16_t cx, int16_t cy, int16_t size, uint16_t bodyColor, uint16_t wheelColor, uint16_t accentColor) {
-    int16_t w = size * 11 / 16;
-    int16_t h = size;
-    int16_t x = cx - w / 2;
-    int16_t y = cy - h / 2;
-    tftPtr->drawRoundRect(x, y, w, h, w / 6, bodyColor);
-    int16_t scrW = w * 2 / 3, scrH = h * 7 / 24;
-    tftPtr->drawRoundRect(cx - scrW / 2, y + h / 10, scrW, scrH, 2, bodyColor);
-    int16_t wheelR = w * 2 / 5;
-    int16_t wheelCy = y + h - wheelR - h / 10;
-    tftPtr->drawCircle(cx, wheelCy, wheelR, wheelColor);
-    tftPtr->fillCircle(cx, wheelCy, wheelR / 3, accentColor);
-}
-
 void drawBoot() {
     const Palette &p = pal();
     tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
-    drawLogo(kScreenW / 2, kBodyY + 58, 70, p.fg, p.fg, p.accent);
     tftPtr->setTextColor(p.fg, p.bg);
     tftPtr->setTextSize(3);
-    tftPtr->setCursor(kScreenW / 2 - 60, kBodyY + 108);
+    tftPtr->setCursor(kScreenW / 2 - 60, kBodyY + kBodyH / 2 - 20);
     tftPtr->print("clickpod");
     tftPtr->setTextSize(1);
     tftPtr->setTextColor(p.muted, p.bg);
-    tftPtr->setCursor(kScreenW / 2 - 24, kBodyY + 142);
+    tftPtr->setCursor(kScreenW / 2 - 24, kBodyY + kBodyH / 2 + 14);
     tftPtr->print("booting...");
 }
 
