@@ -73,7 +73,12 @@ void IRAM_ATTR onEncoderChange() {
     if (step != 0) {
         uint32_t now = micros();
         if (now - lastValidTransitionUs >= kMinTransitionIntervalUs) {
-            encoderDelta += step;
+            // Inverted (-= instead of +=): real hardware wiring has the
+            // encoder's physical CW/CCW sense opposite to what this table
+            // assumed -- CCW was scrolling down and CW was scrolling up,
+            // backwards from spec. Flipping the sign here (not the table
+            // itself) keeps the bounce-rejection logic untouched.
+            encoderDelta -= step;
             lastValidTransitionUs = now;
         }
     }
@@ -104,6 +109,27 @@ void AnoInput::begin() {
 
 void AnoInput::update() {
     uint32_t now = millis();
+
+    // TEMP DIAGNOSTIC -- remove once RIGHT/CENTER/DOWN wiring is confirmed.
+    // Prints the instant any of these three raw pins changes level,
+    // bypassing Bounce2/the button-name mapping entirely -- press each
+    // physical button once and see which GPIO line actually reacts, to
+    // find the real wiring instead of guessing at it.
+    {
+        static int lastRaw[3] = {-1, -1, -1};
+        int raw[3] = {
+            digitalRead(PIN_ANO_BTN_DOWN),
+            digitalRead(PIN_ANO_BTN_RIGHT),
+            digitalRead(PIN_ANO_BTN_CENTER),
+        };
+        const char *names[3] = {"GPIO35(DOWN)", "GPIO34(RIGHT)", "GPIO39(CENTER)"};
+        for (int i = 0; i < 3; i++) {
+            if (raw[i] != lastRaw[i]) {
+                Serial.printf("[diag] %s -> %s\n", names[i], raw[i] ? "HIGH" : "LOW");
+                lastRaw[i] = raw[i];
+            }
+        }
+    }
 
     for (uint8_t i = 0; i < kButtonCount; i++) {
         tapped[i] = false;
