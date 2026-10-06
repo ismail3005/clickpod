@@ -97,7 +97,15 @@ void AnoInput::begin() {
         // No INPUT_PULLUP exception needed here.)
         pinMode(kButtonPins[i], INPUT);
         debouncers[i].attach(kButtonPins[i]);
-        debouncers[i].interval(kDebounceMs);
+        // CENTER (GPIO39, input-only, zero internal pull capability) has
+        // shown spurious HIGH/LOW toggling correlating with WiFi radio
+        // activity on real hardware -- a longer debounce window filters
+        // shorter noise excursions without affecting legitimate button
+        // feel (still well under human perception). Does not fully solve
+        // a sustained noise event; see CLAUDE.md for the real fix (a
+        // decoupling capacitor at the pin).
+        bool isCenter = kButtonPins[i] == PIN_ANO_BTN_CENTER;
+        debouncers[i].interval(isCenter ? 50 : kDebounceMs);
     }
 
     pinMode(PIN_ANO_ENC_A, INPUT);
