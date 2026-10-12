@@ -130,7 +130,15 @@ static bool initSd() {
 static void initDisplay() {
     Serial.println(F("[bringup] Initializing display..."));
     tft.init();
-    tft.setRotation(1); // landscape; UI is built for 320x240
+    // Landscape, 320x240 -- UI is built for this. Rotation 3 instead of the
+    // more common 1: both are landscape at the same resolution, just
+    // mirrored 180 degrees from each other, chosen to let the display be
+    // physically mounted with its ribbon/wiring exiting the more
+    // convenient side for this case (a purely physical-mounting choice --
+    // nothing in Screens.cpp/MenuEngine.cpp needs to know or care which
+    // rotation value this is, since everything draws in the same logical
+    // 320x240 space either way).
+    tft.setRotation(3);
     tft.fillScreen(TFT_BLACK);
     Serial.println(F("[bringup] Display initialized."));
 }
