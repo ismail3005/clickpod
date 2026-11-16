@@ -5,6 +5,7 @@
 
 #include "../audio/AudioBridge.h"
 #include "../audio/FlacMeta.h"
+#include "../input/AnoInput.h"
 
 namespace AlbumArt {
 namespace {
@@ -27,6 +28,17 @@ bool artValid = false;
 uint16_t *decodeBuf = nullptr;
 uint16_t decodeW = 0, decodeH = 0;
 
+bool interrupted = false;
+
+// Run between slices of the slow work below: feeds the playing track's
+// input buffer and samples the buttons. Returns true if there is now user
+// input waiting -- the signal to drop the cover and get out of the way.
+bool backgroundTick() {
+    AudioBridge::pump();
+    AnoInput::update();
+    return AnoInput::hasPendingEvent();
+}
+
 // Called by TJpg_Decoder once per decoded block (MCU). Copies the block
 // into decodeBuf, clipped to it.
 bool tjpgCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap) {
@@ -41,9 +53,13 @@ bool tjpgCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap
         }
     }
     // A cover decode can take a good fraction of a second on the main
-    // loop's task; keep the playing track's input buffer fed meanwhile.
+    // loop's task. Every few blocks: keep things alive, and stop (false
+    // aborts TJpg_Decoder's decode) if the user wants something.
     static uint8_t blocks = 0;
-    if ((++blocks & 0x0F) == 0) AudioBridge::pump();
+    if ((++blocks & 0x07) == 0 && backgroundTick()) {
+        interrupted = true;
+        return false;
+    }
     return true;
 }
 
@@ -67,25 +83,28 @@ void begin(TFT_eSPI &tft) {
 
 void clear() { artValid = false; }
 
-bool loadForTrack(const String &path) {
+LoadResult loadForTrack(const String &path) {
     artValid = false;
-    if (!artBuf) return false;
+    interrupted = false;
+    if (!artBuf) return LoadResult::NoArt;
 
     uint8_t *jpgData = nullptr;
     size_t jpgLen = 0;
     String mime;
-    if (!FlacMeta::readPicture(path, jpgData, jpgLen, mime, AudioBridge::pump)) return false;
+    if (!FlacMeta::readPicture(path, jpgData, jpgLen, mime, backgroundTick)) {
+        return AnoInput::hasPendingEvent() ? LoadResult::Interrupted : LoadResult::NoArt;
+    }
 
     bool isJpeg = mime.indexOf("jpeg") >= 0 || mime.indexOf("jpg") >= 0;
     if (!isJpeg) {
         free(jpgData);
-        return false;
+        return LoadResult::NoArt;
     }
 
     uint16_t w = 0, h = 0;
     if (TJpgDec.getJpgSize(&w, &h, jpgData, jpgLen) != JDR_OK || w == 0 || h == 0) {
         free(jpgData);
-        return false;
+        return LoadResult::NoArt;
     }
 
     // Decode at the smallest power-of-2 downscale (1/2/4/8, TJpg_Decoder's
@@ -103,13 +122,13 @@ bool loadForTrack(const String &path) {
     decodeH = h / scale;
     if (decodeW == 0 || decodeH == 0) {
         free(jpgData);
-        return false;
+        return LoadResult::NoArt;
     }
 
     decodeBuf = (uint16_t *)ps_malloc((size_t)decodeW * decodeH * sizeof(uint16_t));
     if (!decodeBuf) {
         free(jpgData);
-        return false;
+        return LoadResult::NoArt;
     }
     memset(decodeBuf, 0, (size_t)decodeW * decodeH * sizeof(uint16_t));
 
@@ -119,7 +138,7 @@ bool loadForTrack(const String &path) {
     if (r != JDR_OK) {
         free(decodeBuf);
         decodeBuf = nullptr;
-        return false;
+        return interrupted ? LoadResult::Interrupted : LoadResult::NoArt;
     }
 
     // Real resize, not a crop: fit decodeW x decodeH into the kSize x
@@ -156,7 +175,7 @@ bool loadForTrack(const String &path) {
     free(decodeBuf);
     decodeBuf = nullptr;
     artValid = true;
-    return true;
+    return LoadResult::Loaded;
 }
 
 void draw(int x, int y, int w, int h, char fallbackGlyph, uint16_t fallbackBg) {

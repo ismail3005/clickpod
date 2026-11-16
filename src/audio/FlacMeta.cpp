@@ -158,7 +158,7 @@ bool readInfo(const String &path, StreamInfo &info, Tags &tags) {
     return gotInfo;
 }
 
-bool readPicture(const String &path, uint8_t *&outData, size_t &outLen, String &outMime, void (*idle)()) {
+bool readPicture(const String &path, uint8_t *&outData, size_t &outLen, String &outMime, bool (*idle)()) {
     return walkBlocks(path, [&](File &f, uint8_t type, uint32_t len) {
         if (type != 6) return false; // PICTURE
         // Fixed fields: type(4) mimeLen(4) .. descLen(4) w(4) h(4) depth(4)
@@ -193,7 +193,7 @@ bool readPicture(const String &path, uint8_t *&outData, size_t &outLen, String &
             uint32_t want = min(kChunk, dataLen - got);
             if (f.read(buf + got, want) != want) { free(buf); return false; }
             got += want;
-            if (idle) idle();
+            if (idle && idle()) { free(buf); return false; } // abandoned
         }
 
         outData = buf;

@@ -140,9 +140,11 @@ void AnoInput::update() {
     }
 
     for (uint8_t i = 0; i < kButtonCount; i++) {
-        tapped[i] = false;
-        longPressed[i] = false;
-
+        // tapped[]/longPressed[] are NOT cleared here: they are latched
+        // until wasTapped()/wasLongPressed() reads them. update() can be
+        // called again before the UI gets round to reading (long
+        // main-loop work polls it so a quick press isn't missed while the
+        // loop is busy), and an event must survive that.
         debouncers[i].update();
 
         if (debouncers[i].fell()) {
@@ -191,11 +193,35 @@ int16_t AnoInput::takeEncoderDelta() {
 }
 
 bool AnoInput::wasTapped(AnoButton button) {
-    return tapped[static_cast<uint8_t>(button)];
+    bool &flag = tapped[static_cast<uint8_t>(button)];
+    bool was = flag;
+    flag = false;
+    return was;
 }
 
 bool AnoInput::wasLongPressed(AnoButton button) {
-    return longPressed[static_cast<uint8_t>(button)];
+    bool &flag = longPressed[static_cast<uint8_t>(button)];
+    bool was = flag;
+    flag = false;
+    return was;
+}
+
+bool AnoInput::hasPendingEvent() {
+    if (centerDoubleTapEvent || encoderDelta != 0) return true;
+    for (uint8_t i = 0; i < kButtonCount; i++) {
+        if (tapped[i] || longPressed[i]) return true;
+    }
+    return false;
+}
+
+void AnoInput::discardEvents() {
+    for (uint8_t i = 0; i < kButtonCount; i++) {
+        tapped[i] = false;
+        longPressed[i] = false;
+    }
+    centerDoubleTapEvent = false;
+    centerAwaitingSecondTap = false;
+    takeEncoderDelta();
 }
 
 bool AnoInput::isHeld(AnoButton button) {

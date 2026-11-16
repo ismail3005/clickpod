@@ -12,28 +12,46 @@ enum class AnoButton : uint8_t { UP, DOWN, LEFT, RIGHT, CENTER, COUNT };
 namespace AnoInput {
 
 void begin();
-void update(); // call every loop() iteration, cheap
+
+// Samples the buttons. Call every loop() iteration -- and it is fine (and
+// useful) to call it more often: the buttons are polled, not
+// interrupt-driven, so a press that both starts and ends while the main
+// loop is busy with something long would otherwise never be seen. Long
+// operations call this as they go; the events it detects are latched
+// until read (see below).
+void update();
 
 // Encoder detents accumulated since the last call, then reset to 0.
 // Positive = clockwise, negative = counter-clockwise.
 int16_t takeEncoderDelta();
 
-// True for exactly one update() call when the button was just released
-// after a short press (below the long-press threshold). For CENTER, this
-// only fires after the double-tap window has elapsed with no second tap --
-// see centerWasDoubleTapped() for that case instead.
+// True ONCE per short press, after the button is released (below the
+// long-press threshold): latched by update(), cleared by this call. For
+// CENTER, this only fires after the double-tap window has elapsed with no
+// second tap -- see centerWasDoubleTapped() for that case instead.
 bool wasTapped(AnoButton button);
 
-// True for exactly one update() call, the moment a held button crosses
-// the long-press threshold (fires once, on hold -- not on release).
+// True ONCE per hold, from the moment a held button crosses the
+// long-press threshold (on hold -- not on release). Latched like
+// wasTapped().
 bool wasLongPressed(AnoButton button);
+
+// True if anything is waiting to be read (a tap, a long-press, a
+// double-tap, encoder movement). Lets slow background work -- the cover
+// art decode -- get out of the way of the user instead of making them
+// wait for it.
+bool hasPendingEvent();
+
+// Throws away everything latched so far (used while the boot splash is
+// up, so buttons pressed during boot don't fire at the first screen).
+void discardEvents();
 
 // True while the button is currently held down, past debounce. Useful for
 // continuous behavior while held (e.g. MENU fast-scroll on UP/DOWN).
 bool isHeld(AnoButton button);
 
-// CENTER only: true for exactly one update() call when a second tap
-// landed within the double-tap window of the first release.
+// CENTER only: true once when a second tap landed within the double-tap
+// window of the first release.
 bool centerWasDoubleTapped();
 
 } // namespace AnoInput

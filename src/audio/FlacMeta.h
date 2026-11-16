@@ -58,11 +58,12 @@ bool readInfo(const String &path, StreamInfo &info, Tags &tags);
 
 // First PICTURE block found (typically front cover art). Caller owns the
 // returned buffer and must free() it. Returns false (outData untouched)
-// if the file has no usable PICTURE block. A cover image is routinely
-// hundreds of KB, i.e. a long blocking SD read -- `idle`, if given, is
-// called between chunks (pass AudioBridge::pump so playback keeps being
-// fed meanwhile).
+// if the file has no usable PICTURE block (or the read was abandoned). A
+// cover image is routinely hundreds of KB, i.e. a long blocking SD read
+// -- `idle`, if given, is called between chunks, to keep playback fed and
+// the buttons sampled meanwhile; if it returns true the read is abandoned
+// (the caller has something more urgent to do and will come back).
 bool readPicture(const String &path, uint8_t *&outData, size_t &outLen, String &outMime,
-                  void (*idle)() = nullptr);
+                  bool (*idle)() = nullptr);
 
 } // namespace FlacMeta

@@ -309,6 +309,10 @@ pio run -t upload       # flash
 pio device monitor      # serial monitor (115200 baud)
 ```
 
+**A cloud session can build now** (`pip install platformio && pio run`,
+since the 2026-11 audit round -- see its "How this was verified"). The
+paragraphs below about having no PlatformIO in the sandbox are history.
+
 No PlatformIO CLI was available in the cloud session that built the UI
 port — code was syntax/link-checked against hand-written stub headers
 (Arduino.h/TFT_eSPI.h/Audio.h/SD.h) standing in for the real libraries,
@@ -4780,7 +4784,7 @@ several earlier sections of this file:
   file, and again after every seek. That fill is the dominant
   track-start and scrub-commit latency.
 
-### Fork fixes (`clickpod-3.0.12-flac-patch`, commit `581b791`, re-pinned)
+### Fork fixes (`clickpod-3.0.12-flac-patch`, commits `581b791` + `8e5faad`, re-pinned to `8e5faad`)
 
 Three confirmed memory-safety bugs, in order of how much they explain:
 
@@ -4808,7 +4812,10 @@ Three confirmed memory-safety bugs, in order of how much they explain:
    `m_outBuff`/`m_validSamples`.
 
 Also: decode task stack 3300 -> 4608 bytes (it now also runs our
-Bluetooth feed hook; headroom, not a measured need).
+Bluetooth feed hook; headroom, not a measured need). And (`8e5faad`)
+`processLocalFile()` reads SD in 32KB steps per `loop()` call instead
+of 256KB: the buffer fills as fast overall, but the loop task is no
+longer frozen for hundreds of ms at each track start/seek.
 
 **Earlier fork fixes (CRC-8 resync, STREAMINFO preserve, bitreader
 underflow, block-size check, unconditional reset) all stay** -- they are
@@ -4900,6 +4907,35 @@ the decoded backtrace first; don't theorize.
   GLCD font can't show it -- "Beyoncé" rendered as garbage and threw
   off centering.
 
+### Build reproducibility: `platform` is now pinned (`espressif32@<7`)
+
+Found by the first real build in a cloud session (see "How this was
+verified"): `platform = espressif32` was unpinned, and a fresh install
+now resolves to **espressif32 8.0.0 = Arduino core 3.3.x / GCC 14**,
+where `ledcSetup()`/`ledcAttachPin()`/`ledcDetachPin()` no longer exist
+-- the build fails in `Screens.cpp`/`MenuEngine.cpp`. It only kept
+working on the user's machine because PlatformIO doesn't upgrade an
+installed platform by itself; a `pio pkg update` or a new machine would
+have broken it. `@<7` leaves any installed 4.x-6.x alone and gives a
+fresh install 6.13.0 (core 2.0.17, GCC 8.4.0 -- the family everything
+here, including the pinned libraries, was written against). Moving to
+core 3.x is a real port (LEDC API, I2S driver, A2DP library version),
+not a version bump -- don't do it casually.
+
+### Input: events are latched, long work polls the buttons
+
+The five buttons are polled (`AnoInput::update()`), not interrupt-
+driven, so a quick tap that both started and ended while the main loop
+was busy (a redraw, a buffer fill, a cover decode) was simply never
+seen. Two changes: tap/long-press events are now LATCHED until
+`InputRouter` reads them (`wasTapped()`/`wasLongPressed()` consume), so
+`update()` can safely be called more than once per pass; and the slow
+operations call it as they go. The cover-art load goes one further: if
+anything is pressed or turned while it is working it abandons the
+decode at once (`AlbumArt::LoadResult::Interrupted`) and
+`serviceDeferredWork()` retries 600ms later -- so skip-skip-skip never
+waits on a JPEG. Events latched during the boot splash are discarded.
+
 ### Speed
 
 - **Track start**: metadata (STREAMINFO + tags) is read in ONE open
@@ -4956,21 +4992,30 @@ comments describing Bluetooth as a "440Hz test tone".
 
 ### How this was verified (and what that does NOT cover)
 
-- **Type-checked**: every `.cpp` compiles clean (`g++ -std=gnu++17
-  -fsyntax-only -Wall -Wextra`) against hand-written stub headers for
-  Arduino/ESP-IDF/the libraries. Catches typos and type errors; says
-  nothing about real API mismatches.
+- **Really built.** This cloud session got PlatformIO working (the
+  environment's network policy now allows `api.registry.platformio.org`
+  and `dl.registry.platformio.org`; `pip install platformio`, then
+  `pio run`): platform espressif32 6.13.0, Arduino core 2.0.17,
+  `toolchain-xtensa-esp32 8.4.0`. The whole firmware AND the patched
+  fork compile and link -- **zero warnings in `src/` or the fork** --
+  into a 2.26MB image (72% of the `huge_app` slot; 70KB static RAM).
+  This is the first time code in this repo was compiled before being
+  handed over, so "not compiled, no PlatformIO in this sandbox" caveats
+  elsewhere in this file no longer apply to future sessions on this
+  environment: **build before you push.**
+- **Type-checked** as well against hand-written stub headers (`g++
+  -fsyntax-only -Wall -Wextra`), the older method -- now redundant.
 - **Actually run on the host**, under AddressSanitizer+UBSan, against a
   generated card tree and real FLAC files (made with ffmpeg):
   `Library` (build, sorted order, reload, truncated index, old-format
   index, corrupt length field, playlist overlay/delete) and `FlacMeta`
   (tags, picture, 24-bit detection, ID3 prefix, truncated file, hostile
   comment count / MIME length / block length), plus `asciiFold()`.
-- **Fork changes were NOT compiled** -- small, mechanical, read twice,
-  but uncompiled.
-- **Nothing has run on the ESP32.** Unverified in particular: real
-  timing (is 256KB enough slack? is art-after-start smooth?), the
-  Bluetooth teardown changes, every partial redraw's pixels.
+- **Nothing has run on the ESP32.** A clean build says nothing about
+  behavior. Unverified in particular: real timing (is 256KB enough
+  slack? is art-after-start smooth?), the fork's locking under a real
+  two-core decode, the Bluetooth teardown changes, every partial
+  redraw's pixels, latched input feel.
 - First flash checklist: (1) boot -- expect one ~20s index rebuild, then
   fast boots; (2) play through a track end and scrub hard, wired and
   over Bluetooth, on a file that used to crash; (3) skip rapidly;
@@ -4978,7 +5023,8 @@ comments describing Bluetooth as a "440Hz test tone".
   runs out; (5) Bluetooth: connect, picker in/out, off; (6) watch for
   audio dropouts when opening a big playlist or when the cover appears
   -- if there are any, raise `kInputBufferBytes` in `AudioBridge.cpp`
-  first; (7) `[time]` lines hours apart, not minutes.
+  first; (7) `[time]` lines hours apart, not minutes; (8) the three
+  `[diag]` buttons, then delete that block.
 
 ## Working style this project has used (carry forward)
 

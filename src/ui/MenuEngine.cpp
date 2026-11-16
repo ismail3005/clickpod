@@ -139,6 +139,8 @@ String tagLyricsKey;
 // Cover art for the current track still to be decoded -- see
 // setNowPlaying() and serviceDeferredWork().
 bool artPending = false;
+uint32_t artRetryAfterMs = 0; // when the last attempt was interrupted by user input
+constexpr uint32_t kArtRetryDelayMs = 600;
 
 // Consecutive tracks that failed outright (could not be opened, or died
 // without producing any audio). A card that has been pulled or gone bad
@@ -227,6 +229,7 @@ void setNowPlaying(Track t) {
 
     AlbumArt::clear(); // never show the previous track's cover under this one
     artPending = t.path.length() > 0 && !unsupported;
+    artRetryAfterMs = millis() - kArtRetryDelayMs; // no hold-off for a fresh track
     state.dirty = true;
 }
 
@@ -878,6 +881,9 @@ void togglePlayPause() {
         state.now.playing = true;
         // A seek made while paused is only carried out now.
         if (state.seekSettleUntilMs) state.seekSettleUntilMs = millis() + kSeekSettleMs;
+        // Paused before it had produced any audio: the "no audio yet"
+        // safety net (UI.cpp) must count from now, not from before the pause.
+        if (!state.now.playbackConfirmed) state.now.startedAtMs = millis();
     } else if (state.now.path.length() > 0 && st != AudioBridge::Status::Playing &&
                st != AudioBridge::Status::Starting) {
         failStreak = 0;
@@ -923,8 +929,23 @@ void serviceDeferredWork() {
     if (!artPending) return;
     if (state.mode == AppMode::OFF) return; // locked/pocketed: wait until someone can see it
     if (!AudioBridge::streamSettled() && millis() - state.now.startedAtMs < kArtMaxWaitMs) return;
-    artPending = false;
-    if (AlbumArt::loadForTrack(state.now.path)) state.artDirty = true;
+    if (millis() - artRetryAfterMs < kArtRetryDelayMs) return;
+    switch (AlbumArt::loadForTrack(state.now.path)) {
+        case AlbumArt::LoadResult::Loaded:
+            artPending = false;
+            state.artDirty = true;
+            break;
+        case AlbumArt::LoadResult::NoArt:
+            artPending = false;
+            break;
+        case AlbumArt::LoadResult::Interrupted:
+            // The user pressed/turned something mid-decode and the decode
+            // stepped aside. Still wanted (unless that input changes the
+            // track, in which case setNowPlaying() re-arms this for the
+            // new one) -- try again once things have been quiet a moment.
+            artRetryAfterMs = millis();
+            break;
+    }
 }
 
 // --- Playback outcome reporting (UI.cpp's tickPlayback()) ---

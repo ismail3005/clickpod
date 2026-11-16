@@ -142,7 +142,11 @@ bool isRunning() { return status() == Status::Playing; }
 
 bool streamSettled() {
     if (status() != Status::Playing) return status() != Status::Starting;
-    return audioPtr->inBufferFilled() * 2 >= audioPtr->inBufferSize() || audioPtr->getAudioCurrentTime() >= 1;
+    // The library starts decoding once its buffer is all but full, so
+    // "90% full" means the first sound is out (or about to be); a file
+    // smaller than the buffer never gets there and is caught by the
+    // decoder's own position instead.
+    return audioPtr->inBufferFilled() * 10 >= audioPtr->inBufferSize() * 9 || audioPtr->getAudioCurrentTime() >= 1;
 }
 
 void pauseResume() {

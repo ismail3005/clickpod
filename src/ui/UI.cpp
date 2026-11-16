@@ -222,6 +222,7 @@ void begin(TFT_eSPI &tft) {
 
 void update() {
     if (!booted) {
+        AnoInput::discardEvents(); // nothing pressed during the splash should fire at the first screen
         if (millis() - bootAt >= kBootMs) {
             booted = true;
             state.mode = AppMode::MENU;
