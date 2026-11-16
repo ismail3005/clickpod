@@ -1,7 +1,6 @@
 #include "InputRouter.h"
 
 #include "../audio/AudioBridge.h"
-#include "../bt/BluetoothSource.h"
 #include "../state/AppState.h"
 #include "MenuEngine.h"
 #include "Screens.h"
@@ -22,40 +21,16 @@ constexpr int kAodBrightnessPercent = 8;
 AnoButton repeatButton = AnoButton::COUNT; // COUNT = "no button currently fast-scrolling"
 uint32_t repeatLastMs = 0;
 
-// Scrubbing (rotate() in NOW_PLAYING mode) used to call AudioBridge::
-// seekTo() -- a REAL decoder seek -- on every single encoder detent. A
-// periodic throttle (first attempt) didn't actually fix the reported
-// "still laggy as fuck" scrubbing, because the real cost isn't call
-// FREQUENCY -- it's that each individual seekTo() call plausibly blocks
-// the main loop/task for a real stretch (finding the target byte offset
-// in the file and resyncing the FLAC decoder isn't instant), and that
-// block happens on the SAME task InputRouter::update() runs on. Throttling
-// to "at most once per N ms" doesn't help when a single call can itself
-// take closer to that same N ms or more -- the UI still stalls mid-spin
-// waiting on it.
-//
-// Fixed properly with a debounced "commit on pause" pattern instead of a
-// periodic one: rotate() NEVER calls seekTo() directly anymore -- it only
-// updates the displayed position (free) and records what the real
-// decoder should eventually seek to. InputRouter::update() (called every
-// loop() iteration regardless of input) checks once per call whether
-// rotation has been idle for kScrubIdleCommitMs; only once the user
-// actually stops turning does the ONE real seek fire, landing on the
-// final position. This means a fast continuous spin never blocks on a
-// real seek at all -- only the brief pause at the end does -- so the UI
-// stays responsive throughout the whole scrub gesture, not just at a
-// capped rate.
-// 150ms (the original value) still let a long, steady scrub across most of a
-// track fire many real seeks -- each one re-enters ESP32-audioI2S's FLAC
-// resync path (flac_correctResumeFilePos() scans forward for the next
-// 0xFF/0xF8 syncword, a false-positive-prone 16-bit match against compressed
-// audio data, then FLACDecoderReset()+InBuff.resetBuffer()), which is a
-// lightly-exercised, seek-only code path -- see CLAUDE.md's heap-corruption
-// writeup. Raised to cut how many times a single scrub gesture re-enters
-// that path, not just to feel smoother.
+// Scrubbing is "commit on pause": rotate() only moves the DISPLAYED
+// position (free) and notes where the decoder should end up; the one real
+// seek is issued by update() once the wheel has been still this long. A
+// real seek makes the decoder refill its input buffer from SD and resync,
+// so issuing one per encoder detent (the first version), or even on a
+// timer, made the UI stall mid-spin; this way a continuous spin never
+// waits on a seek at all. 400ms (not the original 150) so that one long,
+// steady scrub is one seek rather than several.
 constexpr uint32_t kScrubIdleCommitMs = 400;
-bool scrubSeekPending = false;
-uint16_t scrubPendingSec = 0;
+uint16_t scrubPendingSec = 0; // valid while state.scrubPending
 uint32_t lastScrubRotateMs = 0;
 
 void startHoldRepeat(AnoButton b, int dir) {
@@ -81,36 +56,26 @@ void togglePower() {
 
 void rotate(int dir) {
     if (state.mode == AppMode::OFF) return;
-    if (state.mode == AppMode::MENU || state.mode == AppMode::BT) {
+    if (state.mode == AppMode::MENU || state.mode == AppMode::BT || state.mode == AppMode::TRACK_MENU) {
+        // (TRACK_MENU was missing here: the wheel did nothing on the "..."
+        // track menu, only UP/DOWN moved its cursor.)
         MenuEngine::moveSelection(dir > 0 ? 1 : -1);
     } else if (state.mode == AppMode::NOW_PLAYING) {
-        // 1 second/tick, not 3 -- "finer" scrubbing per user feedback.
-        // Simple fixed step, not variable/accelerating like some iPod-style
-        // scroll wheels -- if 1s/tick feels too slow to cross a long track,
-        // that's the next thing to try (not attempted here).
+        // Nothing to scrub within if the length isn't known (yet).
+        if (!state.now.hasTrack || state.now.durSec == 0) return;
+        // 1 second/tick -- "finer" scrubbing per user feedback. Only the
+        // DISPLAYED position moves here; the real seek is committed once,
+        // by update(), when the wheel has been still for
+        // kScrubIdleCommitMs (see the comment there). state.scrubPending
+        // also tells UI.cpp to stop syncing the bar from the decoder
+        // meanwhile, so the two don't fight ("rubberbanding").
         state.now.posSec = constrain(state.now.posSec + dir * 1, 0.0f, (float)state.now.durSec);
-        // Does NOT call AudioBridge::seekTo() directly anymore -- see the
-        // big comment above kScrubIdleCommitMs for why a periodic throttle
-        // here wasn't enough. Just records what the real decoder should
-        // eventually seek to; InputRouter::update() commits it once
-        // rotation goes idle.
         if (state.now.path.length() > 0) {
             scrubPendingSec = (uint16_t)state.now.posSec;
-            scrubSeekPending = true;
             lastScrubRotateMs = millis();
-            // See AppState.h's comment -- tells UI.cpp's tickPlaybackClock()
-            // to stop syncing posSec from the real decoder position while a
-            // scrub is in flight, so its periodic sync can't fight this
-            // rotate()'s own posSec update (the "rubberbanding" bug: the
-            // real decoder hasn't moved yet, the seek is debounced, so the
-            // display kept snapping back to the stale real position).
             state.scrubPending = true;
         }
-        // progressDirty (light redraw: just the position/time strip), not
-        // the full state.dirty -- scrubbing only changes the displayed
-        // position, nothing else on this screen, so there's no reason to
-        // pay for a full-body fillRect+text redraw on every single tick.
-        state.progressDirty = true;
+        state.progressDirty = true; // just the position strip
     } else if (state.mode == AppMode::QUEUE) {
         MenuEngine::moveQueueSelection(dir > 0 ? 1 : -1);
     } else if (state.mode == AppMode::SET_TIME) {
@@ -136,19 +101,16 @@ void handleTap(AnoButton btn) {
             MenuItem *item = (m && !m->items.empty()) ? &m->items[m->selected] : nullptr;
             if (item && item->isSlider) {
                 MenuEngine::adjustSlider(*item, -item->sliderStep);
+                return; // flags its own (light) redraw
             } else if (item && item->isChoice) {
                 MenuEngine::cycleChoice(*item, -1);
+                return;
             } else if (state.mode == AppMode::BT) {
-                // BT mode can now be TWO levels deep (status screen, then
-                // the real device picker -- see MenuEngine::
-                // enterBluetoothDevicePicker()), same pop-one-level-first
-                // pattern TRACK_MENU already uses below, instead of always
-                // jumping all the way out of Bluetooth in one LEFT press.
-                // Cancel any in-progress discovery scan when backing out
-                // of the picker specifically -- no point letting it keep
-                // scanning once the user's no longer looking at the list.
+                // BT mode can be two levels deep (status screen, then
+                // the device picker) -- pop one level at a time.
                 if (state.menuStack.size() > 1) {
-                    BluetoothSource::cancelDiscovery();
+                    // Leaving the picker: UI.cpp notices and shuts the
+                    // scan (and the stack it needed) down.
                     state.menuStack.pop_back();
                 } else {
                     MenuEngine::exitBluetooth();
@@ -164,25 +126,31 @@ void handleTap(AnoButton btn) {
             MenuItem &item = m->items[m->selected];
             if (item.isSlider) MenuEngine::adjustSlider(item, item.sliderStep);
             else if (item.isChoice) MenuEngine::cycleChoice(item, 1);
-            else if (item.action) item.action();
+            else if (item.action) {
+                // Run a COPY. Most actions replace or clear the very menu
+                // stack this row lives in (open a submenu overlay, go
+                // back, rebuild the main menu...), which destroys the
+                // row -- and with it the std::function being executed and
+                // everything it captured -- while it is still running.
+                auto action = item.action;
+                action();
+            }
         }
     } else if (state.mode == AppMode::NOW_PLAYING) {
         if (btn == AnoButton::UP) {
             state.volume = min(100, state.volume + 5);
             AudioBridge::setVolumePercent(state.volume);
-            state.dirty = true;
+            state.controlsDirty = true; // just the volume bar, not the whole screen
         } else if (btn == AnoButton::DOWN) {
             state.volume = max(0, state.volume - 5);
             AudioBridge::setVolumePercent(state.volume);
-            state.dirty = true;
+            state.controlsDirty = true;
         } else if (btn == AnoButton::LEFT) {
             MenuEngine::skipPrevious();
         } else if (btn == AnoButton::RIGHT) {
             MenuEngine::playNextInQueue();
         } else if (btn == AnoButton::CENTER) {
-            state.now.playing = !state.now.playing;
-            AudioBridge::pauseResume();
-            state.dirty = true;
+            MenuEngine::togglePlayPause();
         }
     } else if (state.mode == AppMode::LYRICS) {
         // CENTER or LEFT (the app's usual back gesture) both return to Now
@@ -272,6 +240,7 @@ void handleLongPress(AnoButton btn) {
             // played, down for what's next" read naturally on open.
             state.mode = AppMode::QUEUE;
             state.queueSelected = (int)state.history.size();
+            state.queueViewStart = -1; // re-center on "now", see AppState.h
             state.queueGrabbed = false;
             state.dirty = true;
         }
@@ -339,26 +308,14 @@ void update() {
         }
     }
 
-    // Commits a pending scrub seek once rotation has paused for
-    // kScrubIdleCommitMs -- see the big comment near kScrubIdleCommitMs's
-    // declaration. Runs every loop() iteration (cheap check, the real
-    // seek only actually fires once per scrub gesture).
-    // Known, accepted edge case: if the user skips to a DIFFERENT track
-    // within this same kScrubIdleCommitMs window right after releasing
-    // the encoder, this fires against the new track instead of being
-    // cancelled -- needs a sub-150ms button-press-right-after-scrub-
-    // release sequence to trigger, and the consequence is a single
-    // incorrect seek the user can immediately re-scrub past, not worth
-    // the added bookkeeping (tracking which track a pending seek belongs
-    // to) to close for now.
-    if (scrubSeekPending && millis() - lastScrubRotateMs >= kScrubIdleCommitMs) {
-        AudioBridge::seekTo(scrubPendingSec);
-        scrubSeekPending = false;
-        // Real seek just committed -- let UI.cpp's tickPlaybackClock()
-        // resume syncing posSec from the real decoder position again, now
-        // that there's something real to sync FROM (see rotate()'s comment
-        // on state.scrubPending).
-        state.scrubPending = false;
+    // Commits a pending scrub once the wheel has been still for
+    // kScrubIdleCommitMs -- ONE real seek per scrub gesture, landing on
+    // the final position (see the comment on kScrubIdleCommitMs). The
+    // pending flag lives in state so that a track change in the meantime
+    // (MenuEngine::setNowPlaying() clears it) cancels the seek instead of
+    // applying the old track's scrub position to the new one.
+    if (state.scrubPending && millis() - lastScrubRotateMs >= kScrubIdleCommitMs) {
+        MenuEngine::seekCurrentTo(scrubPendingSec); // clears state.scrubPending
     }
 }
 

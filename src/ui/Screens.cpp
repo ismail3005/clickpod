@@ -24,7 +24,7 @@ constexpr int kBacklightLedcChannel = 0;
 constexpr int kBacklightLedcFreqHz = 5000;
 constexpr int kBacklightLedcResolutionBits = 8;
 
-// Physical screen is 320x240 landscape (ILI9341, rotation 1) -- same frame
+// Physical screen is 320x240 landscape (ILI9341) -- same frame
 // the simulator's CSS aspect-ratio:320/240 was built against, so these
 // pixel values line up 1:1 with the percentages used there.
 constexpr int16_t kScreenW = 320;
@@ -34,21 +34,52 @@ constexpr int16_t kBodyY = kStatusbarH;
 constexpr int16_t kBodyH = kScreenH - kStatusbarH;
 
 struct Palette {
-    uint16_t bg, fg, muted, muted2, border, sbarBg, sbarFg, accent, accent2;
+    uint16_t bg, fg, muted, muted2, border, sbarBg, sbarFg, accent;
 };
 
 // Mirrors the simulator's --scr-* CSS custom properties for .screen /
 // .screen.dark.
 const Palette kLight = {
     TFT_WHITE, TFT_BLACK, 0x7BEF /*gray*/, 0xC618 /*light gray*/, 0xDEFB,
-    0xDEFB, 0x2965, 0x2D9F /*blue*/, 0x0725 /*teal*/,
+    0xDEFB, 0x2965, 0x2D9F /*blue*/,
 };
 const Palette kDark = {
     0x1082 /*near-black*/, 0xFFFF, 0x8410, 0x6B4D, 0x2965,
-    0x18E3, 0xFFFF, 0x2D9F, 0x0725,
+    0x18E3, 0xFFFF, 0x2D9F,
 };
 
 const Palette &pal() { return state.darkMode ? kDark : kLight; }
+
+// ---- Text ----------------------------------------------------------------
+//
+// Everything on screen is drawn in the built-in GLCD font at size 1 (6x8
+// pixel cells) unless noted. Two rules every string from a tag or filename
+// goes through, via fitText():
+//  - asciiFold(): the font can't show UTF-8 (see Util.h);
+//  - a hard width limit. Nothing used to limit width at all: a long title
+//    ran over the right-aligned sub-label on its own row, and (TFT_eSPI
+//    wraps text by default) on into the row below it.
+constexpr int16_t kCharW = 6;
+
+String fitText(const String &s, int16_t maxPx) {
+    String t = asciiFold(s);
+    int maxChars = maxPx / kCharW;
+    if (maxChars <= 0) return String();
+    if ((int)t.length() <= maxChars) return t;
+    if (maxChars <= 2) return t.substring(0, maxChars);
+    return t.substring(0, maxChars - 2) + "..";
+}
+
+void printAt(const String &s, int16_t x, int16_t y, int16_t maxPx) {
+    tftPtr->setCursor(x, y);
+    tftPtr->print(fitText(s, maxPx));
+}
+
+void printCentered(const String &s, int16_t y, int16_t maxPx = kScreenW - 20) {
+    String t = fitText(s, maxPx);
+    tftPtr->setCursor(kScreenW / 2 - (int16_t)t.length() * kCharW / 2, y);
+    tftPtr->print(t);
+}
 
 void drawBtGlyph(int16_t x, int16_t y, int16_t size, uint16_t color) {
     // Same path as the simulator's inline SVG bluetooth glyph
@@ -367,90 +398,126 @@ void drawOff() {
     if (state.now.hasTrack) {
         tftPtr->setCursor(kScreenW / 2 - 70, kOffClockDigitalY + 50);
         tftPtr->print(state.now.playing ? "playing" : "paused");
-        tftPtr->setCursor(kScreenW / 2 - (int)state.now.title.length() * 3, kOffClockDigitalY + 62);
-        tftPtr->print(state.now.title);
+        printCentered(state.now.title, kOffClockDigitalY + 62);
     }
 }
 
-// Matches the simulator's .menu-grid EXACTLY: flex-direction:column, so
-// items stack as a single vertical column of full-width rows -- each row
-// itself is icon+text side-by-side (that's the only "side by side" part),
-// not a 2x2 grid of rows. Previous version of this function built an
-// actual 2x2 grid, which was wrong -- see CLAUDE.md for how that was found.
+// Layout shared by the full draw and the two-tile selection update.
+struct MainMenuLayout {
+    int16_t padX, rowW, rowH, gap, firstY;
+    size_t n;
+};
+
+MainMenuLayout mainMenuLayout(size_t itemCount) {
+    MainMenuLayout l;
+    l.n = itemCount > 4 ? 4 : itemCount;
+    l.padX = kScreenW * 5 / 100;   // .menu-grid padding: 4% 5%
+    int16_t padY = kBodyH * 4 / 100;
+    l.gap = kBodyH * 4 / 100;      // .menu-grid gap: 4%
+    l.rowW = kScreenW - 2 * l.padX;
+    int16_t rows = l.n ? (int16_t)l.n : 1;
+    l.rowH = (kBodyH - 2 * padY - l.gap * (rows - 1)) / rows;
+    l.firstY = kBodyY + padY;
+    return l;
+}
+
+// One tile. Paints its own background first, so it can be redrawn on its
+// own (selection moving) as well as part of the full grid.
+void drawMainMenuTile(Menu *m, size_t i, const MainMenuLayout &l, const Palette &p) {
+    static const uint16_t badgeColors[4] = {0x2D9F, 0x855F, 0x0725, 0xFC80}; // blue/purple/teal/amber, matches .badge-0..3
+    int16_t cx = l.padX, cy = l.firstY + (int16_t)i * (l.rowH + l.gap);
+    bool sel = (int)i == m->selected;
+
+    if (sel) {
+        tftPtr->fillRoundRect(cx, cy, l.rowW, l.rowH, 8, p.accent);
+    } else {
+        tftPtr->fillRoundRect(cx, cy, l.rowW, l.rowH, 8, p.bg);
+        tftPtr->drawRoundRect(cx, cy, l.rowW, l.rowH, 8, p.border);
+    }
+
+    int16_t tilePad = l.rowW * 5 / 100;  // .tile padding: 0 5%
+    int16_t badgeSize = min((int16_t)(l.rowW * 15 / 100), (int16_t)(l.rowH - 6)); // .tile-badge width:15%
+    int16_t bx = cx + tilePad, by = cy + (l.rowH - badgeSize) / 2;
+
+    tftPtr->fillRoundRect(bx, by, badgeSize, badgeSize, 6, badgeColors[i % 4]);
+    const String &tileIcon = m->items[i].icon;
+    int16_t gx = bx + badgeSize / 4, gy = by + badgeSize / 4, gs = badgeSize / 2;
+    if (tileIcon == "bt") {
+        drawBtGlyph(gx, gy, gs, TFT_WHITE);
+    } else if (tileIcon == "note") {
+        drawNoteGlyph(gx, gy, gs, TFT_WHITE);
+    } else if (tileIcon == "playlist") {
+        drawPlaylistGlyph(gx, gy, gs, TFT_WHITE);
+    } else if (tileIcon == "gear") {
+        drawSettingsGlyph(gx, gy, gs, TFT_WHITE);
+    } else {
+        // Fallback for a future tile without a recognized icon.
+        tftPtr->setTextColor(TFT_WHITE, badgeColors[i % 4]);
+        tftPtr->setTextSize(2);
+        tftPtr->setCursor(bx + badgeSize / 2 - 6, by + badgeSize / 2 - 8);
+        tftPtr->print(tileIcon.length() ? tileIcon.substring(0, 1) : "?");
+    }
+
+    int16_t textX = bx + badgeSize + (l.rowW * 4 / 100); // .tile gap: 4%
+    int16_t textMax = cx + l.rowW - 8 - textX;
+    tftPtr->setTextSize(1);
+    tftPtr->setTextColor(sel ? TFT_WHITE : p.fg, sel ? p.accent : p.bg);
+    printAt(m->items[i].label, textX, cy + l.rowH / 2 - 10, textMax);
+    String sub = m->items[i].liveSub();
+    if (sub.length()) {
+        tftPtr->setTextColor(sel ? TFT_WHITE : p.muted2, sel ? p.accent : p.bg);
+        printAt(sub, textX, cy + l.rowH / 2 + 2, textMax);
+    }
+}
+
+int lastDrawnMainMenuSelected = -1; // -1: no valid baseline for a partial update
+
+// Matches the simulator's .menu-grid: flex-direction:column -- a single
+// vertical column of full-width tiles, each one icon+text side by side.
 void drawMainMenuGrid() {
     const Palette &p = pal();
     tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
+    lastDrawnMainMenuSelected = -1;
     Menu *m = MenuEngine::currentMenu();
-    if (!m) return;
+    if (!m || m->items.empty()) return;
 
-    const uint16_t badgeColors[4] = {0x2D9F, 0x855F, 0x0725, 0xFC80}; // blue/purple/teal/amber, matches .badge-0..3
-    size_t n = m->items.size();
-    if (n > 4) n = 4;
-    if (n == 0) return;
+    MainMenuLayout l = mainMenuLayout(m->items.size());
+    for (size_t i = 0; i < l.n; i++) drawMainMenuTile(m, i, l, p);
+    lastDrawnMainMenuSelected = m->selected;
+}
 
-    int16_t padX = kScreenW * 5 / 100;   // .menu-grid padding: 4% 5%
-    int16_t padY = kBodyH * 4 / 100;
-    int16_t gap = kBodyH * 4 / 100;      // .menu-grid gap: 4%
-    int16_t rowW = kScreenW - 2 * padX;
-    int16_t usableH = kBodyH - 2 * padY - gap * (int16_t)(n - 1);
-    int16_t rowH = usableH / (int16_t)n;
-
-    int16_t y = kBodyY + padY;
-    for (size_t i = 0; i < n; i++) {
-        int16_t cx = padX, cy = y;
-        bool sel = (int)i == m->selected;
-
-        if (sel) tftPtr->fillRoundRect(cx, cy, rowW, rowH, 8, p.accent);
-        else tftPtr->drawRoundRect(cx, cy, rowW, rowH, 8, p.border);
-
-        int16_t tilePad = rowW * 5 / 100;  // .tile padding: 0 5%
-        int16_t badgeSize = min((int16_t)(rowW * 15 / 100), (int16_t)(rowH - 6)); // .tile-badge width:15%
-        int16_t bx = cx + tilePad, by = cy + (rowH - badgeSize) / 2;
-
-        tftPtr->fillRoundRect(bx, by, badgeSize, badgeSize, 6, badgeColors[i % 4]);
-        const String &tileIcon = m->items[i].icon;
-        if (tileIcon == "bt") {
-            drawBtGlyph(bx + badgeSize / 4, by + badgeSize / 4, badgeSize / 2, TFT_WHITE);
-        } else if (tileIcon == "note") {
-            drawNoteGlyph(bx + badgeSize / 4, by + badgeSize / 4, badgeSize / 2, TFT_WHITE);
-        } else if (tileIcon == "playlist") {
-            drawPlaylistGlyph(bx + badgeSize / 4, by + badgeSize / 4, badgeSize / 2, TFT_WHITE);
-        } else if (tileIcon == "gear") {
-            drawSettingsGlyph(bx + badgeSize / 4, by + badgeSize / 4, badgeSize / 2, TFT_WHITE);
-        } else {
-            // Fallback for any future tile that doesn't set a recognized
-            // icon -- shouldn't happen for the 4 current main-menu tiles,
-            // kept only so a new tile added later degrades gracefully
-            // instead of drawing nothing.
-            tftPtr->setTextColor(TFT_WHITE, badgeColors[i % 4]);
-            tftPtr->setTextSize(2);
-            tftPtr->setCursor(bx + badgeSize / 2 - 6, by + badgeSize / 2 - 8);
-            tftPtr->print(tileIcon.length() ? tileIcon.substring(0, 1) : "?");
-        }
-
-        int16_t textX = bx + badgeSize + (rowW * 4 / 100); // .tile gap: 4%
-        tftPtr->setTextSize(1);
-        tftPtr->setTextColor(sel ? TFT_WHITE : p.fg, sel ? p.accent : p.bg);
-        tftPtr->setCursor(textX, cy + rowH / 2 - 10);
-        tftPtr->print(m->items[i].label);
-        String sub = m->items[i].liveSub();
-        if (sub.length()) {
-            tftPtr->setTextColor(sel ? TFT_WHITE : p.muted2, sel ? p.accent : p.bg);
-            tftPtr->setCursor(textX, cy + rowH / 2 + 2);
-            tftPtr->print(sub);
-        }
-
-        y += rowH + gap;
-    }
+// Selection moved on the main menu: repaint the tile that lost it and the
+// tile that got it, instead of the whole screen.
+void updateMainMenuSelection() {
+    Menu *m = MenuEngine::currentMenu();
+    if (!m || lastDrawnMainMenuSelected < 0) { state.dirty = true; return; }
+    MainMenuLayout l = mainMenuLayout(m->items.size());
+    if (lastDrawnMainMenuSelected >= (int)l.n || m->selected >= (int)l.n) { state.dirty = true; return; }
+    const Palette &p = pal();
+    if (lastDrawnMainMenuSelected != m->selected) drawMainMenuTile(m, lastDrawnMainMenuSelected, l, p);
+    drawMainMenuTile(m, m->selected, l, p);
+    lastDrawnMainMenuSelected = m->selected;
 }
 
 constexpr int16_t kMenuRowH = 22;
 constexpr int16_t kMenuListY = kBodyY + 26;
 
 int16_t menuMaxRows() { return (kBodyH - 26) / kMenuRowH; }
-int menuStartIdx(int selected) {
-    int16_t maxRows = menuMaxRows();
-    return selected >= maxRows ? selected - maxRows + 1 : 0;
+
+// First visible row. The window only moves when the cursor leaves it
+// (and wraps with it), instead of being recomputed from the cursor on
+// every move -- that version re-anchored the cursor to the bottom row on
+// every single step once past the first screenful, so in a long list
+// EVERY step scrolled the whole list (a full redraw) and the cheap
+// two-row update below almost never got used.
+int menuViewStart(Menu *m) {
+    int maxRows = menuMaxRows();
+    int n = (int)m->items.size();
+    if (m->selected < m->viewStart) m->viewStart = m->selected;
+    else if (m->selected >= m->viewStart + maxRows) m->viewStart = m->selected - maxRows + 1;
+    int maxStart = n > maxRows ? n - maxRows : 0;
+    m->viewStart = constrain(m->viewStart, 0, maxStart);
+    return m->viewStart;
 }
 
 // Small colored letter-badge icons for plain list rows (Artist/Album/
@@ -532,63 +599,85 @@ int16_t drawRowIconIfAny(const MenuItem &item, int16_t y) {
 
 // Shared by the full drawMenu() loop and updateMenuSelection()'s partial
 // redraw below -- one place for the row layout so they can't drift apart.
-// Always clears its own row background first (not just when selected),
-// since the partial-redraw caller has no prior full-body clear to rely on.
+// Paints its own row background, so a row can be redrawn in isolation.
+// The sub-label is right-aligned and capped; the label gets whatever
+// width is left and is cut with ".." rather than running into it.
+constexpr int16_t kMenuSubMaxPx = 18 * kCharW;
+
 void drawMenuRow(Menu *m, int i, int16_t y, const Palette &p) {
     bool sel = i == m->selected;
     tftPtr->fillRect(0, y, kScreenW, kMenuRowH, sel ? p.accent : p.bg);
     int16_t textX = drawRowIconIfAny(m->items[i], y);
+    tftPtr->setTextSize(1);
     tftPtr->setTextColor(sel ? TFT_WHITE : p.fg, sel ? p.accent : p.bg);
-    tftPtr->setCursor(textX, y + 6);
-    tftPtr->print(m->items[i].label);
-    String sub = m->items[i].liveSub();
+    String sub = fitText(m->items[i].liveSub(), kMenuSubMaxPx);
+    int16_t labelEnd = kScreenW - 12;
     if (sub.length()) {
-        tftPtr->setCursor(kScreenW - 12 - sub.length() * 6, y + 6);
+        int16_t subX = kScreenW - 12 - (int16_t)sub.length() * kCharW;
+        tftPtr->setCursor(subX, y + 6);
         tftPtr->print(sub);
+        labelEnd = subX - 8;
     }
+    printAt(m->items[i].label, textX, y + 6, labelEnd - textX);
 }
 
 // Baseline for updateMenuSelection()'s partial redraw: what was actually
 // drawn on screen last, as of the most recent full drawMenu() call. -1
-// means "no valid baseline, must fall back to a full redraw" (e.g. right
-// after navigating into a different menu).
+// means "no valid baseline, must fall back to a full redraw".
 int lastDrawnMenuSelected = -1;
 int lastDrawnMenuStartIdx = -1;
 
 void drawMenu() {
     const Palette &p = pal();
-    tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
     Menu *m = MenuEngine::currentMenu();
-    if (!m) { lastDrawnMenuSelected = -1; return; }
+    if (!m) {
+        tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
+        lastDrawnMenuSelected = -1;
+        return;
+    }
 
+    // Title strip, then the rows (each paints its own background), then
+    // whatever is left below the last row. The body used to be filled
+    // once in full and then again row by row -- every pixel sent to the
+    // panel twice, with the whole list visibly blanking in between.
+    tftPtr->fillRect(0, kBodyY, kScreenW, kMenuListY - kBodyY, p.bg);
     tftPtr->setTextSize(1);
     if (state.mode == AppMode::BT) drawBtGlyph(10, kBodyY + 8, 12, p.accent);
     tftPtr->setTextColor(p.fg, p.bg);
-    tftPtr->setCursor(state.mode == AppMode::BT ? 26 : 10, kBodyY + 10);
-    tftPtr->print(m->title);
+    int16_t titleX = state.mode == AppMode::BT ? 26 : 10;
+    printAt(m->title, titleX, kBodyY + 10, kScreenW - 10 - titleX);
 
     int maxRows = menuMaxRows();
-    int startIdx = menuStartIdx(m->selected);
+    int startIdx = menuViewStart(m);
     int16_t y = kMenuListY;
     for (int i = startIdx; i < (int)m->items.size() && (i - startIdx) < maxRows; i++) {
         drawMenuRow(m, i, y, p);
         y += kMenuRowH;
+    }
+    if (y < kBodyY + kBodyH) tftPtr->fillRect(0, y, kScreenW, kBodyY + kBodyH - y, p.bg);
+    if (m->items.empty()) {
+        tftPtr->setTextColor(p.muted, p.bg);
+        printCentered("Nothing here", kBodyY + kBodyH / 2);
     }
     lastDrawnMenuSelected = m->selected;
     lastDrawnMenuStartIdx = startIdx;
 }
 
 // Redraws just the previously-selected and newly-selected rows instead of
-// the whole list -- the common case for plain UP/DOWN/rotate navigation.
-// Escalates to a full state.dirty redraw (handled by the caller falling
-// through to the normal dispatch in the same render() call, so there's no
-// extra frame of delay) if the viewport needs to scroll to keep the new
-// selection visible, or if there's no valid baseline yet.
+// the whole list -- the common case for plain UP/DOWN/rotate navigation,
+// and for a slider row whose value changed. Escalates to a full
+// state.dirty redraw (handled by the caller falling through to the normal
+// dispatch in the same render() call) if the list has to scroll, or if
+// there's no valid baseline yet.
 void updateMenuSelection() {
     Menu *m = MenuEngine::currentMenu();
-    if (!m || lastDrawnMenuSelected < 0) { state.dirty = true; return; }
+    if (!m || m->items.empty() || lastDrawnMenuSelected < 0 ||
+        lastDrawnMenuSelected >= (int)m->items.size()) {
+        state.dirty = true;
+        return;
+    }
 
-    int newStartIdx = menuStartIdx(m->selected);
+    int newStartIdx = menuViewStart(m);
     if (newStartIdx != lastDrawnMenuStartIdx) { state.dirty = true; return; }
 
     const Palette &p = pal();
@@ -603,7 +692,7 @@ void updateMenuSelection() {
 
 // Redraws just the progress bar + elapsed/remaining time strip, without
 // touching the rest of the screen. Used for the once-a-second position
-// tick (see UI.cpp's tickPlaybackClock/state.progressDirty) so playback
+// tick (see UI.cpp's tickPlayback/state.progressDirty) so playback
 // doesn't full-screen-flicker every second -- only drawNowPlaying() (art,
 // title, play state, etc. -- things that only change on a real track/mode
 // change) does the full-body fillRect.
@@ -620,50 +709,38 @@ void drawNowPlayingProgress() {
     tftPtr->fillRect(20, progY, barW, 16, p.bg);
     tftPtr->drawRect(20, progY, barW, 4, p.border);
     tftPtr->fillRect(20, progY, (int16_t)(barW * pct), 4, 0x2D9F);
+    tftPtr->setTextSize(1);
     tftPtr->setTextColor(p.muted, p.bg);
     tftPtr->setCursor(20, progY + 8);
     tftPtr->print(fmtTime(n.posSec));
-    String remain = "-" + fmtTime(n.durSec - n.posSec);
+    // "-0:00" for a length that isn't known would be a lie; say nothing.
+    String remain = n.durSec ? "-" + fmtTime(n.durSec - n.posSec) : String("--:--");
     tftPtr->setCursor(kScreenW - 20 - (int)remain.length() * 6, progY + 8);
     tftPtr->print(remain);
 }
 
-void drawNowPlaying() {
+constexpr int16_t kArtX = kScreenW / 2 - AlbumArt::kSize / 2;
+constexpr int16_t kArtY = kBodyY + 8;
+
+// Cover art box only -- also used on its own when the art for a track
+// arrives a moment after the track started (state.artDirty).
+void drawNowPlayingArt() {
+    if (!state.now.hasTrack) return;
+    AlbumArt::draw(kArtX, kArtY, AlbumArt::kSize, AlbumArt::kSize, state.now.art, 0x2D9F);
+}
+
+// Bottom strip only: play/pause label + volume bar. Redrawn on its own
+// for a volume tap or a pause (state.controlsDirty) -- those used to
+// repaint the entire screen, cover art included.
+void drawNowPlayingControls() {
     const Palette &p = pal();
-    tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
-    NowPlaying &n = state.now;
-
-    if (!n.hasTrack) {
-        tftPtr->setTextColor(p.muted, p.bg);
-        tftPtr->setCursor(kScreenW / 2 - 60, kBodyY + kBodyH / 2 - 6);
-        tftPtr->print("Nothing playing");
-        tftPtr->setCursor(kScreenW / 2 - 80, kBodyY + kBodyH / 2 + 10);
-        tftPtr->print("select a track from Music");
-        return;
-    }
-
-    int16_t artSize = AlbumArt::kSize; // matches the simulator's ratio after the overflow fix
-    int16_t artX = kScreenW / 2 - artSize / 2, artY = kBodyY + 8;
-    AlbumArt::draw(artX, artY, artSize, artSize, n.art, 0x2D9F);
-
-    int16_t metaY = artY + artSize + 8;
+    if (!state.now.hasTrack) return;
+    int16_t bottomY = kBodyY + kBodyH - 14;
+    tftPtr->fillRect(0, bottomY - 1, kScreenW, 11, p.bg);
     tftPtr->setTextSize(1);
     tftPtr->setTextColor(p.fg, p.bg);
-    tftPtr->setCursor(kScreenW / 2 - (int)n.title.length() * 3, metaY);
-    tftPtr->print(n.title);
-    tftPtr->setTextColor(p.muted, p.bg);
-    tftPtr->setCursor(kScreenW / 2 - (int)n.artist.length() * 3, metaY + 12);
-    tftPtr->print(n.artist);
-    tftPtr->setTextColor(p.muted2, p.bg);
-    tftPtr->setCursor(kScreenW / 2 - (int)n.album.length() * 3, metaY + 23);
-    tftPtr->print(n.album);
-
-    drawNowPlayingProgress();
-
-    int16_t bottomY = kBodyY + kBodyH - 14;
-    tftPtr->setTextColor(p.fg, p.bg);
     tftPtr->setCursor(20, bottomY);
-    tftPtr->print(n.playing ? "|| PAUSE" : "> PLAY");
+    tftPtr->print(state.now.playing ? "|| PAUSE" : "> PLAY");
 
     int16_t volX = kScreenW - 90;
     tftPtr->setTextColor(p.muted, p.bg);
@@ -671,7 +748,35 @@ void drawNowPlaying() {
     tftPtr->print("V");
     int16_t volBarX = volX + 12, volBarW = 60;
     tftPtr->drawRect(volBarX, bottomY + 1, volBarW, 5, p.border);
-    tftPtr->fillRect(volBarX, bottomY + 1, volBarW * state.volume / 100, 5, 0x2D9F);
+    tftPtr->fillRect(volBarX, bottomY + 1, volBarW * constrain(state.volume, 0, 100) / 100, 5, 0x2D9F);
+}
+
+void drawNowPlaying() {
+    const Palette &p = pal();
+    tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
+    NowPlaying &n = state.now;
+
+    tftPtr->setTextSize(1);
+    if (!n.hasTrack) {
+        tftPtr->setTextColor(p.muted, p.bg);
+        printCentered("Nothing playing", kBodyY + kBodyH / 2 - 6);
+        printCentered("select a track from Music", kBodyY + kBodyH / 2 + 10);
+        return;
+    }
+
+    drawNowPlayingArt();
+
+    int16_t metaY = kArtY + AlbumArt::kSize + 8;
+    tftPtr->setTextSize(1);
+    tftPtr->setTextColor(p.fg, p.bg);
+    printCentered(n.title, metaY);
+    tftPtr->setTextColor(p.muted, p.bg);
+    printCentered(n.artist, metaY + 12);
+    tftPtr->setTextColor(p.muted2, p.bg);
+    printCentered(n.album, metaY + 23);
+
+    drawNowPlayingProgress();
+    drawNowPlayingControls();
 }
 
 void drawLyrics() {
@@ -679,114 +784,160 @@ void drawLyrics() {
     tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
     auto it = Library::LYRICS.find(state.now.key);
     if (it == Library::LYRICS.end()) {
+        tftPtr->setTextSize(1);
         tftPtr->setTextColor(p.muted, p.bg);
-        tftPtr->setCursor(kScreenW / 2 - 60, kBodyY + kBodyH / 2 - 4);
-        tftPtr->print("No lyrics for this track");
+        printCentered("No lyrics for this track", kBodyY + kBodyH / 2 - 4);
         return;
     }
     const std::vector<LyricLine> &lines = it->second;
     int activeIdx = MenuEngine::activeLyricIndex(lines); // shared with UI.cpp's tick -- see its comment
     int16_t lineH = 18;
     int16_t centerY = kBodyY + kBodyH / 2;
+    tftPtr->setTextSize(1);
     for (size_t i = 0; i < lines.size(); i++) {
-        int16_t y = centerY + ((int)i - activeIdx) * lineH;
-        if (y < kBodyY - lineH || y > kBodyY + kBodyH) continue;
+        // int, not int16_t: a long lyric sheet times lineH overflows 16 bits
+        // and wrapped lines back onto the screen.
+        int y = centerY + ((int)i - activeIdx) * lineH;
+        if (y < kBodyY + 2 || y > kBodyY + kBodyH - 10) continue; // fully inside the body, never over the statusbar
         bool active = (int)i == activeIdx;
         bool near = abs((int)i - activeIdx) == 1;
         tftPtr->setTextColor(active ? p.fg : (near ? p.muted : p.muted2), p.bg);
-        tftPtr->setTextSize(active ? 1 : 1);
-        tftPtr->setCursor(kScreenW / 2 - (int)lines[i].text.length() * 3, y);
-        tftPtr->print(lines[i].text);
+        printCentered(lines[i].text, y);
     }
 }
 
-// Renders the COMBINED [history | now playing | upcoming queue] list --
-// previously this only ever showed state.queue (upcoming tracks), the
-// classic "Spotify can't scroll back past where you started" limitation.
-// state.queueSelected is now an index into this same combined space (see
-// MenuEngine.cpp's playFromCombinedIndex()/moveQueueSelection()), not a
-// plain state.queue index.
+// The Queue screen: the COMBINED [history | now playing | upcoming queue]
+// list. state.queueSelected is an index into that combined space (see
+// MenuEngine.cpp's playFromCombinedIndex()/moveQueueSelection()).
+constexpr int16_t kQueueRowH = 24;
+constexpr int16_t kQueueListY = kBodyY + 26;
+int16_t queueMaxRows() { return (kBodyH - 26) / kQueueRowH; }
+
+int queueTotalRows() {
+    return (int)state.history.size() + (state.now.hasTrack ? 1 : 0) + (int)state.queue.size();
+}
+
+// Same idea as menuViewStart(): the window only moves when the cursor
+// leaves it. -1 (set when the screen is opened) centers the cursor.
+int queueViewStart(int total) {
+    int maxRows = queueMaxRows();
+    int sel = state.queueSelected;
+    int &start = state.queueViewStart;
+    if (start < 0) start = sel - maxRows / 2;
+    if (sel < start) start = sel;
+    else if (sel >= start + maxRows) start = sel - maxRows + 1;
+    int maxStart = total > maxRows ? total - maxRows : 0;
+    start = constrain(start, 0, maxStart);
+    return start;
+}
+
+// One row; paints its own background so it can be redrawn in isolation.
+void drawQueueRow(int i, int16_t y, const Palette &p) {
+    int histN = (int)state.history.size();
+    int nowSlot = state.now.hasTrack ? 1 : 0;
+    bool sel = i == state.queueSelected;
+    bool isNowRow = (i == histN) && nowSlot;
+    bool grabbed = sel && state.queueGrabbed;
+    uint16_t rowColor = grabbed ? 0xFD20 /*amber*/ : p.accent;
+    uint16_t rowBg = sel ? rowColor : p.bg;
+
+    const String *title;
+    const String *artist;
+    if (i < histN) {
+        title = &state.history[i].title;
+        artist = &state.history[i].artist;
+    } else if (isNowRow) {
+        title = &state.now.title;
+        artist = &state.now.artist;
+    } else {
+        int qi = i - histN - nowSlot;
+        title = &state.queue[qi].title;
+        artist = &state.queue[qi].artist;
+    }
+
+    tftPtr->fillRect(0, y, kScreenW, kQueueRowH, rowBg);
+    tftPtr->setTextSize(1);
+    if (grabbed) {
+        // Three-bar "grip" glyph in place of the index number, and a
+        // border, so a row grabbed for reordering reads differently from
+        // a merely-selected one.
+        tftPtr->drawRect(0, y, kScreenW, kQueueRowH, TFT_WHITE);
+        for (int b = 0; b < 3; b++) tftPtr->drawFastHLine(10, y + 8 + b * 4, 6, TFT_WHITE);
+    } else if (isNowRow) {
+        // A small filled "play" triangle instead of an index number --
+        // this row is the anchor the rest of the list scrolls around.
+        tftPtr->fillTriangle(12, y + 6, 12, y + 18, 20, y + 12, sel ? TFT_WHITE : p.accent);
+    } else {
+        tftPtr->setTextColor(sel ? TFT_WHITE : p.muted2, rowBg);
+        tftPtr->setCursor(6, y + 8);
+        // Upcoming rows count forward from 1; history rows count backward
+        // from -1 at the track just before "now".
+        int label = (i < histN) ? (i - histN) : (i - histN - nowSlot + 1);
+        tftPtr->print(label);
+    }
+    int16_t textMax = kScreenW - 34 - 8;
+    tftPtr->setTextColor(sel ? TFT_WHITE : (i < histN ? p.muted : p.fg), rowBg);
+    printAt(*title, 34, y + 2, textMax);
+    tftPtr->setTextColor(sel ? 0xE73C : p.muted, rowBg);
+    printAt(*artist, 34, y + 12, textMax);
+}
+
+int lastDrawnQueueSelected = -1; // -1: no valid baseline for a partial update
+int lastDrawnQueueStart = -1;
+int lastDrawnQueueTotal = -1;
+
 void drawQueue() {
     const Palette &p = pal();
-    tftPtr->fillRect(0, kBodyY, kScreenW, kBodyH, p.bg);
+    lastDrawnQueueSelected = -1;
+    tftPtr->fillRect(0, kBodyY, kScreenW, kQueueListY - kBodyY, p.bg);
+    tftPtr->setTextSize(1);
     tftPtr->setTextColor(p.fg, p.bg);
     tftPtr->setCursor(10, kBodyY + 10);
     tftPtr->print(state.queueGrabbed ? "Queue - UP/DOWN move, RIGHT drop" : "Queue - RIGHT to grab, select to play");
 
-    int histN = (int)state.history.size();
-    int nowSlot = state.now.hasTrack ? 1 : 0;
-    int queueN = (int)state.queue.size();
-    int total = histN + nowSlot + queueN;
-
+    int total = queueTotalRows();
     if (total == 0) {
+        tftPtr->fillRect(0, kQueueListY, kScreenW, kBodyY + kBodyH - kQueueListY, p.bg);
         tftPtr->setTextColor(p.muted, p.bg);
-        tftPtr->setCursor(kScreenW / 2 - 40, kBodyY + kBodyH / 2);
-        tftPtr->print("Queue is empty");
+        printCentered("Queue is empty", kBodyY + kBodyH / 2);
         return;
     }
-    if (state.queueSelected >= total) state.queueSelected = total - 1;
-    if (state.queueSelected < 0) state.queueSelected = 0;
+    state.queueSelected = constrain(state.queueSelected, 0, total - 1);
 
-    int16_t rowH = 24;
-    int16_t y = kBodyY + 26;
-    int16_t maxRows = (kBodyH - 26) / rowH;
-    int16_t startIdx = 0;
-    if (state.queueSelected >= maxRows) startIdx = state.queueSelected - maxRows + 1;
-
+    int maxRows = queueMaxRows();
+    int startIdx = queueViewStart(total);
+    int16_t y = kQueueListY;
     for (int i = startIdx; i < total && (i - startIdx) < maxRows; i++) {
-        bool sel = i == state.queueSelected;
-        bool isNowRow = (i == histN) && nowSlot;
-        bool grabbed = sel && state.queueGrabbed;
-        uint16_t rowColor = grabbed ? 0xFD20 /*amber*/ : p.accent;
-
-        const String *title;
-        const String *artist;
-        if (i < histN) {
-            title = &state.history[i].title;
-            artist = &state.history[i].artist;
-        } else if (isNowRow) {
-            title = &state.now.title;
-            artist = &state.now.artist;
-        } else {
-            int qi = i - histN - nowSlot;
-            title = &state.queue[qi].title;
-            artist = &state.queue[qi].artist;
-        }
-
-        if (sel) tftPtr->fillRect(0, y, kScreenW, rowH, rowColor);
-        if (grabbed) {
-            // Three-bar "grip" glyph in place of the index number, and a
-            // dashed border, so a grabbed row for reordering reads
-            // differently from a merely-selected one.
-            tftPtr->drawRect(0, y, kScreenW, rowH, TFT_WHITE);
-            for (int b = 0; b < 3; b++) tftPtr->drawFastHLine(10, y + 8 + b * 4, 6, TFT_WHITE);
-        } else if (isNowRow) {
-            // A small filled "play" triangle instead of an index number --
-            // this row is the anchor the rest of the list scrolls around
-            // (history above, upcoming below), so it needs to read as
-            // structurally different from a plain numbered row, not just
-            // another list entry.
-            uint16_t glyphColor = sel ? TFT_WHITE : p.accent;
-            tftPtr->fillTriangle(12, y + 6, 12, y + 18, 20, y + 12, glyphColor);
-        } else {
-            tftPtr->setTextColor(sel ? TFT_WHITE : p.muted2, sel ? rowColor : p.bg);
-            tftPtr->setCursor(12, y + 6);
-            // Upcoming queue rows count forward from 1 (unchanged from
-            // before); history rows count backward from -1 at the track
-            // just before "now" -- a single index across the whole
-            // combined list (e.g. "7") would have no obvious meaning
-            // relative to what's actually playing.
-            int label = (i < histN) ? (i - histN) : (i - histN - nowSlot + 1);
-            tftPtr->print(String(label));
-        }
-        tftPtr->setTextColor(sel ? TFT_WHITE : (i < histN ? p.muted : p.fg), sel ? rowColor : p.bg);
-        tftPtr->setCursor(34, y + 2);
-        tftPtr->print(*title);
-        tftPtr->setTextColor(sel ? 0xE73C : p.muted, sel ? rowColor : p.bg);
-        tftPtr->setCursor(34, y + 12);
-        tftPtr->print(*artist);
-        y += rowH;
+        drawQueueRow(i, y, p);
+        y += kQueueRowH;
     }
+    if (y < kBodyY + kBodyH) tftPtr->fillRect(0, y, kScreenW, kBodyY + kBodyH - y, p.bg);
+    lastDrawnQueueSelected = state.queueSelected;
+    lastDrawnQueueStart = startIdx;
+    lastDrawnQueueTotal = total;
+}
+
+// Cursor moved (or a grabbed row was swapped with its neighbor -- the two
+// rows involved are exactly the old and the new selection): repaint those
+// two rows only. Falls back to a full redraw if the list has to scroll or
+// its length changed underneath (a track ended meanwhile).
+void updateQueueSelection() {
+    int total = queueTotalRows();
+    if (lastDrawnQueueSelected < 0 || total != lastDrawnQueueTotal || total == 0 ||
+        state.queueSelected < 0 || state.queueSelected >= total) {
+        state.dirty = true;
+        return;
+    }
+    if (queueViewStart(total) != lastDrawnQueueStart) { state.dirty = true; return; }
+
+    const Palette &p = pal();
+    if (lastDrawnQueueSelected != state.queueSelected) {
+        drawQueueRow(lastDrawnQueueSelected,
+                     kQueueListY + (int16_t)(lastDrawnQueueSelected - lastDrawnQueueStart) * kQueueRowH, p);
+    }
+    drawQueueRow(state.queueSelected, kQueueListY + (int16_t)(state.queueSelected - lastDrawnQueueStart) * kQueueRowH,
+                 p);
+    lastDrawnQueueSelected = state.queueSelected;
 }
 
 // Manual "Set Time" screen (AppMode::SET_TIME) -- a real analog clock
@@ -824,6 +975,10 @@ void drawSetTime() {
 
 void begin(TFT_eSPI &tft) {
     tftPtr = &tft;
+    // TFT_eSPI wraps text at the right edge by default, continuing at x=0
+    // one line down -- i.e. straight through whatever is drawn below.
+    // Everything here is clipped by fitText() instead.
+    tftPtr->setTextWrap(false, false);
     // Real GPIO PWM backlight control -- GPIO4 drives the display
     // module's OWN onboard backlight-switching transistor (this board
     // has one dedicated to BL already; it was just hardwired straight
@@ -899,14 +1054,28 @@ void showBusyMessage(const String &msg) {
 void render() {
     if (!tftPtr) return;
 
-    if (state.progressDirty && !state.dirty && state.mode == AppMode::NOW_PLAYING) {
-        drawNowPlayingProgress();
+    // The light, partial redraws first. Each only applies while its screen
+    // is showing and no full redraw is pending (a full redraw covers it);
+    // the flags are cleared regardless.
+    const bool onNowPlaying = state.mode == AppMode::NOW_PLAYING;
+    if (onNowPlaying && !state.dirty) {
+        if (state.artDirty) drawNowPlayingArt();
+        if (state.progressDirty) drawNowPlayingProgress();
+        if (state.controlsDirty) drawNowPlayingControls();
     }
+    state.artDirty = false;
     state.progressDirty = false;
+    state.controlsDirty = false;
 
     if (state.selectionDirty && !state.dirty) {
-        if (state.mode == AppMode::MENU || state.mode == AppMode::BT || state.mode == AppMode::TRACK_MENU) {
-            updateMenuSelection(); // may itself set state.dirty as a scroll-needed fallback
+        // Each of these may itself set state.dirty as a fallback (list
+        // needs to scroll, no baseline) -- picked up below, same call.
+        if (MenuEngine::isMainMenuRoot()) {
+            updateMainMenuSelection();
+        } else if (state.mode == AppMode::MENU || state.mode == AppMode::BT || state.mode == AppMode::TRACK_MENU) {
+            updateMenuSelection();
+        } else if (state.mode == AppMode::QUEUE) {
+            updateQueueSelection();
         }
     }
     state.selectionDirty = false;

@@ -3,6 +3,7 @@
 #include <TJpg_Decoder.h>
 #include <cstring>
 
+#include "../audio/AudioBridge.h"
 #include "../audio/FlacMeta.h"
 
 namespace AlbumArt {
@@ -26,17 +27,23 @@ bool artValid = false;
 uint16_t *decodeBuf = nullptr;
 uint16_t decodeW = 0, decodeH = 0;
 
+// Called by TJpg_Decoder once per decoded block (MCU). Copies the block
+// into decodeBuf, clipped to it.
 bool tjpgCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap) {
     if (!decodeBuf) return false;
-    for (uint16_t row = 0; row < h; row++) {
-        int ty = y + row;
-        if (ty < 0 || ty >= decodeH) continue;
-        for (uint16_t col = 0; col < w; col++) {
-            int tx = x + col;
-            if (tx < 0 || tx >= decodeW) continue;
-            decodeBuf[ty * decodeW + tx] = bitmap[row * w + col];
+    int x0 = max(0, (int)x), x1 = min((int)decodeW, (int)x + (int)w);
+    if (x1 > x0) {
+        for (int row = 0; row < (int)h; row++) {
+            int ty = (int)y + row;
+            if (ty < 0 || ty >= (int)decodeH) continue;
+            memcpy(&decodeBuf[(size_t)ty * decodeW + x0], &bitmap[(size_t)row * w + (x0 - x)],
+                   (size_t)(x1 - x0) * sizeof(uint16_t));
         }
     }
+    // A cover decode can take a good fraction of a second on the main
+    // loop's task; keep the playing track's input buffer fed meanwhile.
+    static uint8_t blocks = 0;
+    if ((++blocks & 0x0F) == 0) AudioBridge::pump();
     return true;
 }
 
@@ -59,7 +66,6 @@ void begin(TFT_eSPI &tft) {
 }
 
 void clear() { artValid = false; }
-bool hasArt() { return artValid; }
 
 bool loadForTrack(const String &path) {
     artValid = false;
@@ -68,7 +74,7 @@ bool loadForTrack(const String &path) {
     uint8_t *jpgData = nullptr;
     size_t jpgLen = 0;
     String mime;
-    if (!FlacMeta::readPicture(path, jpgData, jpgLen, mime)) return false;
+    if (!FlacMeta::readPicture(path, jpgData, jpgLen, mime, AudioBridge::pump)) return false;
 
     bool isJpeg = mime.indexOf("jpeg") >= 0 || mime.indexOf("jpg") >= 0;
     if (!isJpeg) {
@@ -95,6 +101,10 @@ bool loadForTrack(const String &path) {
     TJpgDec.setJpgScale(scale);
     decodeW = w / scale;
     decodeH = h / scale;
+    if (decodeW == 0 || decodeH == 0) {
+        free(jpgData);
+        return false;
+    }
 
     decodeBuf = (uint16_t *)ps_malloc((size_t)decodeW * decodeH * sizeof(uint16_t));
     if (!decodeBuf) {

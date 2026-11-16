@@ -10,7 +10,7 @@
 // an animation. state.progressDirty is a lighter-weight signal for the
 // once-a-second Now Playing position tick: only the progress bar/time
 // strip redraws, not the whole screen, so playback doesn't full-screen-
-// flicker every second (see UI.cpp's tickPlaybackClock).
+// flicker every second (see UI.cpp's tickPlayback).
 namespace Screens {
 
 void begin(TFT_eSPI &tft);

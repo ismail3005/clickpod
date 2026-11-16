@@ -45,9 +45,22 @@ void exitSetTimeWithoutSaving();
 void adjustSetTime(int delta);
 
 void playAlbumFrom(const LibraryAlbum &album, size_t index);
-void playQueueFrom(std::vector<Track> list, size_t index);
+void playQueueFrom(const std::vector<Track> &list, size_t index);
 void playNextInQueue();
 void skipPrevious();
+void togglePlayPause();            // on-screen CENTER and the headphones' play/pause alike
+void seekCurrentTo(uint16_t sec);  // the one place a real seek is issued from
+
+// Once per loop() pass: slow per-track work (cover art) that must not sit
+// between a button press and the first sound.
+void serviceDeferredWork();
+
+// Playback outcome, reported by UI.cpp's tickPlayback(): the current track
+// produced audio / failed (reason is logged to serial and the failed-files
+// list when non-null; countTowardsStreak=false for a file that was merely
+// unsupported, as opposed to unreadable).
+void notePlaybackProgress();
+void handleTrackFailure(const char *reason, bool countTowardsStreak);
 void playFromQueueIndex(int idx);
 
 // The Queue screen used to only ever show state.queue (upcoming tracks) --
@@ -78,7 +91,7 @@ void chooseBluetoothDevice(const String &name);
 
 // Which line of `lines` is "active" right now (state.now.posSec), i.e.
 // the one Screens.cpp's drawLyrics() highlights. Shared between it and
-// UI.cpp's tickPlaybackClock() -- the latter uses this to only mark the
+// UI.cpp's tickPlayback() -- the latter uses this to only mark the
 // Lyrics screen dirty (full redraw) when the active line actually
 // changes, instead of on every ~500ms position tick regardless, which
 // was producing a visible flicker on that screen once it started

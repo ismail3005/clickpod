@@ -2,15 +2,12 @@
 
 #include <Arduino.h>
 
-// Bring-up step 5 -> now wired into the real UI's Bluetooth screen
-// (src/ui/MenuEngine.cpp's enterBluetooth()/exitBluetooth()) instead of
-// being an isolated test-only path. Still streams a 440Hz test tone, NOT
-// real FLAC playback -- routing ESP32-audioI2S's decoded PCM into the A2DP
-// source's callback instead of out to the I2S DAC is a separate, bigger
-// piece of work (a real dual-output audio pipeline), not done here. This
-// only makes the UI's on/off + connection status REAL instead of a mock
-// device list -- see docs/SPEC.md section 7 for the wired/BT output
-// split this still respects.
+// Classic-Bluetooth A2DP source (ESP32-A2DP), driven from the UI's
+// Bluetooth screen (src/ui/MenuEngine.cpp's enterBluetooth()). Streams the
+// real decoded audio: AudioBridge.cpp's audio_process_i2s() hook hands
+// every decoded PCM buffer to feedPcm() while a device is connected, and
+// the wired I2S output is skipped for that buffer -- see docs/SPEC.md
+// section 7 for the wired/BT output split.
 namespace BluetoothSource {
 
 // In A2DP SOURCE mode this is the name of the target SINK device to scan
@@ -72,8 +69,12 @@ const char *currentTargetName();
 // picker screen's rows from those, polling for new arrivals while the
 // screen is open (see UI.cpp).
 void startDiscovery();
-void cancelDiscovery();
-bool isDiscoveryActive();
+// Ends the picker's scan session and shuts the Bluetooth stack back down
+// (startDiscovery() has to bring the whole stack up to scan). No-op unless
+// a scan session is open; connectToDiscovered() ends the session itself.
+void stopDiscovery();
+bool isDiscovering();     // a scan session is open (the stack is up for the picker)
+bool isDiscoveryActive(); // an inquiry scan is in flight right now
 int discoveredCount();
 const char *discoveredName(int index);
 
@@ -83,16 +84,19 @@ const char *discoveredName(int index);
 // clarity.
 void connectToDiscovered(const char *name);
 
-// Real audio output -- replaces the old 440Hz test tone. Called from
-// AudioBridge.cpp's audio_process_i2s() (a weak-symbol hook
-// ESP32-audioI2S itself exposes, literally commented "record audiodata
-// or send via BT" in its own header) with every decoded PCM buffer,
-// already 44.1kHz 16-bit stereo interleaved -- exactly what A2DP wants,
-// no conversion needed. Buffers into a small ring the A2DP data callback
-// (running on the BT stack's own task, not the caller's) drains from;
-// thread-safe via an internal mutex since producer and consumer run on
-// different tasks. Safe to call even when not connected (no-ops).
+// Real audio output. Called from AudioBridge.cpp's audio_process_i2s()
+// (a weak-symbol hook ESP32-audioI2S itself exposes, literally commented
+// "record audiodata or send via BT" in its own header) with every decoded
+// PCM buffer, already 44.1kHz 16-bit stereo interleaved -- exactly what
+// A2DP wants. Runs on the decoder's task; buffers into a ring the A2DP
+// data callback (the BT stack's own task) drains, blocking briefly when
+// the ring is full so the decoder is paced to what A2DP actually plays.
+// Safe to call when not connected (no-ops).
 void feedPcm(const uint8_t *data, size_t len);
+
+// Throws away whatever audio is still queued for Bluetooth. Called on a
+// track change/seek so the tail of the old audio doesn't play out first.
+void flushPcm();
 
 // Call once per main loop() iteration while BT is on. Two distinct
 // behaviors, both application-level (the library exposes no equivalent

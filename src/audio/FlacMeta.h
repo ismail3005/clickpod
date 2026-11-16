@@ -13,10 +13,12 @@
 // be several KB of text) for every file up front would both slow the
 // scan down further and risk holding a lot of string data in RAM for
 // tracks that are never played. Called lazily, once, when a track
-// actually becomes Now Playing (see MenuEngine::setNowPlaying()) --
-// readStreamInfo() is the exception, cheap enough (one small fixed-size
-// read) to consider calling eagerly later if duration-in-track-lists
-// turns out to be worth the extra scan time.
+// actually becomes Now Playing (see MenuEngine::setNowPlaying()).
+//
+// Every length field in here comes straight off the card, so every one of
+// them is bounded against the block it sits in before it is used to
+// allocate, read or loop -- a truncated or corrupt file gets "no
+// metadata", never a huge allocation or a multi-billion-iteration loop.
 namespace FlacMeta {
 
 // STREAMINFO (always the first metadata block in a valid FLAC file) --
@@ -35,7 +37,6 @@ struct StreamInfo {
     // and a vaguer message.
     uint8_t bitsPerSample = 0;
 };
-bool readStreamInfo(const String &path, StreamInfo &out);
 inline float durationSec(const StreamInfo &si) {
     return si.sampleRate ? (float)si.totalSamples / (float)si.sampleRate : 0.0f;
 }
@@ -46,11 +47,22 @@ struct Tags {
     String artist, title, album, lyrics;
     bool hasArtist = false, hasTitle = false, hasAlbum = false, hasLyrics = false;
 };
-bool readTags(const String &path, Tags &out);
+
+// STREAMINFO and the tags in ONE pass over ONE open of the file (each SD
+// open of a deeply-nested path costs several FAT directory lookups -- the
+// dominant per-file cost on this card -- so this is done once per track
+// start, not once per kind of metadata). Returns true if STREAMINFO was
+// read (i.e. this really is a FLAC file); `tags` is filled in from the
+// VORBIS_COMMENT block if there is one (check its has* flags).
+bool readInfo(const String &path, StreamInfo &info, Tags &tags);
 
 // First PICTURE block found (typically front cover art). Caller owns the
 // returned buffer and must free() it. Returns false (outData untouched)
-// if the file has no PICTURE block.
-bool readPicture(const String &path, uint8_t *&outData, size_t &outLen, String &outMime);
+// if the file has no usable PICTURE block. A cover image is routinely
+// hundreds of KB, i.e. a long blocking SD read -- `idle`, if given, is
+// called between chunks (pass AudioBridge::pump so playback keeps being
+// fed meanwhile).
+bool readPicture(const String &path, uint8_t *&outData, size_t &outLen, String &outMime,
+                  void (*idle)() = nullptr);
 
 } // namespace FlacMeta

@@ -46,7 +46,7 @@ struct MenuItem {
     String label;
     String sub;                        // static sub-label; ignored if subFn is set
     std::function<String()> subFn;      // live sub-label (e.g. Bluetooth status), re-evaluated every render
-    String icon;                        // icon key for the main-menu tile grid only
+    String icon;                        // icon key -- see Screens.cpp's rowIconFor()/drawMainMenuTile()
 
     std::function<void()> action;       // fired on RIGHT/CENTER for plain rows
 
@@ -73,4 +73,9 @@ struct Menu {
     String title;
     std::vector<MenuItem> items;
     int selected = 0;
+    // First row of the list currently on screen (Screens.cpp's
+    // menuViewStart()). Kept per menu so the visible window only moves
+    // when the cursor actually leaves it, and is still where you left it
+    // when you come back to this menu.
+    int viewStart = 0;
 };

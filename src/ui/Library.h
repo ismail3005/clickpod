@@ -27,20 +27,20 @@ String keyFor(const Track &t);
 
 // On-SD compact index (/clickpod.idx): built once by walking the SD card
 // (same Artist/Album/track / playlist-folder rules as before -- see
-// isPlaylistFolderName() in Library.cpp), then read back sequentially
-// whenever Music/Playlists need data, instead of holding the whole
+// isPlaylistFolderName() in Library.cpp), instead of holding the whole
 // library's Track data in RAM for the entire session. See CLAUDE.md for
 // the full writeup (why: boot-time FAT walk only needed once ever, not
 // every boot; RAM bounded by what's actually open, not total library
 // size).
 //
 // ensureIndex() only does the slow full SD walk if /clickpod.idx doesn't
-// already exist, or force=true -- an existing index is trusted as-is,
-// there's no auto-detection of SD content changes (see "Rescan library"
-// in Settings for the manual way to force a rebuild). Returns true if a
-// usable index is in effect afterward (freshly built, or already there);
-// false leaves ALBUMS/PLAYLISTS (the mock set) in effect instead, same as
-// the old scanFromSd()'s "keep placeholder library" fallback.
+// already exist (or is from an older build, or doesn't read back whole),
+// or force=true -- there's no auto-detection of SD content changes (see
+// "Rescan library" in Settings for the manual way to force a rebuild).
+// Either way it finishes by reading the index through once into a small
+// in-RAM catalog (names, counts and file offsets -- not the tracks).
+// Returns true if a usable index is in effect afterward; false leaves
+// ALBUMS/PLAYLISTS (the mock set) in effect instead.
 bool ensureIndex(bool force = false);
 
 // True once a real on-SD index is in effect -- callers (MenuEngine) use
@@ -48,16 +48,25 @@ bool ensureIndex(bool force = false);
 // ALBUMS/PLAYLISTS mock-data path.
 bool usingIndex();
 
-// Cheap summaries: a fast sequential read of the compact index file,
-// collecting just names/counts -- NOT the per-track Track data, safe to
-// call on every menu build.
+// Answered from the in-RAM catalog -- no SD access, safe to call on every
+// menu build.
 std::vector<String> indexArtists();
 std::vector<std::pair<String, int>> indexAlbumsForArtist(const String &artist); // {albumName, trackCount}
 std::vector<std::pair<String, int>> indexPlaylists(); // {playlistName, trackCount}, includes ephemeral additions
 
+struct AlbumRef {
+    String artist;
+    String album;
+    int trackCount;
+};
+// Every album in the library, sorted by album name -- Settings' "Sort
+// tracks by: Album" view of Music.
+std::vector<AlbumRef> indexAllAlbums();
+
 // Bounded loads: only the tracks for ONE album or ONE playlist, read from
-// the index -- not the whole library. indexTracksForPlaylist() also
-// appends any tracks added this session via addToPlaylist() below.
+// the index file starting at that group's own offset -- not the whole
+// library. indexTracksForPlaylist() also appends any tracks added this
+// session via addToPlaylist() below.
 std::vector<Track> indexTracksForAlbum(const String &artist, const String &album);
 std::vector<Track> indexTracksForPlaylist(const String &name);
 
@@ -78,7 +87,7 @@ void deletePlaylist(const String &name);
 
 // True if `name` has real records in the on-SD index (not just the
 // session-only overlay) -- used by the UI to visually flag which
-// playlists can't be truly/permanently deleted. See Library.cpp.
+// playlists can't be truly/permanently deleted. Catalog lookup, no SD.
 bool isSdBackedPlaylist(const String &name);
 
 // Appends one line ("<path> -- <reason>") to /clickpod_failed.txt on SD
@@ -102,9 +111,7 @@ void logFailedFile(const String &path, const String &reason);
 // for (no keyboard, just an encoder + 5 buttons) and would need a real
 // letter-picker screen designed simulator-first per this project's
 // usual UX discipline, not improvised here. Not a persistent counter --
-// just counts up past whatever names already exist each time it's
-// called, so creating N playlists in one session and renaming/deleting
-// isn't tracked (there's no rename/delete yet either).
+// just the first number not currently in use.
 String nextNewPlaylistName();
 
 } // namespace Library

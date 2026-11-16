@@ -30,11 +30,10 @@
 // ever reads that already-parsed vector afterward, never the SD card
 // directly. Beyond SD, this still carries no other cross-peripheral risk
 // -- WiFi itself doesn't touch the SPI bus. It DOES share the ESP32's
-// single radio with classic Bluetooth, though -- a scan+sync attempt may
-// cause brief BT audio glitches if BT is actively streaming at that
-// moment; not worked around given BT playback is currently just a test
-// tone anyway (see BluetoothSource.h), worth revisiting once BT streams
-// real audio.
+// single radio with classic Bluetooth, though -- a scan+join there is
+// audible as dropouts in a live A2DP stream, so a periodic drift RE-sync
+// is skipped while Bluetooth is connected (the first sync of a boot, and
+// an explicit "Sync Time Now", still go ahead -- see tryOnce()).
 //
 // Depends only on core ESP32 Arduino framework APIs (WiFi.h, time.h/
 // configTime()/getLocalTime()) -- unlike the third-party library API

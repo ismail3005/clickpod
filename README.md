@@ -38,9 +38,11 @@ Following the bring-up order from spec section 4:
       advertise itself to be paired with the other way around**; that was
       a real gotcha during bring-up (the device name passed to `start()`
       is the target to find, not the ESP32's own name). Per spec section
-      7, wired and BT are mutually exclusive outputs; `kTestWiredPlayback`
-      in `main.cpp` picks which one a given build exercises (currently
-      `true` / wired, the default). **Hardware note:** classic BT
+      7, wired and BT are mutually exclusive outputs. **Since then:**
+      Bluetooth is a runtime toggle from the Bluetooth screen (never
+      auto-started at boot), streams the real decoded audio instead of
+      the bring-up test tone, and has a device picker, AVRCP volume sync
+      and headphone transport buttons -- see `CLAUDE.md`. **Hardware note:** classic BT
       overflowed the default partition scheme's app slot (build came in at
       1.72MB vs. ~1.25MB available) -- switched `board_build.partitions`
       to `huge_app.csv` (~3MB single app partition, no OTA) to fix it.

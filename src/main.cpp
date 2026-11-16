@@ -21,30 +21,13 @@
 #include "ui/Screens.h"
 #include "ui/UI.h"
 
-// Real, verified Arduino-ESP32 core mechanism (confirmed by reading the
-// actual core/esp32/main.cpp source, not guessed): getArduinoLoopTaskStackSize()
-// is declared __attribute__((weak)) there specifically so a sketch can
-// override it to resize the loop() task's stack -- the default is a plain
-// 8192 bytes (ARDUINO_LOOP_STACK_SIZE). Added in response to a real crash:
-// `assert failed: spinlock_acquire spinlock.h:122` -- a multi-core heap-
-// lock assert, the classic signature of memory corruption near a task's
-// stack (NOT a heap-size failure the radioHeapOk() guards already cover;
-// this is a different failure class). It hit immediately after scrubbing
-// (a real seek, triggering FLACDecoderReset()) while Bluetooth was
-// actively streaming real audio -- a call-depth combination that didn't
-// exist in any earlier testing: decode/resync -> Audio::playChunk() ->
-// audio_process_i2s() -> BluetoothSource::feedPcm()'s bounded blocking
-// retry loop, all nested several frames deep inside the SAME loop()-task
-// call chain that also does menu rendering, SD/FlacMeta reads, and
-// Library index lookups elsewhere. 8192 bytes was never tested against
-// that specific worst-case depth. This is a reasoned hypothesis from the
-// failure signature and the fact this is a genuinely new code path, not
-// a confirmed root cause -- flagged honestly in CLAUDE.md. Bumped by 8KB
-// (not further) to stay mindful of this project's hard-won internal-heap
-// headroom (the thirtieth hardware bug's PSRAM-threshold work) -- stack
-// is a one-time static allocation at boot, not a per-operation cost, so
-// 8KB more here is a bounded, known tradeoff, unlike BT/WiFi's dynamic
-// heap pressure.
+// Arduino-ESP32 declares getArduinoLoopTaskStackSize() weak precisely so a
+// sketch can resize the loop() task's stack (default 8192 bytes). 16KB:
+// this task runs all of the UI, every SD access (index reads, FLAC
+// metadata, the JPEG cover decode) and the audio library's file-side
+// work, some of it nested. NOTE the audio DECODE does not run here -- the
+// library has its own task for that (see AudioBridge.h); this was
+// originally bumped on the mistaken theory that it did.
 size_t getArduinoLoopTaskStackSize(void) { return 16384; }
 
 // Bring-up sequence (docs/SPEC.md section 4):
@@ -58,21 +41,14 @@ size_t getArduinoLoopTaskStackSize(void) { return 16384; }
 //
 // Steps 1-6 are hardware-confirmed (see README). The real UI/UX layer
 // (menus, now playing, lyrics, queue, Bluetooth screen -- docs/SPEC.md
-// section 6) is ported from the browser simulator into src/ui/, src/state/,
-// and src/audio/ -- see UI::begin()/UI::update() below. It navigates a
-// real SD-scanned library (src/ui/Library.h -- falls back to a small
-// placeholder set if scanning finds nothing); selecting a track plays real
-// audio via AudioBridge.
+// section 6) lives in src/ui/, src/state/ and src/audio/ -- see
+// UI::begin()/UI::update() below.
 //
-// Step 5: per spec section 7, wired (I2S) and Bluetooth are mutually
-// exclusive OUTPUTS, but both can be "on" at the UI level now -- wired
-// playback (AudioBridge) is always available, and Bluetooth is a real
-// on/off toggle the user drives from the Bluetooth screen
-// (MenuEngine::enterBluetooth()/exitBluetooth() call BluetoothSource::
-// begin()/end() directly), not a boot-time branch anymore. BT still only
-// streams a 440Hz test tone (see BluetoothSource.h) -- routing real
-// decoded audio into the A2DP source instead of out to the I2S DAC is
-// separate, not-yet-done work.
+// Per spec section 7, wired (I2S) and Bluetooth are mutually exclusive
+// OUTPUTS: wired playback is always available, and Bluetooth is a runtime
+// on/off toggle driven from the Bluetooth screen. While a Bluetooth
+// device is connected the decoded audio goes there instead of to the DAC
+// (AudioBridge.cpp's audio_process_i2s()).
 //
 // TFT_eSPI's pin/driver config lives in platformio.ini's build_flags (not
 // the library's User_Setup.h, which would get clobbered on reinstall).
@@ -300,25 +276,11 @@ void setup() {
 
     if (sdOk) AudioBridge::begin(audio); // wired output; Bluetooth is a separate on/off toggle driven from the UI
 
-    // Bluetooth deliberately does NOT auto-resume on boot anymore, even if
-    // it was left on last session (state.btOn is still persisted and still
-    // drives the UI's remembered on/off display -- just no longer acted on
-    // here). User's own explicit call after a real crash-reboot while BT
-    // was mid-reconnect-loop: auto-resuming on every boot meant the radio
-    // started hammering reconnect/discovery attempts immediately and
-    // unattended, which is both a real battery cost and (combined with
-    // TimeSync's periodic WiFi scans sharing the same radio) a real crash
-    // surface -- "I should turn on Bluetooth manually" instead. Turning it
-    // on from the Bluetooth menu still works exactly as before, including
-    // the shadow-reconnect fix (reconnects to the last bonded device
-    // without needing pairing mode again) and the new give-up-after-a-
-    // minute watchdog (BluetoothSource::tick(), see loop() below) so a
-    // manual "on" with nothing in range doesn't hammer forever either.
-    // The boot-crash guard (markBtAttemptStarting/Done, Persist::load())
-    // is now dead code for this specific call site but left in place --
-    // enterBluetooth()'s manual "Bluetooth On" row doesn't use it (never
-    // needed to, see Persist.h's comment), and it's harmless to keep for
-    // whenever boot auto-resume is reconsidered.
+    // Bluetooth deliberately does NOT auto-resume on boot (user's explicit
+    // call after a real crash-reboot while it was mid-reconnect-loop, see
+    // CLAUDE.md's twenty-seventh hardware bug): it is only ever turned on
+    // from the Bluetooth menu. A bonded device still reconnects without
+    // pairing mode when it is.
 
     // Runs entirely on its own background task -- doesn't block the rest
     // of setup() or touch anything else here. See TimeSync.h.
@@ -334,7 +296,7 @@ static void syncBatteryToUi() {
     int pct = Battery::percent();
     if (pct != state.battery) {
         state.battery = pct;
-        state.dirty = true;
+        state.statusbarDirty = true; // the statusbar is the only place it's shown
     }
 }
 
@@ -373,18 +335,12 @@ static void syncBluetoothToUi() {
     // before this, which was the other half of "two volume controls
     // that don't agree."
     if (connected) {
-        // ::map(), not map() -- plain map() is ambiguous here between
-        // Arduino's global map() function and std::map the class
-        // template (pulled into scope transitively via Library.h's
-        // <map> include, needed for its playlist overlay). First real
-        // `pio run` of this round caught it -- GCC can't disambiguate
-        // an unqualified call when a same-named class template is also
-        // visible, even though it's not actually callable as a
-        // function. Explicit global-scope qualification sidesteps it.
+        // ::map(), not map() -- unqualified, GCC can't choose between
+        // Arduino's map() and std::map (in scope via Library.h's <map>).
         int btPct = ::map(BluetoothSource::getVolume(), 0, 127, 0, 100);
         if (btPct != state.volume) {
             state.volume = btPct;
-            state.dirty = true;
+            state.controlsDirty = true; // Now Playing's volume bar is the only place it's shown
         }
     }
     if (running != state.btOn || connectedTo != state.btConnectedTo) {
@@ -396,28 +352,16 @@ static void syncBluetoothToUi() {
 
 // Headphone/headset-side play/pause/skip buttons, over the real AVRCP
 // passthrough mechanism (BluetoothSource.h's drainTransportCommand()) --
-// dispatches to the exact same functions the on-screen UI already uses
-// for these actions, so a headphone button press and the equivalent
-// on-screen action are indistinguishable from here on. Play/Pause are
-// deliberately NOT a toggle (unlike the on-screen CENTER-tap handler) --
-// AVRCP sends them as distinct commands, so each only acts if playback
-// isn't already in the state it's asking for, matching what a real
-// remote button is supposed to do.
+// dispatched to the exact same functions the on-screen UI uses. Play and
+// Pause are distinct AVRCP commands, not a toggle: each only acts if
+// playback isn't already in the state it's asking for.
 static void handleBtTransportCommands() {
     switch (BluetoothSource::drainTransportCommand()) {
         case BluetoothSource::TransportCmd::Play:
-            if (state.now.hasTrack && !state.now.playing) {
-                state.now.playing = true;
-                AudioBridge::pauseResume();
-                state.dirty = true;
-            }
+            if (state.now.hasTrack && !state.now.playing) MenuEngine::togglePlayPause();
             break;
         case BluetoothSource::TransportCmd::Pause:
-            if (state.now.hasTrack && state.now.playing) {
-                state.now.playing = false;
-                AudioBridge::pauseResume();
-                state.dirty = true;
-            }
+            if (state.now.hasTrack && state.now.playing) MenuEngine::togglePlayPause();
             break;
         case BluetoothSource::TransportCmd::Next:
             MenuEngine::playNextInQueue();
@@ -431,13 +375,18 @@ static void handleBtTransportCommands() {
 }
 
 void loop() {
-    audio.loop(); // pumps I2S streaming; must run every iteration
+    // Feeds the decoder's input buffer from SD (the decode itself runs on
+    // the library's own task). Twice a pass: UI::update() can take tens of
+    // milliseconds when it redraws, and right after a track start or a
+    // seek the decoder is waiting on exactly this to fill its buffer.
+    AudioBridge::pump();
     AnoInput::update();
     Battery::update();
     syncBatteryToUi();
-    BluetoothSource::tick(); // give-up-after-a-minute-of-searching watchdog, see BluetoothSource.h
+    BluetoothSource::tick(); // disconnect / give-up watchdog, see BluetoothSource.h
     syncBluetoothToUi();
     handleBtTransportCommands();
+    AudioBridge::pump();
     UI::update();
 }
 

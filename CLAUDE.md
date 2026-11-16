@@ -89,9 +89,9 @@ src/state/AppState.h/.cpp  full app state singleton (`extern AppState state;`)
 src/input/AnoInput.*     ANO encoder + button tap/long-press/double-tap/isHeld (step 6)
 src/bt/BluetoothSource.* real on/off-toggleable A2DP source (step 5), wired into
                          the UI's Bluetooth screen (MenuEngine::enterBluetooth())
-                         — still only streams a 440Hz test tone, not real decoded
-                         audio (that needs routing ESP32-audioI2S's output into
-                         the A2DP callback instead of the I2S DAC — not done)
+                         — streams the real decoded audio (PCM ring buffer fed
+                         from AudioBridge's audio_process_i2s() hook), device
+                         picker, AVRCP volume + transport
 src/power/Battery.*      MAX17048 fuel gauge polling over I2C (step 7) —
                          Battery::update() throttles to one poll/2s internally;
                          main.cpp's syncBatteryToUi() pushes it into state.battery
@@ -102,9 +102,11 @@ src/net/RadioLock.h      mutex between TimeSync (WiFi) and BluetoothSource (BT) 
 src/state/Persist.*      NVS-backed settings + Bluetooth-on persistence across reboots,
                          plus the boot-crash guard that stops a BT-auto-resume crash
                          from becoming an infinite reboot loop (see seventh bug below)
-src/audio/AudioBridge.*  bridges UI "play this track" intent to real ESP32-audioI2S
-                         output — plays the given track's real path, or falls back
-                         to the first playable file found for tracks with none
+src/audio/AudioBridge.*  the ONLY code that talks to the ESP32-audioI2S Audio object
+                         after setup(): play/pause/seek/volume, an explicit stream
+                         Status (Playing/Paused/Ended/Failed/...), and pump() to
+                         keep the decoder fed during long main-loop work — see the
+                         "Full-code audit round" section for the threading model
 src/audio/FlacMeta.*     hand-written FLAC metadata-block parser (duration, tags,
                          lyrics, embedded art) — called lazily at track-start, not
                          during the bulk SD scan; see its dedicated section below
@@ -112,9 +114,10 @@ src/ui/UiTypes.h         shared shapes: Track, Menu, MenuItem (mirrors the simul
                          JS object shapes 1:1 — cross-check against simulator source
                          if unsure what a field means)
 src/ui/Library.*         on-SD compact index (Library::ensureIndex(), /clickpod.idx) --
-                         built once, read lazily/bounded per screen after that, not
-                         held fully in RAM; mock data kept as a fallback -- see the
-                         dedicated "on-SD compact index" section below
+                         built once (sorted, validated on load), plus a small in-RAM
+                         catalog of names/counts/file offsets; tracks are read per
+                         album/playlist on demand; mock data kept as a fallback --
+                         see the "on-SD compact index" and audit-round sections
 src/ui/MenuEngine.*      menu-stack build/navigate (buildMainMenu, enterBluetooth,
                          openTrackMenu, playQueueFrom, ...) — ported function-for-
                          function from the simulator's JS of the same names
@@ -1262,6 +1265,18 @@ ascending:
    **removed** -- no longer needed now that the same change lives as a
    real commit in a real dependency instead of being re-applied by a
    build script every time.
+
+   **CORRECTION (audit round, see "Full-code audit round" below): the
+   "`m_maxBlockSize` is just a threshold... not a hard memory ceiling, so
+   growing it is safe" reasoning above was WRONG.** It IS bounded by
+   memory: the library's ring buffer copies up to `m_maxBlockSize` bytes
+   of wrapped-around data into a 16384-byte reserve area at the very end
+   of its allocation, so any file with a max frame size over 16384 made
+   it write past the end of the buffer -- real heap corruption, and very
+   likely behind several of the "heap corruption surfacing somewhere
+   unrelated" crashes logged further down. Fixed in the fork (reserve
+   grown to cover any uint16 frame size). The patch still does what it
+   was for; it just wasn't safe until that fix.
 
    Does NOT help the 24-bit-samples limitation -- separate, intentional
    hard requirement in the same library (`bps != 8 && bps != 16`), not a
@@ -3014,6 +3029,17 @@ does rule out the one alternative (consumer-task stack) that would have
 made the fix target the wrong side entirely, so it's the right first
 thing to try.
 
+**UPDATE (audit round): the stack-size theory above was aimed at the
+wrong task, and a far better explanation was found.** The decode path
+does not run on the Arduino `loop()` task at all -- ESP32-audioI2S has
+its own task for it -- so `getArduinoLoopTaskStackSize()` could never
+have helped. What a `spinlock_acquire` assert right after a seek
+actually matches is the library deleting and re-creating its buffer
+mutex on every seek while its own decode task may be holding it (a
+use-after-free of a FreeRTOS semaphore, whose internal spinlock is
+exactly what that assert checks). Found by reading the source, fixed in
+the fork -- see "Full-code audit round" below.
+
 ## Thirty-third real hardware bug (found, fixed, not yet hardware-confirmed): two independent, unsynced volume controls stacking over Bluetooth
 
 User reported the headphones' own volume buttons genuinely changed the
@@ -3675,6 +3701,24 @@ test session. Also worth independently confirming the currently-
 flashed binary is actually built from this repo's current HEAD (not an
 older flash) before trusting the "this logic has always been 6h" read
 of the source.
+
+**UPDATE -- ROOT CAUSE FOUND (audit round), the resync half of this is
+closed.** `pdMS_TO_TICKS()` multiplies in 32 bits. At this build's
+1000Hz tick rate `pdMS_TO_TICKS(6 * 60 * 60 * 1000)` overflows to
+125,163 ticks -- **125 seconds**, not 6 hours. 125s of "6-hour" wait +
+~3s for the sync itself is exactly the observed 128,214ms cadence. The
+"this logic has always been 6h" read of the source above was right
+about the *intent* and wrong about the arithmetic: the main wait was a
+single `vTaskDelay(pdMS_TO_TICKS(kResyncIntervalMs))` at the time (it
+only became the 1s-sliced `waitUpToWithEarlyWake()` in the same commit
+that added "Sync Time Now", which that log evidently predates), and the
+skipped-retry wait still had the same overflow until this round. Every
+long wait in `TimeSync.cpp` now goes through the sliced helper, with a
+comment saying why. **Lesson: never hand `pdMS_TO_TICKS()` more than
+~71 minutes.** The 45x `[ui] power off` burst in the same log is a
+separate thing and now has a hardware explanation too: GPIO39 (CENTER)
+was later found shorted to GPIO34/35 with a bad pull-up joint on the
+perfboard build (see the hardware notes in the audit-round section).
 
 ## Forty-fifth real hardware bug (found, fixed): grabbed queue/history rows teleported to the opposite end of their segment instead of stopping at "now"
 
@@ -4651,6 +4695,16 @@ resetting at the `DECODE_FRAME`-state entry in `FLACDecodeNative()`
 itself as defense in depth, not just at the one `FLACFindSyncWord()`
 call site, if a third path to a stale `s_offset` turns up.
 
+**UPDATE (audit round): two more memory-safety bugs in the same
+library, either of which produces this same signature, found and fixed
+-- see "Full-code audit round" below.** The two fixes above are real
+and stay, but the crashes that survived them are much better explained
+by (a) the input-buffer overflow on any file whose max frame size
+exceeds 16384 bytes and (b) the loop task rewinding/freeing decoder
+state while the decode task is mid-frame. "The bitrate was really high
+on the song before" fits (a) in particular: large frames are exactly
+what a high-bitrate FLAC has.
+
 ## Reverted: track-transition fade-out/fade-in
 
 Implemented a sequential fade-out-then-fade-in across track transitions
@@ -4664,6 +4718,267 @@ first). **User explicitly rejected it after it shipped**: "and i dont
 want the fade in thing, forget it, revert it." Reverted via `git revert`
 (commit `7d25ff9`) -- `UI.cpp` is back to its pre-fade state. Not a
 candidate to reintroduce unless the user asks again.
+
+## Perfboard rebuild + input/display orientation fixes (hardware notes)
+
+The board was moved from breadboard to perfboard. What came out of that,
+so nobody re-derives it:
+
+- **Encoder direction is inverted in software** (`AnoInput.cpp`:
+  `encoderDelta -= step`), not by swapping the A/B wires -- user's
+  explicit call ("not touching the hw again"). User-confirmed working.
+- **Display is mounted rotated 180°**: `tft.setRotation(3)` in
+  `main.cpp` (was 1). Purely a mounting choice for the clear case;
+  nothing else in the UI knows or cares. Not yet hardware-confirmed.
+- **CENTER has a longer debounce than the other buttons** (50ms vs 15ms,
+  `AnoInput.cpp`). Added while chasing spontaneous CENTER long-presses;
+  the real cause turned out to be hardware (below), but GPIO39 is
+  input-only with no internal pull and sits next to the antenna, so the
+  extra margin stays.
+- **What the "random" input bugs actually were** (all hardware, all
+  found with a multimeter, none with theories): the ANO pull-ups weren't
+  tied to 3.3V at first; CENTER's pull-up had a cold joint (pin read
+  0.13mV until reflowed); and solder had bridged GPIO34/35/39 together
+  (RIGHT/DOWN/CENTER all moved as one). An RF/EMI explanation I offered
+  for the GPIO39 glitches was wrong and is retracted. Later the solder
+  under the ESP32 had to be reworked wholesale.
+- **`AnoInput::update()` still has a TEMPORARY `[diag]` block** printing
+  the raw level of GPIO35/34/39 whenever one changes. Leave it until the
+  user confirms the rebuilt board's three buttons toggle independently
+  (one `[diag]` line per press, each on its own pin), then delete it.
+- Pin map is unchanged and `src/config/Pins.h` is still authoritative.
+  ANO silkscreen for this build: SW1=CENTER(GPIO39/"VN"), SW2=DOWN(35),
+  SW3=RIGHT(34), SW4=UP(14), SW5=LEFT(13), ENCA=32, ENCB=33.
+
+## Full-code audit round (2026-11): what was found and changed
+
+User's brief: with the hardware on the bench being repaired, go through
+all of the firmware -- "chase the bugs, doubt everything", make it
+smooth and fast, prune what's unnecessary. Every source file and the
+relevant parts of both pinned libraries (ESP32-audioI2S fork,
+ESP32-A2DP) were read. **None of this has run on the device yet** -- the
+hardware was in pieces. How it was checked instead is at the end.
+
+### The one thing to know first: the audio library's threading model
+
+Confirmed from the fork's source, and it invalidates assumptions made in
+several earlier sections of this file:
+
+- **Decoding and output run on the library's own FreeRTOS task**
+  ("PeriodicTask", unpinned, in practice core 0):
+  `audioTask -> performAudioTask -> playAudioData -> sendBytes ->
+  FLACDecode -> playChunk -> audio_process_i2s / i2s_write`. It takes
+  `mutex_playAudioData` around each frame.
+- **`audio.loop()` -- the only part on the Arduino loop task -- just
+  reads the file from SD into the input ring buffer**
+  (`processLocalFile()`), and performs seeks and end-of-file teardown.
+- So: every SD and TFT SPI access is still on the loop task (the "one
+  task on the SPI bus" rule holds). `BluetoothSource::feedPcm()` runs on
+  the DECODE task. And the loop task can block for a while without
+  stalling audio, as long as the input buffer doesn't run dry.
+- The library fills the WHOLE input buffer before it starts decoding a
+  file, and again after every seek. That fill is the dominant
+  track-start and scrub-commit latency.
+
+### Fork fixes (`clickpod-3.0.12-flac-patch`, commit `581b791`, re-pinned)
+
+Three confirmed memory-safety bugs, in order of how much they explain:
+
+1. **Heap overflow past the end of the input buffer** -- introduced by
+   this project's own max-frame-size patch (see the CORRECTION under
+   "option 3" far above). `AudioBuffer::getReadPtr()` copies up to
+   `m_maxBlockSize` bytes into a reserve area after the ring; the
+   reserve was 16384 bytes and the patch let the block size grow to the
+   file's real max frame size (up to 65535). With such a file playing,
+   roughly one buffer-lap in three wrote up to tens of KB of compressed
+   audio over whatever PSRAM allocation came next -- and since
+   `heap_caps_malloc_extmem_enable(1)` puts nearly every String in
+   PSRAM, "whatever came next" was the queue's Track strings, menu rows,
+   etc. That is "CORRUPT HEAP: Bad tail", `tlsf` free-list faults and
+   "corrupted String inside `playNextInQueue()`" in one bug. Reserve is
+   now 65536+64 and `changeMaxBlockSize()` clamps to it.
+2. **`AudioBuffer::resetBuffer()` deleted and re-created the buffer
+   mutex** on every seek (loop task) while the decode task may hold or
+   be waiting on it. Now it just takes the mutex.
+3. **Seek and end-of-file ran against a live decoder.**
+   `processLocalFile()` called `FLACDecoderReset()` + `InBuff
+   .resetBuffer()` on a seek, and FREED the decoder's buffers at EOF,
+   with no lock, while the decode task could be mid-frame. Both now
+   happen under `mutex_playAudioData`; so does `setFilePos()`'s reset of
+   `m_outBuff`/`m_validSamples`.
+
+Also: decode task stack 3300 -> 4608 bytes (it now also runs our
+Bluetooth feed hook; headroom, not a measured need).
+
+**Earlier fork fixes (CRC-8 resync, STREAMINFO preserve, bitreader
+underflow, block-size check, unconditional reset) all stay** -- they are
+real bugs too. But be clear-eyed reading the old writeups: several of
+them were declared "the" cause of crashes that these three explain
+better. If scrubbing or a track change still crashes after this, get
+the decoded backtrace first; don't theorize.
+
+### App-side bugs fixed
+
+- **`TimeSync`: the 6h waits overflowed to 125s** (`pdMS_TO_TICKS`) --
+  the forty-fourth bug, see the UPDATE there. Also new: a periodic
+  drift RE-sync is skipped while Bluetooth is connected (a WiFi
+  scan+join on the shared radio is audible as dropouts); the first sync
+  of a boot and "Sync Time Now" still run.
+- **`Library::readStr()` stack overflow**: a uint16 length read from the
+  index file was copied into a 301-byte stack buffer unchecked. A
+  corrupt index could smash the stack by ~65KB. Now bounded.
+- **The index was trusted blindly.** A reset mid-build (it takes ~20s)
+  left a partial `/clickpod.idx` that every later boot used as the
+  whole library. Now: built into `/clickpod.tmp` and renamed into place
+  only when complete; validated on every load (magic + exact record
+  count); rebuilt automatically if it doesn't check out. Magic is now
+  `"CPX2"`, so **the first boot on this firmware rebuilds the index
+  once (~20s)** -- which also finally applies the "Artist - " title
+  cleanup without a manual rescan.
+- **`MenuEngine::openTrackMenu()` use-after-free**: used `track.title`
+  after clearing the menu stack that `track` was a reference into.
+- **Menu actions destroyed themselves mid-call.** `InputRouter` invoked
+  `item.action()` through a reference into `state.menuStack`; most
+  actions replace/clear that stack. Now it runs a copy.
+- **A2DP library kept a dangling pointer to the target device name.**
+  ESP32-A2DP stores the `const char*` you pass to `start()`; we passed
+  `c_str()` of a String captured in a menu row that is destroyed as
+  soon as the Bluetooth screen is rebuilt or left. The library then
+  compared scan results against freed memory -- a plausible reason
+  picking a NEW device from the picker was unreliable. `BluetoothSource`
+  now owns a copy.
+- **"Previous" didn't restart the track** (only zeroed the displayed
+  position; the next sync undid it). Now a real seek to 0.
+- **"Next" on the last track showed "paused" while audio kept playing.**
+  Now a no-op if the track is still really playing.
+- **Play/pause on a finished track** flipped the library's running flag
+  on a closed file (UI said playing, nothing happened, forever). Now it
+  restarts the track.
+- **Two rapid skips could leave the wrong track playing**: the
+  150ms `playSomething()` guard DROPPED the second start while the UI
+  had already moved to that track. It is now queued and started.
+- **A scrub commit could be applied to the next track** (the "known,
+  accepted edge case"): the pending flag now lives in `state` and
+  `setNowPlaying()` clears it.
+- **Bar jumped back then forward after a scrub commit**: the decoder
+  reports its old position until it has refilled; the bar now holds the
+  target until the decoder catches up (`seekSettleUntilMs`).
+- **End of track cut early / could stall**: it was "displayed position
+  >= duration truncated to whole seconds, checked twice a second". It
+  is now "the stream stopped by itself", checked every loop pass --
+  plays to the real end, shortest possible gap, and works for files
+  with unknown duration.
+- **Failed files**: detected from the stream's own state instead of a
+  fixed 3s grace period (so a bad file is skipped at once), with a
+  5-in-a-row breaker so a pulled/dead SD card can't burn through the
+  whole queue and fill the failed-files log.
+- **Device picker left the whole Bluetooth stack running** after
+  backing out (only the scan was cancelled; radio and ~80KB of internal
+  RAM stayed claimed, UI said "Off"). It is torn down now, however the
+  picker is left. Opening the picker while a session is up now ends
+  that session first (it used to sit on "Scanning..." forever).
+- **`end()` could race the A2DP library's own start-up handler** (it
+  runs asynchronously for a while after `start()`); teardown now waits
+  out a 1.5s minimum uptime.
+- **`Persist`**: `markTimeSyncAttempt*()` run on the TimeSync task and
+  shared one `Preferences` object with the main loop's `save()`; they
+  have their own handle now.
+- **`FlacMeta`**: an untrusted comment count drove an unbounded loop and
+  an untrusted MIME length an unbounded allocation; every length is now
+  bounded by its block. Also handles a FLAC with an ID3v2 tag in front.
+- **Deleting an auto-named playlist and creating a new one** gave the
+  new one the same name, which was still on the hidden list -- it never
+  appeared. Fixed.
+- **The encoder did nothing on the "..." track menu** (TRACK_MENU was
+  missing from `rotate()`).
+- **Lyrics**: a line could be drawn over the statusbar; every played
+  track's lyrics stayed in RAM for the session. Both fixed.
+- **Text**: nothing limited text width -- long titles ran over the
+  sub-label and wrapped into the row below (TFT_eSPI wraps by default).
+  All tag/filename text now goes through `fitText()`: clipped with
+  "..", and UTF-8 folded to ASCII (`asciiFold()`, Util.h) since the
+  GLCD font can't show it -- "Beyoncé" rendered as garbage and threw
+  off centering.
+
+### Speed
+
+- **Track start**: metadata (STREAMINFO + tags) is read in ONE open
+  before playback starts, so the first redraw already has the real
+  title; the cover art (big SD read + JPEG decode) is no longer in the
+  start path at all -- `MenuEngine::serviceDeferredWork()` decodes it
+  once the decoder's buffer is filled, and drops it into place with a
+  partial redraw. Skipping through tracks never decodes art for the
+  ones skipped. (The old order ran the JPEG decode after
+  `connecttoFS()` but before the loop got back to feeding the decoder,
+  so first sound still waited for it.)
+- **Decoder input buffer 640KB -> 256KB** (`AudioBridge::begin()`,
+  `setBufsize()`): about a third of the fill time on every track start
+  and every scrub commit. ~190KB usable is still over a second of audio
+  at the worst-case bitrate. The cost is less slack for a busy loop
+  task -- hence **`AudioBridge::pump()`**, called from the long
+  operations (cover decode, picture read, big index reads, rescan) and
+  twice per `loop()`.
+- **Library menus no longer read SD at all** above the track level: an
+  in-RAM catalog (names, counts, file offsets) is built in the same
+  pass that validates the index. Opening an album seeks straight to its
+  records. (Every menu open used to re-read the whole index; the
+  Playlists screen did so once per playlist on top.)
+- **Redraws**: menus no longer paint every pixel twice (full-body fill,
+  then rows); the list window only scrolls when the cursor leaves it
+  (it used to re-anchor on every step past the first screenful, so the
+  two-row partial update almost never applied in a long list); the main
+  menu, the Queue screen, slider rows, volume, play/pause, cover art
+  and the battery readout all have partial redraws now.
+- **Overlays move the menu stack instead of copying it** (Bluetooth
+  screen, track menu): with a 425-row playlist open that was three deep
+  copies of every row per visit.
+- **Bluetooth ring buffer**: two `memcpy`s per call instead of a
+  byte-at-a-time loop under the mutex; flushed on track change/seek so
+  the old audio's tail doesn't play out first; no logging from the
+  decode task.
+
+### Behavior changes (spec-amended in `docs/SPEC.md`)
+
+- "Sort tracks by" finally does something: Artist (default) or a flat
+  by-album list. Artists/albums/tracks are sorted by name (natural
+  order) at index-build time -- FAT returns creation order.
+- Queue screen opens centered on "now".
+- The play/next/previous/failed-track edge cases listed above.
+
+### Pruned
+
+`Persist::markBtAttemptStarting/Done` and the `btPending`/`btOn` NVS
+handling (dead since Bluetooth stopped auto-resuming);
+`AlbumArt::hasArt()`; `Palette::accent2`; `BluetoothSource::
+cancelDiscovery()`; `FlacMeta::readStreamInfo()/readTags()` (merged
+into `readInfo()`); `UI::kPlaybackStartGraceMs`; a lot of stale
+comments describing Bluetooth as a "440Hz test tone".
+
+### How this was verified (and what that does NOT cover)
+
+- **Type-checked**: every `.cpp` compiles clean (`g++ -std=gnu++17
+  -fsyntax-only -Wall -Wextra`) against hand-written stub headers for
+  Arduino/ESP-IDF/the libraries. Catches typos and type errors; says
+  nothing about real API mismatches.
+- **Actually run on the host**, under AddressSanitizer+UBSan, against a
+  generated card tree and real FLAC files (made with ffmpeg):
+  `Library` (build, sorted order, reload, truncated index, old-format
+  index, corrupt length field, playlist overlay/delete) and `FlacMeta`
+  (tags, picture, 24-bit detection, ID3 prefix, truncated file, hostile
+  comment count / MIME length / block length), plus `asciiFold()`.
+- **Fork changes were NOT compiled** -- small, mechanical, read twice,
+  but uncompiled.
+- **Nothing has run on the ESP32.** Unverified in particular: real
+  timing (is 256KB enough slack? is art-after-start smooth?), the
+  Bluetooth teardown changes, every partial redraw's pixels.
+- First flash checklist: (1) boot -- expect one ~20s index rebuild, then
+  fast boots; (2) play through a track end and scrub hard, wired and
+  over Bluetooth, on a file that used to crash; (3) skip rapidly;
+  (4) Previous mid-track, Next on the last track, Play after the queue
+  runs out; (5) Bluetooth: connect, picker in/out, off; (6) watch for
+  audio dropouts when opening a big playlist or when the cover appears
+  -- if there are any, raise `kInputBufferBytes` in `AudioBridge.cpp`
+  first; (7) `[time]` lines hours apart, not minutes.
 
 ## Working style this project has used (carry forward)
 

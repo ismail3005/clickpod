@@ -7,6 +7,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include "../bt/BluetoothSource.h"
 #include "../state/AppState.h"
 #include "../state/Persist.h"
 #include "RadioLock.h"
@@ -58,6 +59,10 @@ constexpr uint32_t kNtpTimeoutMs = 5000;
 
 enum class SyncResult { kOk, kSkipped, kFailed };
 
+// Set (alongside manualSyncRequested, further down) by "Sync Time Now";
+// consumed by the next tryOnce() -- see its Bluetooth-streaming check.
+std::atomic<bool> manualSyncForce{false};
+
 SyncResult tryOnce() {
     // Boot-crash guard -- a real bootloop was traced to this join path
     // (see CLAUDE.md). Persist::load() sets this once, at most, if the
@@ -79,6 +84,20 @@ SyncResult tryOnce() {
     // See RadioLock.h -- skip this cycle entirely if Bluetooth currently
     // owns the radio, rather than risk the WiFi+BT coexistence crash that
     // prompted adding this lock. Just retries sooner (kSkippedRetryDelayMs).
+    // A periodic RE-sync is only ever drift correction (a few seconds a
+    // day) -- never worth a WiFi scan+join on the one shared radio while
+    // Bluetooth is actively streaming music, where it's audible as
+    // dropouts. Only applies once a real sync already exists: with no
+    // time at all yet, getting a clock still wins (the fifteenth hardware
+    // bug was exactly "never syncs while BT is on").
+    // An explicit "Sync Time Now" press overrides this -- that's the user
+    // asking for it, glitch and all.
+    bool userAsked = manualSyncForce.exchange(false);
+    if (!userAsked && synced && BluetoothSource::isConnected()) {
+        Serial.println(F("[time] skipping drift resync -- Bluetooth is streaming"));
+        return SyncResult::kSkipped;
+    }
+
     RadioLock::ScopedLock lock;
     if (!lock.acquired) {
         Serial.println(F("[time] skipping sync -- Bluetooth is active"));
@@ -197,24 +216,22 @@ SyncResult tryOnce() {
     return SyncResult::kOk;
 }
 
-// Retries fast (kSkippedRetryDelayMs) only while attempts are being
-// skipped pre-radio; stops retrying fast the moment an attempt actually
-// runs, whether it then succeeded or failed for a real reason -- that
-// case waits for the next full kResyncIntervalMs cycle instead.
-void tryUntilAttempted() {
-    while (tryOnce() == SyncResult::kSkipped) {
-        vTaskDelay(pdMS_TO_TICKS(kSkippedRetryDelayMs));
-    }
-}
-
-// Settings' "Sync Time Now" row sets this; the task below polls it in
-// short slices instead of one long vTaskDelay(kResyncIntervalMs), so a
-// manual request doesn't have to wait up to 6h to be noticed. Polling
-// every 1s for up to 6h is negligible cost (a flag check + a short
-// sleep), nowhere near worth a more complex wake-the-task mechanism
+// Settings' "Sync Time Now" row sets this; every wait in this task polls
+// it in short slices so a manual request doesn't have to wait up to 6h
+// to be noticed. Polling every 1s is negligible cost (a flag check + a
+// short sleep), nowhere near worth a more complex wake-the-task mechanism
 // (a queue/semaphore) for something this infrequent.
 std::atomic<bool> manualSyncRequested{false};
 
+// EVERY long wait in this file must go through here, never a single
+// vTaskDelay(pdMS_TO_TICKS(<hours>)) -- pdMS_TO_TICKS() multiplies in
+// 32 bits, so at this build's 1000Hz tick rate anything past ~71 minutes
+// silently wraps: pdMS_TO_TICKS(6h) is 125,163 ticks, i.e. ~125 SECONDS,
+// not 6 hours. That was the real root cause of CLAUDE.md's forty-fourth
+// hardware bug (a WiFi resync every ~128s = 125s of "6h" wait + ~3s of
+// actual sync) -- the older one-long-delay form of the main wait had it,
+// and the skipped-retry wait still did until this was routed here too.
+// 1s slices can't overflow.
 void waitUpToWithEarlyWake(uint32_t totalMs) {
     uint32_t waited = 0;
     constexpr uint32_t kPollMs = 1000;
@@ -223,6 +240,17 @@ void waitUpToWithEarlyWake(uint32_t totalMs) {
         uint32_t chunk = min(totalMs - waited, kPollMs);
         vTaskDelay(pdMS_TO_TICKS(chunk));
         waited += chunk;
+    }
+}
+
+// Retries (kSkippedRetryDelayMs) only while attempts are being skipped
+// pre-radio; stops the moment an attempt actually runs, whether it then
+// succeeded or failed for a real reason -- that case waits for the next
+// full kResyncIntervalMs cycle instead. A "Sync Time Now" press cuts
+// either wait short.
+void tryUntilAttempted() {
+    while (tryOnce() == SyncResult::kSkipped) {
+        waitUpToWithEarlyWake(kSkippedRetryDelayMs);
     }
 }
 
@@ -337,6 +365,9 @@ bool hasManualTime() { return manualTimeSet; }
 // attempt still goes through the same radioHeapOk()/RadioLock path as
 // every other attempt, so it can still be skipped (and retried per the
 // normal rules) if the radio genuinely isn't available right now.
-void requestManualSync() { manualSyncRequested = true; }
+void requestManualSync() {
+    manualSyncForce = true;
+    manualSyncRequested = true;
+}
 
 } // namespace TimeSync

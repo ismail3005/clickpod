@@ -1,7 +1,7 @@
 #include "BluetoothSource.h"
 #include <Arduino.h>
 #include <BluetoothA2DPSource.h>
-#include <math.h>
+#include <atomic>
 #include <cstring>
 #include <nvs.h>
 #include <freertos/FreeRTOS.h>
@@ -87,6 +87,20 @@ BluetoothA2DPSource a2dpSource;
 bool running = false;
 String currentTarget; // name last passed to begin(), "" if never begun
 
+// True from startDiscovery() until the picker's scan session is over
+// (stopDiscovery(), or connectToDiscovered() turning it into a real
+// session). The Bluetooth stack is UP during this even though `running`
+// is false -- see stopDiscovery().
+bool discovering = false;
+
+// When the stack was last (re)started, by begin() or startDiscovery().
+// The library's stack-up handler runs asynchronously on its own task for
+// a while after start() returns (it sleeps, then kicks off the reconnect
+// or the scan); tearing the stack down in the middle of that is a race
+// inside the library. stopStack() waits out kMinUptimeMs first.
+uint32_t stackStartedMs = 0;
+constexpr uint32_t kMinUptimeMs = 1500;
+
 // See tick()/BluetoothSource.h's comment. searchingSinceMs: 0 means "not
 // currently searching for the FIRST connection of this begin() session"
 // -- set to millis() the moment a not-yet-ever-connected search starts,
@@ -98,61 +112,56 @@ uint32_t searchingSinceMs = 0;
 constexpr uint32_t kGiveUpMs = 60000; // 1 minute to land the FIRST connection
 bool hasEverConnectedThisSession = false;
 
-// Real audio ring buffer -- fed by AudioBridge.cpp's audio_process_i2s()
-// weak-symbol override (ESP32-audioI2S's own documented hook, literally
-// commented "record audiodata or send via BT" in its header) with every
-// decoded PCM buffer, already 44.1kHz 16-bit stereo interleaved. Producer
-// (feedPcm, called from the main/audio task) and consumer (providePcm,
-// called from the BT stack's own task) run on different tasks, so this
-// needs real synchronization -- a plain FreeRTOS mutex, not an ISR
-// context on either side.
+// PCM ring buffer between the decoder and A2DP. Producer: feedPcm(),
+// called on ESP32-audioI2S's decode task (via AudioBridge.cpp's
+// audio_process_i2s() hook) with every decoded buffer, already 44.1kHz
+// 16-bit stereo interleaved. Consumer: providePcm(), called on the BT
+// stack's own task whenever A2DP wants more bytes. Two tasks, so a real
+// mutex; both sides copy in at most two memcpy() segments while holding it.
 //
-// Real hardware report: audio over BT was "laggy and noisy and glitchy
-// and overall unusable." Root cause wasn't the buffer being too small
-// alone -- it's that feedPcm() (below) used to DROP the oldest buffered
-// audio on overflow instead of pushing back on the producer. Skipping
-// the I2S write (continueI2S=false) removes the one thing that was
-// naturally pacing the decode loop to real-time -- a blocking I2S write
-// takes roughly as long as the audio it writes actually takes to play.
-// Without that, nothing stopped the decoder from producing chunks
-// faster than A2DP drains them, and "drop oldest" silently threw away
-// chunks of audio MID-STREAM -- which is exactly what a glitchy,
-// discontinuous-sounding stream is. 16KB (~93ms) was also just thin
-// margin for real BT link jitter on top of that. Both fixed below:
-// feedPcm() now blocks (bounded) for room instead of dropping, which
-// re-creates the pacing a real I2S write would have provided, and the
-// buffer is bumped to give real jitter headroom -- PSRAM is abundant
-// (4MB, see this project's established PSRAM push) and a player doesn't
-// care about a few hundred ms of extra latency the way a call would.
-constexpr size_t kPcmRingSize = 65536; // ~372ms of headroom at 44.1kHz/16-bit/stereo
-uint8_t *pcmRing = nullptr; // ps_malloc'd lazily, PSRAM (this project's established push)
+// feedPcm() BLOCKS (bounded) when the ring is full instead of dropping.
+// Skipping the I2S write removes the one thing that paced the decoder to
+// real time (a blocking I2S write takes as long as the audio it carries);
+// without backpressure here the decoder would run far ahead of what A2DP
+// drains and audio would be thrown away mid-stream -- the "laggy, noisy,
+// glitchy" Bluetooth audio of the first version. 64KB is ~370ms at
+// 44.1kHz/16-bit/stereo: real headroom for link jitter, and latency a
+// music player doesn't care about.
+constexpr size_t kPcmRingSize = 65536;
+uint8_t *pcmRing = nullptr; // PSRAM, allocated once on first use
 SemaphoreHandle_t pcmMutex = nullptr;
 size_t pcmHead = 0, pcmTail = 0, pcmCount = 0;
 
+// Bytes feedPcm() had to give up on because the consumer never made room.
+// Counted here (the decode task must not print -- small stack, and two
+// tasks interleaving on the UART is how logs got garbled) and reported
+// from tick() on the main loop.
+std::atomic<uint32_t> pcmDroppedBytes{0};
+
+// Called from begin()/startDiscovery() on the main loop, i.e. always
+// before either the producer or the consumer can run -- so the two tasks
+// never race to create the ring.
 void ensurePcmRing() {
-    if (pcmRing) return;
-    pcmRing = (uint8_t *)ps_malloc(kPcmRingSize);
-    pcmMutex = xSemaphoreCreateMutex();
+    if (!pcmMutex) pcmMutex = xSemaphoreCreateMutex();
+    if (!pcmRing) pcmRing = (uint8_t *)ps_malloc(kPcmRingSize);
 }
 
 // Pull callback ESP32-A2DP's source calls on its own task whenever it
-// needs more bytes. Drains the ring buffer; underruns (not enough
-// decoded audio buffered yet) fill with silence rather than garbage --
-// a brief silent gap reads far better than noise.
+// needs more bytes. Underruns (not enough decoded audio buffered yet) are
+// filled with silence -- a brief gap reads far better than noise.
 int32_t providePcm(uint8_t *data, int32_t byteCount) {
-    ensurePcmRing();
-    if (!pcmRing || !pcmMutex) {
-        memset(data, 0, byteCount);
-        return byteCount;
+    if (byteCount <= 0) return 0;
+    int32_t n = 0;
+    if (pcmRing && pcmMutex) {
+        xSemaphoreTake(pcmMutex, portMAX_DELAY);
+        n = (int32_t)min((size_t)byteCount, pcmCount);
+        size_t first = min((size_t)n, kPcmRingSize - pcmTail);
+        memcpy(data, pcmRing + pcmTail, first);
+        if ((size_t)n > first) memcpy(data + first, pcmRing, (size_t)n - first);
+        pcmTail = (pcmTail + (size_t)n) % kPcmRingSize;
+        pcmCount -= (size_t)n;
+        xSemaphoreGive(pcmMutex);
     }
-    xSemaphoreTake(pcmMutex, portMAX_DELAY);
-    int32_t n = (int32_t)min((size_t)byteCount, pcmCount);
-    for (int32_t i = 0; i < n; i++) {
-        data[i] = pcmRing[pcmTail];
-        pcmTail = (pcmTail + 1) % kPcmRingSize;
-    }
-    pcmCount -= n;
-    xSemaphoreGive(pcmMutex);
     if (n < byteCount) memset(data + n, 0, byteCount - n);
     return byteCount;
 }
@@ -208,6 +217,7 @@ void BluetoothSource::begin(const char *targetDeviceName, bool allowAutoReconnec
     if (running) return;
     searchingSinceMs = 0; // fresh search window -- see tick()'s comment
     hasEverConnectedThisSession = false;
+    ensurePcmRing();
 
     // Internal-heap guard FIRST -- a real crash in the field
     // (semphr_create_wrapper assert, then separately a WiFi esp_timer_create
@@ -267,18 +277,26 @@ void BluetoothSource::begin(const char *targetDeviceName, bool allowAutoReconnec
     // the specific unsafe state (an in-flight connect_to()) end() can
     // ever be called into.
     a2dpSource.set_auto_reconnect(allowAutoReconnect, 0);
-    a2dpSource.start(targetDeviceName);
-    RadioLock::release(); // see above -- don't hold this past the actual start() call
-    running = true;
+    // Copied before start(): targetDeviceName may point into a String the
+    // caller is about to let go of, and the library keeps the pointer.
     currentTarget = targetDeviceName;
-    Serial.printf("[bt] A2DP source scanning for \"%s\" -- put it in "
-                  "pairing/discoverable mode; you should hear a 440Hz tone "
-                  "once connected.\n",
-                  targetDeviceName);
+    a2dpSource.start(currentTarget.c_str());
+    RadioLock::release(); // see above -- don't hold this past the actual start() call
+    stackStartedMs = millis();
+    running = true;
+    discovering = false;
+    Serial.printf("[bt] A2DP source looking for \"%s\" (an already-bonded device reconnects "
+                  "directly; a new one needs to be in pairing mode)\n",
+                  currentTarget.c_str());
 }
 
-void BluetoothSource::end() {
-    if (!running) return;
+// Full teardown of the Bluetooth stack, shared by end() (a real session)
+// and stopDiscovery() (a picker scan that never became one).
+static void stopStack() {
+    // See stackStartedMs -- don't tear down under the library's own
+    // still-running start-up handler.
+    uint32_t up = millis() - stackStartedMs;
+    if (up < kMinUptimeMs) delay(kMinUptimeMs - up);
     // Snapshot the real bonded address BEFORE calling the library's end(),
     // which (confirmed from source, see the shadow-save block above)
     // unconditionally wipes its own copy to all-zero -- this is the only
@@ -322,12 +340,18 @@ void BluetoothSource::end() {
     }
     a2dpSource.end();
     running = false;
+    discovering = false;
     // No RadioLock::release() here -- begin() no longer holds the lock
     // this far (see its comment), so releasing here would incorrectly
     // clear RadioLock::busy if TimeSync happens to hold it at this exact
     // moment, letting BluetoothSource's own next begin() (or anything
     // else) acquire it while TimeSync still thinks it's mid-cycle.
     Serial.println(F("[bt] A2DP source stopped"));
+}
+
+void BluetoothSource::end() {
+    if (!running) return;
+    stopStack();
 }
 
 void BluetoothSource::setVolume(uint8_t volume0to127) {
@@ -348,24 +372,35 @@ bool BluetoothSource::isRunning() { return running; }
 const char *BluetoothSource::currentTargetName() { return currentTarget.c_str(); }
 
 void BluetoothSource::startDiscovery() {
-    if (running) return; // don't fight an already-connecting/connected session
+    if (running || discovering) return; // don't fight a session that's already up
     if (!radioHeapOk("BluetoothSource-discovery")) return;
     if (!RadioLock::tryAcquire()) {
         Serial.println(F("[bt] can't scan yet -- WiFi time sync is active, try again shortly"));
         return;
     }
+    ensurePcmRing();
     discoveredCountVal = 0;
     a2dpSource.set_data_callback(providePcm);
     a2dpSource.set_ssid_callback(ssidCallback);
     a2dpSource.start(); // no name -- pure discovery, see BluetoothSource.h
     RadioLock::release(); // same brief-hold pattern as begin() -- discovery itself runs async on the BT task
+    stackStartedMs = millis();
+    discovering = true;
     Serial.println(F("[bt] scanning for nearby devices..."));
 }
 
-void BluetoothSource::cancelDiscovery() {
-    a2dpSource.cancel_discovery();
+// The picker was left without choosing anything. cancel_discovery() alone
+// (what this used to do) only stops the scan: the whole Bluetooth stack
+// that startDiscovery() brought up stayed initialized -- radio on, its
+// tens of KB of internal RAM held -- for the rest of the session, with
+// the UI saying "Off". Tear it down for real.
+void BluetoothSource::stopDiscovery() {
+    if (!discovering || running) return;
+    Serial.println(F("[bt] device scan closed -- shutting the Bluetooth stack back down"));
+    stopStack();
 }
 
+bool BluetoothSource::isDiscovering() { return discovering; }
 bool BluetoothSource::isDiscoveryActive() { return a2dpSource.is_discovery_active(); }
 
 int BluetoothSource::discoveredCount() { return discoveredCountVal; }
@@ -378,7 +413,7 @@ const char *BluetoothSource::discoveredName(int index) {
 void BluetoothSource::connectToDiscovered(const char *name) {
     a2dpSource.cancel_discovery();
     a2dpSource.set_ssid_callback(nullptr);
-    running = false; // startDiscovery() never set this true -- begin() below starts the real connection fresh
+    discovering = false; // the scan session becomes a real one -- begin() below starts the connection
     // allowAutoReconnect=false: the user is explicitly picking a device by
     // name from the real scan results -- if a DIFFERENT device was
     // already bonded before, auto-reconnect would silently ignore this
@@ -394,43 +429,55 @@ void BluetoothSource::connectToDiscovered(const char *name) {
 }
 
 void BluetoothSource::feedPcm(const uint8_t *data, size_t len) {
-    ensurePcmRing();
     if (!pcmRing || !pcmMutex) return;
-    // Real backpressure instead of drop-oldest-on-overflow -- see the
-    // big comment on kPcmRingSize above for why dropping was the actual
-    // cause of the glitchy/noisy audio. When the buffer's full, wait in
-    // short bursts for the consumer (providePcm(), the BT stack's own
-    // task) to drain some before writing more -- this is what re-creates
-    // the real-time pacing a blocking I2S write used to provide. Bounded
-    // total wait (kMaxWaitMs) so a stalled/disconnected consumer can't
-    // hang the main loop (audio.loop() calls this synchronously) forever
-    // -- past that, the rest of this one chunk is dropped (logged once),
-    // which is a world apart from silently dropping continuously.
+    // Backpressure, not drop-oldest -- see the comment on kPcmRingSize.
+    // When the ring is full, wait in short naps for the consumer to drain
+    // some. Bounded (kMaxWaitMs) so a consumer that has stopped pulling
+    // can't park the decode task forever; past that the rest of this one
+    // buffer is dropped and counted (tick() reports it).
     constexpr uint32_t kMaxWaitMs = 250;
     uint32_t waitStart = millis();
     size_t written = 0;
     while (written < len) {
         xSemaphoreTake(pcmMutex, portMAX_DELAY);
-        size_t space = kPcmRingSize - pcmCount;
-        size_t chunk = min(space, len - written);
-        for (size_t i = 0; i < chunk; i++) {
-            pcmRing[pcmHead] = data[written + i];
-            pcmHead = (pcmHead + 1) % kPcmRingSize;
-        }
+        size_t chunk = min(kPcmRingSize - pcmCount, len - written);
+        size_t first = min(chunk, kPcmRingSize - pcmHead);
+        memcpy(pcmRing + pcmHead, data + written, first);
+        if (chunk > first) memcpy(pcmRing, data + written + first, chunk - first);
+        pcmHead = (pcmHead + chunk) % kPcmRingSize;
         pcmCount += chunk;
         written += chunk;
         xSemaphoreGive(pcmMutex);
         if (written >= len) break;
         if (millis() - waitStart >= kMaxWaitMs) {
-            Serial.println(F("[bt] PCM ring buffer stayed full too long -- dropping the rest of this chunk"));
+            pcmDroppedBytes += (uint32_t)(len - written);
             break;
         }
-        vTaskDelay(pdMS_TO_TICKS(2)); // brief yield, let the consumer task actually run and drain
+        vTaskDelay(pdMS_TO_TICKS(2)); // let the consumer task run and drain
     }
+}
+
+void BluetoothSource::flushPcm() {
+    if (!pcmMutex) return;
+    xSemaphoreTake(pcmMutex, portMAX_DELAY);
+    pcmHead = pcmTail = pcmCount = 0;
+    xSemaphoreGive(pcmMutex);
 }
 
 void BluetoothSource::tick() {
     if (!running) return;
+
+    // feedPcm()'s drop report, rate-limited -- see pcmDroppedBytes.
+    static uint32_t lastDropReportMs = 0;
+    if (millis() - lastDropReportMs >= 5000) {
+        lastDropReportMs = millis();
+        uint32_t dropped = pcmDroppedBytes.exchange(0);
+        if (dropped) {
+            Serial.printf("[bt] headphones weren't taking audio -- dropped %u bytes in the last 5s\n",
+                          (unsigned)dropped);
+        }
+    }
+
     if (a2dpSource.is_connected()) {
         hasEverConnectedThisSession = true;
         searchingSinceMs = 0;

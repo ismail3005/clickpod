@@ -34,17 +34,16 @@ struct NowPlaying {
     bool playing = false;
     String path; // real SD path if known (see Track::path); empty for placeholder tracks
 
-    // Playback-failure detection (UI.cpp's tickPlaybackClock()): some real
-    // files fail to decode (e.g. a FLAC frame exceeding ESP32-audioI2S's
-    // fixed internal buffer -- a real, hit-in-the-field, unfixable-from-
-    // here library limitation, see CLAUDE.md) and the decoder just closes
-    // the file and goes idle, with no exception/callback app code can
-    // catch directly. Without this, playback just silently stops with no
-    // recovery. startedAtMs is set (MenuEngine::setNowPlaying()) the
-    // moment a real track starts; playbackConfirmed flips true once
-    // AudioBridge::isRunning() is seen true for it. If it's STILL false
-    // after a grace period, the track is treated as failed-to-play and
-    // skipped automatically.
+    // Playback-failure detection (UI.cpp's tickPlayback()). The decoder
+    // library has no failure callback app code can rely on -- a file that
+    // can't be opened or decoded just leaves the stream stopped. UI.cpp
+    // watches AudioBridge::status() every loop: a stream that stops on its
+    // own after producing audio is a normal end of track; one that stops
+    // (or never starts) WITHOUT ever producing audio is a failed file, and
+    // gets logged and skipped. playbackConfirmed is that "has produced
+    // audio" latch (the decoder's own position counter moved off zero);
+    // startedAtMs backs a long-stop safety net for a stream that claims to
+    // be running but never gets anywhere.
     uint32_t startedAtMs = 0;
     bool playbackConfirmed = false;
 };
@@ -69,6 +68,10 @@ struct AppState {
     NowPlaying now;
     std::vector<Track> queue;
     int queueSelected = 0;
+    // First visible row of the Queue screen; -1 = "pick one that centers
+    // the selection" (set when the screen is opened, so it opens showing
+    // some of what was played above "now" AND what's coming below it).
+    int queueViewStart = -1;
     bool queueGrabbed = false; // true while the selected queue row is picked up for reordering
     // Previously played tracks this session -- was only ever used by
     // skipPrevious()'s one-step-back case; the Queue screen now also
@@ -83,16 +86,15 @@ struct AppState {
     // at this default otherwise (gauge not wired/not responding).
     int battery = 82;
     // Synced from the real BluetoothSource/A2DP link each loop() iteration
-    // (main.cpp's syncBluetoothToUi()) -- not a mock device list anymore.
-    // BT still only streams a test tone, not real decoded audio -- see
-    // BluetoothSource.h.
+    // (main.cpp's syncBluetoothToUi()). Never restored from NVS: Bluetooth
+    // is always off at boot and only ever turned on from the menu.
     bool btOn = false;
     String btConnectedTo; // empty = not connected
     // User-picked target device name (from the real device-picker screen,
-    // MenuEngine::enterBluetoothDevicePicker()), persisted so boot-time
-    // auto-resume (main.cpp) reconnects to whatever was last picked instead
-    // of the hardcoded BluetoothSource::kTargetDeviceName default. Empty
-    // means "never picked one" -- falls back to that default.
+    // MenuEngine::enterBluetoothDevicePicker()), persisted so the Bluetooth
+    // screen knows which remembered device is the currently-bonded one.
+    // Empty means "never picked one" -- the screen falls back to the
+    // hardcoded BluetoothSource::kTargetDeviceName default.
     String btDeviceName;
     // Small, bounded most-recent-first list of device NAMES ever picked
     // from the device picker or the Bluetooth status row -- a real
@@ -139,7 +141,7 @@ struct AppState {
     // Lighter-weight than `dirty`: set by the once-a-second Now Playing
     // position tick, which only needs the progress bar/time strip
     // redrawn, not the whole screen -- see Screens::render() and
-    // UI.cpp's tickPlaybackClock. Avoids a full-screen flicker every
+    // UI.cpp's tickPlayback(). Avoids a full-screen flicker every
     // second during playback.
     bool progressDirty = false;
     // Lighter still: set when the selection cursor moves within the same
@@ -157,6 +159,14 @@ struct AppState {
     // it showed at the last full redraw, even after a background WiFi
     // sync completed in the background.
     bool statusbarDirty = false;
+    // Now Playing's bottom strip only (play/pause label + volume bar) --
+    // a volume tap or a pause used to repaint the whole screen, album art
+    // included, for a change that touches one line of it.
+    bool controlsDirty = false;
+    // Now Playing's cover-art box only -- the art is decoded a moment
+    // after the track starts (MenuEngine::serviceDeferredWork()) and
+    // dropped into place without repainting the rest of the screen.
+    bool artDirty = false;
 
     // Set by Persist::load() if the previous boot's WiFi time-sync
     // attempt never confirmed completion (likely crashed) -- consumed
@@ -167,12 +177,21 @@ struct AppState {
 
     // Set by InputRouter.cpp's rotate() the moment a scrub starts, cleared
     // once the debounced real seek actually commits (InputRouter::update()).
-    // UI.cpp's tickPlaybackClock() checks this before syncing posSec from
+    // UI.cpp's tickPlayback() checks this before syncing posSec from
     // AudioBridge::currentTimeSec() -- without it, that unconditional
     // every-500ms real-position sync fights the scrub: the real decoder
     // hasn't moved yet (the seek is debounced), so the display kept
     // snapping back to the stale real position mid-scrub ("rubberbanding").
     bool scrubPending = false;
+
+    // After a real seek is committed the decoder keeps reporting its OLD
+    // position until it has refilled its buffer and decoded the first
+    // frame at the new spot. Syncing posSec from it in that window made
+    // the bar jump back to where it was and then forward again. While
+    // seekSettleUntilMs is nonzero, UI.cpp holds posSec at seekTargetSec
+    // until the decoder's own position catches up (or the deadline hits).
+    uint32_t seekSettleUntilMs = 0;
+    uint16_t seekTargetSec = 0;
 };
 
 extern AppState state;

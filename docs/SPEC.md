@@ -184,6 +184,24 @@ sort views, settings, BT device list, etc.)
 | Up (long press) | Show queue screen (see section 6.6) |
 | Left (long press) | **ADDED.** Open the track context menu (see 5.5) for the currently playing track. |
 
+**ADDED (edge cases the table above didn't decide, settled in firmware):**
+- *Next* on the last track, with nothing queued after it, does nothing --
+  the track keeps playing. (It used to flip the screen to "paused" while
+  the audio carried on.) When that last track ends by itself, playback
+  stops.
+- *Play* on a track that has already finished (or failed) starts that
+  track again from the beginning.
+- *Previous* more than ~3s into a track restarts it for real (it used to
+  only zero the displayed position, which the next position update
+  immediately undid).
+- A track that cannot be played (file unreadable, unsupported format) is
+  skipped automatically and logged to `/clickpod_failed.txt`; after 5
+  unreadable tracks in a row playback stops instead of running through
+  the whole queue (an unsupported-format file does not count toward
+  that).
+- The Queue screen opens with the "now playing" row centered (history
+  above it, upcoming below it), not pinned to the bottom of the list.
+
 ### 5.3 Center button state machine (most complex single input)
 
 Center button must distinguish THREE distinct behaviors:
@@ -263,6 +281,17 @@ state isn't disturbed.
    - By Album
    - By other available metadata (genre, year, etc. — whatever tags exist
      after MusicBrainz Picard tagging)
+
+   **AMENDED (what "sort" means in the firmware):** Settings' "Sort
+   tracks by" row existed and was saved, but nothing read it. It now
+   chooses what the top level of Music lists: **Artist** (default) is
+   Artists → Albums → Tracks; **Album** lists every album directly, by
+   album name, with its artist as the sub-label. Either way artists,
+   albums and the tracks inside an album are listed in name order
+   (case-insensitive, numbers compared as numbers), not in the order the
+   files happened to be copied onto the card. "Other metadata" stays
+   not done -- the library is indexed from folder/file names, tags are
+   only read for the track that is playing.
 4. **Playlists menu** — user-defined or imported playlists
 5. **Now Playing screen** — displays:
    - Track title, artist, album (from FLAC metadata — see section 6a below)

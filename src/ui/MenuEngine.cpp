@@ -16,11 +16,17 @@
 #include "AlbumArt.h"
 #include "Library.h"
 #include "Screens.h"
-#include "UI.h"
 #include "Util.h"
 
 namespace MenuEngine {
 namespace {
+
+// How long the progress bar holds a seek's target while the decoder
+// catches up, at most -- see AppState::seekSettleUntilMs.
+constexpr uint32_t kSeekSettleMs = 3000;
+// Cover art is decoded as soon as the decoder is settled, or after this
+// long regardless (a file so short it never fills the input buffer).
+constexpr uint32_t kArtMaxWaitMs = 3000;
 
 Track trackObj(const NowPlaying &n) {
     return Track{n.artist, n.album, n.title, n.durSec, n.art, n.path};
@@ -124,63 +130,66 @@ std::vector<LyricLine> splitLyricsIntoLines(const String &text, uint16_t durSec)
     return lines;
 }
 
+// Key under which the CURRENT track's own tag lyrics were stored in
+// Library::LYRICS, so they can be dropped again when the next track
+// starts -- otherwise every track ever played this session left its
+// lyrics behind in RAM. (The hand-written demo entry is never touched.)
+String tagLyricsKey;
+
+// Cover art for the current track still to be decoded -- see
+// setNowPlaying() and serviceDeferredWork().
+bool artPending = false;
+
+// Consecutive tracks that failed outright (could not be opened, or died
+// without producing any audio). A card that has been pulled or gone bad
+// fails EVERY track, instantly -- without a limit the whole queue would be
+// burned through (and written to the failed-files log) in a second.
+int failStreak = 0;
+constexpr int kMaxFailStreak = 5;
+
 void setNowPlaying(Track t) {
-    // Lazy real-metadata fetch -- only for the ONE track actually becoming
-    // Now Playing, not during the bulk SD scan (see FlacMeta.h for why).
-    // Upgrades filename-derived artist/title/album to real tags when
-    // present, fills in a real duration (durSec stays 0/unknown if this
-    // fails, which UI.cpp's playback clock already guards against), and
-    // picks up real embedded lyrics if the file has them.
-    //
-    // THIRD startup-latency/correctness fix -- REVERTS part of the second
-    // one. The second fix moved FlacMeta::readStreamInfo() to AFTER
-    // AudioBridge::playSomething(), to avoid a double SD open. That
-    // introduced a real, serious bug: readStreamInfo() was now opening the
-    // SAME file a second time WHILE AudioBridge::playSomething()'s
-    // connecttoFS() already had that exact file open and actively
-    // decoding from it -- a genuine concurrent-file-access hazard. When
-    // that caused readStreamInfo() to read corrupted data, it could
-    // spuriously report a bogus bitsPerSample, falsely tripping the
-    // 24-bit-unsupported skip below -- which calls playNextInQueue() ->
-    // setNowPlaying() on the NEXT track WHILE STILL INSIDE THIS CALL. If
-    // that next track's read got corrupted the same way, it recursed,
-    // chewing through the entire queue in one synchronous burst until
-    // empty. The last setNowPlaying() in that cascade had already reset
-    // state.now.posSec to 0 at its own top; playNextInQueue()'s empty-
-    // queue branch then sets state.now.playing = false and returns.
-    // Exactly "goes back to zero and freezes" -- UI.cpp's
-    // tickPlaybackClock() bails out immediately every tick once playing
-    // is false, so nothing ever recovers.
-    //
-    // Fixed by moving ONLY the STREAMINFO read back to BEFORE
-    // playSomething() -- the 24-bit check's false-positive cascade is
-    // dangerous enough that correctness has to win over the minor latency
-    // cost of one SD open before playback starts. Tags/art reading stay
-    // deferred to AFTER playSomething() (same as the second fix) --
-    // unlike STREAMINFO, a bad tags/art read has no skip/recursion path,
-    // so it doesn't carry this same risk, and it hasn't been implicated
-    // in any reported freeze.
-    bool knownUnsupported = false;
+    // Real metadata, read lazily for the ONE track becoming Now Playing
+    // (not during the bulk SD scan, see FlacMeta.h): duration, 8/16-bit
+    // check, tags, lyrics -- in a single pass over a single open of the
+    // file, BEFORE the decoder opens it. Order matters twice over:
+    //  - the decoder must not be started on a file it is known not to
+    //    support, and (thirteenth hardware bug) STREAMINFO must never be
+    //    read from a second handle while the decoder is already reading
+    //    the same file;
+    //  - with the tags in hand before the first redraw, the screen shows
+    //    the real title straight away instead of the filename first and
+    //    the tags a redraw later.
+    // The one genuinely slow part -- the embedded cover image (a big SD
+    // read plus a JPEG decode) -- is NOT done here at all: it is left to
+    // serviceDeferredWork(), which runs it once the decoder has its
+    // buffer filled. It used to run right here, after starting playback
+    // but before the main loop got back to feeding the decoder, so the
+    // first sound of every track waited for a JPEG decode.
+    bool unsupported = false;
+    FlacMeta::Tags tags;
     if (t.path.length() > 0) {
         FlacMeta::StreamInfo si;
-        if (FlacMeta::readStreamInfo(t.path, si)) {
+        if (FlacMeta::readInfo(t.path, si, tags)) {
             float dur = FlacMeta::durationSec(si);
             if (dur > 0 && dur < 65536) t.durSec = (uint16_t)dur;
             // ESP32-audioI2S 3.0.12's FLAC decoder hard-requires 8 or
             // 16-bit samples -- a 24-bit file is guaranteed to fail.
             if (si.bitsPerSample != 0 && si.bitsPerSample != 8 && si.bitsPerSample != 16) {
-                knownUnsupported = true;
+                unsupported = true;
                 Serial.printf("[audio] \"%s\" is %u-bit FLAC -- this decoder only supports 8/16-bit, "
                               "skipping without attempting playback\n",
                               t.title.c_str(), (unsigned)si.bitsPerSample);
                 Library::logFailedFile(t.path,
                                         String((unsigned)si.bitsPerSample) + "-bit FLAC, decoder only supports 8/16-bit");
             }
+            if (tags.hasArtist && tags.artist.length()) t.artist = tags.artist;
+            if (tags.hasTitle && tags.title.length()) t.title = tags.title;
+            if (tags.hasAlbum && tags.album.length()) t.album = tags.album;
         }
     }
 
     state.now.hasTrack = true;
-    state.now.key = Library::keyFor(t); // filename-derived for now; corrected below once tags are read
+    state.now.key = Library::keyFor(t); // from the final (tag-corrected) names -- lyrics are stored under the same key
     state.now.artist = t.artist;
     state.now.album = t.album;
     state.now.title = t.title;
@@ -189,83 +198,36 @@ void setNowPlaying(Track t) {
     state.now.posSec = 0;
     state.now.playing = true;
     state.now.path = t.path;
-    // See AppState.h's NowPlaying comment -- UI.cpp's tickPlaybackClock()
-    // uses these to notice and skip a track that fails to actually start
-    // decoding (some real files can't play at all, e.g. a FLAC frame too
-    // large for the decoder's fixed buffer, or -- see knownUnsupported
-    // above -- 24-bit samples) instead of silently stalling.
+    state.now.startedAtMs = millis();
     state.now.playbackConfirmed = false;
-    if (knownUnsupported) {
-        // Don't even try -- backdate startedAtMs so UI.cpp's existing
-        // grace-period check (unmodified) treats this as already-expired
-        // on the very next tick, reusing the same non-recursive skip path
-        // as a generic decode failure instead of a special-cased one.
-        // Deliberately NOT a direct playNextInQueue() call here (unlike
-        // the reverted version above) -- this just sets state and returns
-        // normally; the actual skip happens on the NEXT tick, outside
-        // this call stack entirely, so there's no recursion risk even if
-        // every remaining queued track were somehow also 24-bit.
-        state.now.startedAtMs = millis() - UI::kPlaybackStartGraceMs;
-    } else {
-        state.now.startedAtMs = millis();
-        AudioBridge::playSomething(t.path); // real audio starts here, right after the one necessary SD read
+    // Anything still in flight belonged to the previous track.
+    state.scrubPending = false;
+    state.seekSettleUntilMs = 0;
+    state.queueGrabbed = false;
+
+    if (tagLyricsKey.length()) {
+        Library::LYRICS.erase(tagLyricsKey);
+        tagLyricsKey = "";
+    }
+    if (tags.hasLyrics && tags.lyrics.length()) {
+        Library::LYRICS[state.now.key] = splitLyricsIntoLines(tags.lyrics, t.durSec);
+        tagLyricsKey = state.now.key;
     }
 
-    // Flip the screen to the new track NOW, with the filename-derived
-    // title already set above -- not after the slower deferred tag/art
-    // work below. Just setting state.dirty here isn't enough on its own:
-    // this whole function runs synchronously inside one UI::update() call
-    // (InputRouter::update() -> ... -> setNowPlaying()), and Screens::
-    // render() is only called once, at the END of that same UI::update()
-    // -- so without an explicit render() call here, the deferred tag/art
-    // work below (a real SD read + JPEG decode) still fully blocks the
-    // frame before the screen ever gets a chance to show the flag was
-    // set, same as before this fix. Previously state.dirty was only ever
-    // set once, at the very end of this function, so the screen sat on
-    // the OLD track for however long that deferred work took, even though
-    // audio had already started -- the dominant cue a user has for "did
-    // my button press register" is the screen, not audio latency, so this
-    // read as sluggish regardless of how fast playback itself actually
-    // started. Flagged by the user as "just slow, button delay" on LEFT/
-    // RIGHT skip. state.dirty gets set again below once real tags/art
-    // arrive, to pick up any changes in a second, cheap render() call.
+    if (unsupported) {
+        // Not handed to the decoder at all. Whatever was playing is
+        // silenced; UI.cpp's tickPlayback() sees a real track with no
+        // stream behind it and moves on to the next one on the next loop
+        // pass -- outside this call stack, so a queue full of such files
+        // can't recurse.
+        AudioBridge::halt();
+    } else {
+        AudioBridge::playSomething(t.path);
+    }
+
+    AlbumArt::clear(); // never show the previous track's cover under this one
+    artPending = t.path.length() > 0 && !unsupported;
     state.dirty = true;
-    Screens::render();
-
-    // Everything past this point is slower, deferred work -- real
-    // artist/title/album tags, lyrics, embedded cover art. Runs after
-    // playback has already been kicked off above (still runs for a
-    // knownUnsupported file too, matching the original behavior -- it'll
-    // auto-skip on the very next tick regardless).
-    if (t.path.length() > 0) {
-        FlacMeta::Tags tags;
-        if (FlacMeta::readTags(t.path, tags)) {
-            if (tags.hasArtist) { t.artist = tags.artist; state.now.artist = t.artist; }
-            if (tags.hasTitle)  { t.title = tags.title;   state.now.title = t.title; }
-            if (tags.hasAlbum)  { t.album = tags.album;   state.now.album = t.album; }
-            // BUG FIX (found auditing after a real-hardware lyrics regression):
-            // state.now.key was computed ONCE, early, from filename-derived
-            // artist/title (before this block ever runs). If the real tags
-            // above differ at all from the filename guess -- extremely
-            // common -- keyFor(t) here would return a DIFFERENT string than
-            // state.now.key already holds, since t.artist/t.title just
-            // changed. Lyrics would then get stored under a key that
-            // drawLyrics()'s state.now.key lookup can never match, silently
-            // losing lyrics for exactly the tracks whose real tags differ
-            // from their filename. Recompute state.now.key here too, from
-            // the now-tag-updated t, so both stay consistent -- whichever
-            // key this track is ultimately looked up by is the same one
-            // used to store its lyrics.
-            state.now.key = Library::keyFor(t);
-            if (tags.hasLyrics) {
-                Library::LYRICS[state.now.key] = splitLyricsIntoLines(tags.lyrics, t.durSec);
-            }
-        }
-        AlbumArt::loadForTrack(t.path); // no-op-safe if the file has no (or non-JPEG) embedded art
-    } else {
-        AlbumArt::clear(); // placeholder/mock track with no real path -- don't show the previous track's art
-    }
-    state.dirty = true; // picks up any tag/art updates made above
 }
 
 } // namespace
@@ -314,17 +276,41 @@ void buildMainMenu() {
     pushMenu("clickpod", std::move(items));
 }
 
+// Top level of Music. Settings' "Sort tracks by" picks what it lists:
+// "Artist" (default) is Artists -> Albums -> Tracks; "Album" lists every
+// album directly, by album name, with its artist as the sub-label.
 void buildArtistList() {
+    const bool byAlbum = state.sortPref == "Album";
     std::vector<MenuItem> items;
     if (Library::usingIndex()) {
-        // Cheap: a sequential read of the compact index file collecting
-        // just distinct artist names, not the whole library's Track data
-        // -- see Library.h for the full "why" writeup.
-        for (auto &name : Library::indexArtists()) {
+        // Straight from Library's in-RAM catalog -- no SD access.
+        if (byAlbum) {
+            for (auto &al : Library::indexAllAlbums()) {
+                MenuItem it;
+                it.label = al.album;
+                it.icon = "album";
+                it.sub = al.artist;
+                String artist = al.artist, album = al.album;
+                it.action = [artist, album]() { buildTrackListFromIndex(artist, album); };
+                items.push_back(std::move(it));
+            }
+        } else {
+            for (auto &name : Library::indexArtists()) {
+                MenuItem it;
+                it.label = name;
+                it.icon = "artist";
+                it.action = [name]() { buildAlbumListFromIndex(name); };
+                items.push_back(std::move(it));
+            }
+        }
+    } else if (byAlbum) {
+        for (auto &al : Library::ALBUMS) {
             MenuItem it;
-            it.label = name;
-            it.icon = "artist";
-            it.action = [name]() { buildAlbumListFromIndex(name); };
+            it.label = al.album;
+            it.icon = "album";
+            it.sub = al.artist;
+            LibraryAlbum copy = al; // mock set: a handful of small albums
+            it.action = [copy]() { buildTrackList(copy); };
             items.push_back(std::move(it));
         }
     } else {
@@ -822,57 +808,153 @@ void playAlbumFrom(const LibraryAlbum &album, size_t index) {
     playQueueFrom(std::move(list), index);
 }
 
-void playQueueFrom(std::vector<Track> list, size_t index) {
+void playQueueFrom(const std::vector<Track> &list, size_t index) {
     if (index >= list.size()) return;
-    const Track &t = list[index];
-    setNowPlaying(t);
+    // The list IS the context you picked from: everything before the
+    // picked track goes to history (in order), everything after it to the
+    // queue -- so the combined Queue screen can scroll back through the
+    // rest of an album/playlist you started in the middle of, not just
+    // through what has actually been played (thirty-first hardware bug).
+    // `list` is never state.queue/state.history themselves (callers pass
+    // a menu's own track list), so assigning from it here is safe.
     state.queue.assign(list.begin() + index + 1, list.end());
-    // Previously state.history.clear() -- which meant "free navigation"
-    // only ever covered tracks actually PLAYED this session, not the
-    // rest of the list you started in the middle of. Picking track 5 of
-    // a 12-track album left tracks 1-4 completely unreachable (never
-    // played, never queued, just discarded) -- "still can't go back a
-    // song after picking one in the middle" was this: there was nothing
-    // in history to go back TO. The queue IS the context list you picked
-    // from, not a separate thing from it -- everything before the picked
-    // index belongs in history (in original list order) exactly the same
-    // way everything after it belongs in the queue, so scrolling up in
-    // the combined Queue screen reaches the rest of the source list, not
-    // just whatever's been played forward from here.
     state.history.assign(list.begin(), list.begin() + index);
     state.mode = AppMode::NOW_PLAYING;
     state.lastActiveMode = AppMode::NOW_PLAYING;
-    Serial.printf("[ui] play \"%s\"\n", t.title.c_str());
-    state.dirty = true;
+    failStreak = 0;
+    Serial.printf("[ui] play \"%s\"\n", list[index].title.c_str());
+    setNowPlaying(list[index]);
 }
 
 void playNextInQueue() {
     if (state.queue.empty()) {
-        state.now.playing = false;
-        state.dirty = true;
+        // Nothing to move on to. A manual skip on the last track while it
+        // is still really playing just leaves it playing -- flipping the
+        // UI to "paused" here (what this used to do) left the audio
+        // running under a screen that said it wasn't. At a real end of
+        // track there is no stream left, and playback stops.
+        AudioBridge::Status st = AudioBridge::status();
+        bool stillPlaying = state.now.playing && state.now.path.length() > 0 &&
+                            (st == AudioBridge::Status::Playing || st == AudioBridge::Status::Starting);
+        if (!stillPlaying) {
+            state.now.playing = false;
+            state.dirty = true;
+        }
         return;
     }
     if (state.now.hasTrack) state.history.push_back(trackObj(state.now));
-    Track t = state.queue.front();
+    Track t = std::move(state.queue.front());
     state.queue.erase(state.queue.begin());
-    setNowPlaying(t);
-    state.dirty = true;
+    setNowPlaying(std::move(t));
+}
+
+// A real seek of the current track, plus the bookkeeping that keeps the
+// progress bar honest while the decoder catches up (see
+// AppState::seekSettleUntilMs). The ONE place a seek is issued from.
+void seekCurrentTo(uint16_t sec) {
+    state.now.posSec = sec;
+    state.scrubPending = false;
+    if (state.now.path.length() > 0 && AudioBridge::seekTo(sec)) {
+        state.seekTargetSec = sec;
+        state.seekSettleUntilMs = millis() + kSeekSettleMs;
+        if (state.seekSettleUntilMs == 0) state.seekSettleUntilMs = 1; // 0 means "not settling"
+    }
+    state.progressDirty = true;
+}
+
+// Play/pause for the on-screen CENTER tap and the headphones' own
+// buttons alike. "Play" on a track whose stream is gone (it ended with
+// nothing queued after it, or it failed) starts that track over -- the
+// decoder library's own pause/resume would just flip a flag on a closed
+// file.
+void togglePlayPause() {
+    if (!state.now.hasTrack) return;
+    AudioBridge::Status st = AudioBridge::status();
+    if (state.now.playing) {
+        if (st == AudioBridge::Status::Playing) AudioBridge::pauseResume();
+        state.now.playing = false;
+    } else if (st == AudioBridge::Status::Paused) {
+        AudioBridge::pauseResume();
+        state.now.playing = true;
+        // A seek made while paused is only carried out now.
+        if (state.seekSettleUntilMs) state.seekSettleUntilMs = millis() + kSeekSettleMs;
+    } else if (state.now.path.length() > 0 && st != AudioBridge::Status::Playing &&
+               st != AudioBridge::Status::Starting) {
+        failStreak = 0;
+        setNowPlaying(trackObj(state.now)); // sets state.dirty
+        return;
+    } else {
+        state.now.playing = true; // placeholder track: only the simulated clock to restart
+    }
+    if (state.mode == AppMode::NOW_PLAYING) state.controlsDirty = true;
+    else state.dirty = true;
 }
 
 // Classic iPod behavior: a few seconds into the track, "previous" restarts
 // it instead of actually going back -- only jumps to the prior track when
 // pressed again near the very start.
 void skipPrevious() {
+    if (!state.now.hasTrack) return;
     if (state.now.posSec > 3 || state.history.empty()) {
-        state.now.posSec = 0;
-        state.dirty = true;
+        // Restart for real. This used to only zero the displayed position
+        // without telling the decoder, so the next position sync put the
+        // bar straight back where it was -- "previous" did nothing.
+        AudioBridge::Status st = AudioBridge::status();
+        bool streamAlive = st == AudioBridge::Status::Playing || st == AudioBridge::Status::Paused;
+        if (state.now.path.length() > 0 && !streamAlive && st != AudioBridge::Status::Starting) {
+            setNowPlaying(trackObj(state.now)); // stream already gone: start the track over
+        } else {
+            seekCurrentTo(0);
+        }
         return;
     }
     state.queue.insert(state.queue.begin(), trackObj(state.now));
-    Track prev = state.history.back();
+    Track prev = std::move(state.history.back());
     state.history.pop_back();
-    setNowPlaying(prev);
-    state.dirty = true;
+    setNowPlaying(std::move(prev));
+}
+
+// Called once per loop() pass (from UI.cpp). Decodes the current track's
+// cover art once the decoder is settled -- its input buffer filled and
+// audio flowing -- so the SD read and JPEG decode never sit between a
+// button press and the first sound. Skipping quickly through tracks never
+// decodes art for the ones skipped over at all.
+void serviceDeferredWork() {
+    if (!artPending) return;
+    if (state.mode == AppMode::OFF) return; // locked/pocketed: wait until someone can see it
+    if (!AudioBridge::streamSettled() && millis() - state.now.startedAtMs < kArtMaxWaitMs) return;
+    artPending = false;
+    if (AlbumArt::loadForTrack(state.now.path)) state.artDirty = true;
+}
+
+// --- Playback outcome reporting (UI.cpp's tickPlayback()) ---
+
+void notePlaybackProgress() { failStreak = 0; }
+
+// The current track failed: could not be opened, or stopped without ever
+// producing audio. Moves on, unless that keeps happening -- see failStreak.
+void handleTrackFailure(const char *reason, bool countTowardsStreak) {
+    if (reason) {
+        Serial.printf("[audio] \"%s\": %s -- skipping\n", state.now.title.c_str(), reason);
+        Library::logFailedFile(state.now.path, reason);
+    }
+    if (countTowardsStreak && ++failStreak >= kMaxFailStreak) {
+        Serial.printf("[audio] %d tracks in a row failed to play -- stopping here instead of running "
+                      "through the rest of the queue (is the SD card OK?)\n",
+                      failStreak);
+        failStreak = 0;
+        AudioBridge::halt();
+        state.now.playing = false;
+        state.dirty = true;
+        return;
+    }
+    if (state.queue.empty()) {
+        AudioBridge::halt();
+        state.now.playing = false;
+        state.dirty = true;
+        return;
+    }
+    playNextInQueue();
 }
 
 void playFromQueueIndex(int idx) {
@@ -992,8 +1074,14 @@ void enterBluetooth() {
     // popping the menu stack doesn't work if they entered from
     // NOW_PLAYING/LYRICS/QUEUE, and doesn't work from MENU either since
     // this replaces the stack outright.
+    // The stack is MOVED into btReturn, not copied -- it can hold a
+    // several-hundred-row track list, and copying that (rows, strings,
+    // closures and all) on every entry and twice more on exit was a
+    // multi-thousand-allocation stall for nothing.
     if (state.mode != AppMode::BT) {
-        state.btReturn = MenuReturn{true, state.mode, state.menuStack};
+        state.btReturn.valid = true;
+        state.btReturn.mode = state.mode;
+        state.btReturn.stack = std::move(state.menuStack);
     }
     state.mode = AppMode::BT;
 
@@ -1058,9 +1146,9 @@ void enterBluetooth() {
         // blocking call -- same established pattern, not a new one.
         Screens::showBusyMessage("Stopping Bluetooth...");
         BluetoothSource::end();
+        BluetoothSource::stopDiscovery(); // in case only the picker's scan had the stack up
         state.btOn = false;
         state.btConnectedTo = "";
-        Persist::save();
         exitBluetooth();
     };
 
@@ -1070,9 +1158,14 @@ void enterBluetooth() {
 }
 
 void exitBluetooth() {
-    MenuReturn back = state.btReturn.valid ? state.btReturn : MenuReturn{true, AppMode::MENU, {}};
-    state.mode = back.mode;
-    state.menuStack = back.stack;
+    if (state.btReturn.valid) {
+        state.mode = state.btReturn.mode;
+        state.menuStack = std::move(state.btReturn.stack);
+    } else {
+        state.mode = AppMode::MENU;
+        state.menuStack.clear();
+    }
+    state.btReturn = MenuReturn{};
     if (state.mode == AppMode::MENU && state.menuStack.empty()) buildMainMenu();
     state.dirty = true;
 }
@@ -1113,6 +1206,14 @@ void refreshBluetoothDevicesMenu() {
 }
 
 void enterBluetoothDevicePicker() {
+    // A scan can't share the radio with a session that is connected or
+    // still looking for its device -- startDiscovery() would just refuse,
+    // and this screen would sit on "Scanning..." forever. Picking a
+    // different device means ending the current session first.
+    if (BluetoothSource::isRunning()) {
+        Screens::showBusyMessage("Stopping Bluetooth...");
+        BluetoothSource::end();
+    }
     BluetoothSource::startDiscovery();
     std::vector<MenuItem> items(1);
     items[0].label = "Scanning...";
@@ -1134,11 +1235,18 @@ void chooseBluetoothDevice(const String &name) {
 // Playing, or on a Queue entry. Same return-to-where-you-were pattern as
 // Bluetooth above.
 void openTrackMenu(const Track &track) {
-    state.trackMenuReturn = MenuReturn{true, state.mode, state.menuStack};
+    // Copied FIRST: `track` is usually a reference to a row inside
+    // state.menuStack, which is about to be moved away and replaced.
+    // (The old code used track.title after clearing the stack -- a read
+    // of freed memory.)
+    Track t = track;
+    // Moved, not copied -- see enterBluetooth().
+    state.trackMenuReturn.valid = true;
+    state.trackMenuReturn.mode = state.mode;
+    state.trackMenuReturn.stack = std::move(state.menuStack);
     state.mode = AppMode::TRACK_MENU;
 
     std::vector<MenuItem> items(4);
-    Track t = track;
     items[0].label = "Play Next";
     items[0].action = [t]() {
         state.queue.insert(state.queue.begin(), t);
@@ -1227,14 +1335,19 @@ void openTrackMenu(const Track &track) {
     items[3].action = []() { closeTrackMenu(); };
 
     state.menuStack.clear();
-    pushMenu(track.title, std::move(items));
+    pushMenu(t.title, std::move(items));
     state.dirty = true;
 }
 
 void closeTrackMenu() {
-    MenuReturn back = state.trackMenuReturn.valid ? state.trackMenuReturn : MenuReturn{true, AppMode::MENU, {}};
-    state.mode = back.mode;
-    state.menuStack = back.stack;
+    if (state.trackMenuReturn.valid) {
+        state.mode = state.trackMenuReturn.mode;
+        state.menuStack = std::move(state.trackMenuReturn.stack);
+    } else {
+        state.mode = AppMode::MENU;
+        state.menuStack.clear();
+    }
+    state.trackMenuReturn = MenuReturn{};
     if (state.mode == AppMode::MENU && state.menuStack.empty()) buildMainMenu();
     state.dirty = true;
 }
@@ -1246,13 +1359,9 @@ void moveSelection(int delta) {
     int prev = m->selected;
     m->selected = ((m->selected + delta) % n + n) % n;
     if (prev == m->selected) return;
-    // The main-menu grid's partial-redraw path isn't implemented (only 4
-    // items, full redraw there is already cheap) -- everywhere else
-    // (Music/Playlists/Artist/Album/Settings/BT/track-context lists) gets
-    // the lighter selectionDirty path instead of a full-body redraw on
-    // every single UP/DOWN tap.
-    if (isMainMenuRoot()) state.dirty = true;
-    else state.selectionDirty = true;
+    // Light redraw: just the old and the new selected row/tile. Screens
+    // falls back to a full redraw by itself when the list has to scroll.
+    state.selectionDirty = true;
 }
 
 // Moves the cursor across the COMBINED [history | now | queue] list (see
@@ -1265,7 +1374,7 @@ void moveQueueSelection(int delta) {
     int n = (int)state.history.size() + (state.now.hasTrack ? 1 : 0) + (int)state.queue.size();
     if (n <= 0) return;
     state.queueSelected = ((state.queueSelected + delta) % n + n) % n;
-    state.dirty = true;
+    state.selectionDirty = true; // just the two rows involved -- Screens falls back to a full redraw if it has to scroll
 }
 
 // While a row is "grabbed" (see the RIGHT-tap toggle in InputRouter,
@@ -1314,7 +1423,7 @@ void moveGrabbedQueueItem(int delta) {
         std::swap(state.queue[from], state.queue[to]);
         state.queueSelected = queueStart + to;
     }
-    state.dirty = true;
+    state.selectionDirty = true; // the two swapped rows are exactly the old and new selection
 }
 
 void adjustSlider(MenuItem &item, int delta) {
@@ -1323,7 +1432,7 @@ void adjustSlider(MenuItem &item, int delta) {
     // (e.g. Settings' Time zone) ignore this entirely -- liveSub() prefers
     // subFn over this plain `sub` field.
     item.sub = String(item.getInt()) + "%";
-    state.dirty = true;
+    state.selectionDirty = true; // only this row's sub-label changed
 }
 
 void cycleChoice(MenuItem &item, int dir) {
