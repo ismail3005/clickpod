@@ -5026,6 +5026,72 @@ comments describing Bluetooth as a "440Hz test tone".
   first; (7) `[time]` lines hours apart, not minutes; (8) the three
   `[diag]` buttons, then delete that block.
 
+## First bench session after the audit round (2026-11): flashed OK, input hardware still flaky -- NOT a firmware bug as far as known
+
+**Flashed and booted the audit-round firmware (`750f80b`) for the first
+time.** Build/upload worked from WSL (`pio run -t upload --upload-port
+/dev/ttyUSB0`, platform now resolves to espressif32 6.13.0, fork at
+`8e5faad`). The user's checkout was initially several commits behind (old
+fork sha `27dccf3`, platform 7.1.3) -- always check `git log` and the
+`pio run` header (platform 6.x, `ESP32-audioI2S ... sha.8e5faad`) before
+trusting a test. Tips that came out of it: the project lives on the
+Windows drive (`/mnt/c/...`), which makes WSL builds very slow and gave a
+fake "40 files modified" line-ending diff (`git config core.autocrlf
+false`, stash+pull fixed it); cloning into `~/clickpod` inside WSL is
+faster. No SD card was inserted this session (user's call, until the
+hardware works), so **none of the SD-dependent changes have run yet**: the
+one-time ~20s CPX2 index rebuild, real library, WiFi credentials
+(`0 known credential(s)` in the log is just the missing card), real
+playback, scrubbing, Bluetooth audio. `[ui] play "Runoff"` was the mock
+placeholder library.
+
+**What was found on the board (all hardware, found with a multimeter):**
+- GPIO13 (LEFT) and GPIO14 (UP) had no pull-up soldered -- both read ~0V.
+  GPIO13 fixed. GPIO14 then read a resistive/intermittent short to GND
+  (~1.7k, sometimes open, sometimes instant beep after a reflow); at one
+  point it read a steady 3.3V by itself, then dropped again. Not resolved
+  when the session ended. Fallback if it can't be cleared: wire UP to the
+  free input-only GPIO36 with its own 10k pull-up and change
+  `PIN_ANO_BTN_UP` in `Pins.h` (not done).
+- The display flipped to a blank white screen when the board/screen was
+  touched: a bad joint on the display wiring (power/RST/header). Reflowed
+  by the user; the nonstop `[diag] GPIO35(DOWN) -> LOW` spam stopped at the
+  same time without touching GPIO35 -- most likely a weak shared ground/
+  power joint, unconfirmed.
+- `[diag]` only prints on a level change, so a flood of lines with nobody
+  pressing means the pin is oscillating (GPIO35 did, earlier GPIO34/39 too).
+
+**Open, as of close-of-session -- ANO board behaviour (user's own words,
+logged as asked):**
+- Pressing DOWN also fires RIGHT (two lines move together -- a bridge
+  between the DOWN/RIGHT lines, most likely on the ANO board's own
+  header/pads or the two wires).
+- Turning the scroll wheel (either direction) makes the menu scroll up and
+  down indefinitely between two entries, regardless of direction, and
+  sometimes makes the screen go white. The direction-independent behaviour
+  is what you get when encoder A and B (GPIO32/33) are electrically tied
+  together or one is floating -- the quadrature decoder never sees a
+  valid forward or reverse sequence. This looks like the same family of
+  wiring fault (user suspects shorts between ANO pins and the GPIO14 short
+  to GND), NOT a decoder bug: `AnoInput.cpp`'s encoder path was untouched
+  apart from the already-hardware-confirmed direction inversion, and it
+  worked before the perfboard rebuild. Deliberately not "fixed" in
+  software: filtering a shorted encoder would hide a hardware fault.
+- Suggested next bench steps (nothing here needs firmware): unpowered
+  continuity between ALL the ANO header pins (esp. SW2/SW3 and ENCA/ENCB),
+  and from each to GND/3V3, while pressing and turning the wheel; inspect
+  and reflow the ANO header joints; check the ANO GND/3V3 wire joints; run
+  the monitor while reproducing the white screen and look for a `rst:`/
+  `Brownout` line (a reboot means a power/ground dip, none means only the
+  display lost its link). Then SD in, first boot (index rebuild), and the
+  first-flash checklist in the audit-round section.
+- The temporary `[diag]` block in `AnoInput.cpp` is still in; remove it
+  once DOWN/RIGHT/CENTER (and the rest) are confirmed independent.
+- The unexplained repeated `ld)` / half-printed `[time] scan found...`
+  fragments at the top of the monitor output were never explained
+  (possibly the same power/ground noise, possibly just the monitor
+  attaching mid-stream); recheck from a clean RST once the board is stable.
+
 ## Working style this project has used (carry forward)
 
 - User is terse and direct; they'll correct behavior that doesn't match
