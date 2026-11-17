@@ -5085,6 +5085,13 @@ logged as asked):**
   `Brownout` line (a reboot means a power/ground dip, none means only the
   display lost its link). Then SD in, first boot (index rebuild), and the
   first-flash checklist in the audit-round section.
+- **Serial monitor was slow/odd under WSL** (needed RST + Ctrl+C dances, filled with
+  garbage, didn't survive RST). Most likely causes, not all confirmed: the
+  `esp32_exception_decoder` filter's slow start-up on `/mnt/c` (now off by default in
+  `platformio.ini`; enable on demand with `-f esp32_exception_decoder`), DTR/RTS toggling
+  on port open (`monitor_rts/dtr = 0` set), and usbipd buffering the `[diag]` flood. The
+  more reliable setup is the monitor from Windows directly (COM port, no `usbipd`):
+  `usbipd detach` first, then `pio device monitor` in a Windows terminal.
 - The temporary `[diag]` block in `AnoInput.cpp` is still in; remove it
   once DOWN/RIGHT/CENTER (and the rest) are confirmed independent.
 - The unexplained repeated `ld)` / half-printed `[time] scan found...`
